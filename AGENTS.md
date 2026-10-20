@@ -14,9 +14,9 @@
 逐项检查，缺哪项就先补哪项：
 
 1. **macOS**（Apple Silicon 或 Intel 均可）
-2. **Clash Verge** 已安装且代理可用（配置目录应存在于 `~/Library/Application Support/io.github.clash-verge-rev.clash-verge-rev/`）
+2. **Shadowrocket** 已安装并已连接（`scutil --nc list` 中应出现 `com.liguangming.Shadowrocket` 且状态为 `(Connected)`，TUN 已接管：`ifconfig | grep 'inet 198.18.'`）
 3. **Claude 桌面版** 在 `/Applications/Claude.app`
-4. **python3** 可用（`python3 --version` 能输出版本号；没有则引导用户运行 `xcode-select --install`）
+4. **python3 与 swiftc** 可用（`xcode-select --install` 可一并补齐）
 5. **当前出口 IP 必须已经是美国**——先跑 `curl -s https://www.cloudflare.com/cdn-cgi/trace | grep loc=`，返回 `loc=US` 才能继续。不是美国就停下，让用户先把代理调好（安装程序会按出口 IP 锁定时区，裸连时装机会把时区锁错）
 
 ## 安装步骤
@@ -24,16 +24,15 @@
 首选引导用户运行安装器（双击 `installer/安装.command`，或终端执行它）。如果安装器环境受限，按下面的手动等效步骤执行：
 
 1. 把 `core/claude-switch.sh` 复制为 `~/.local/bin/claude-switch.sh`（可执行），把 `core/stun-probe.py` 放到 `~/.claude-switcher/`
-2. 从 Clash 配置自动识别代理组名：在 `clash-verge.yaml` 的 `proxy-groups:` 下找第一个 `type: select` 的组名，写进脚本顶部的 `PROXY_GROUP="..."`
-3. 按出口 IP 城市确定锁定时区（`curl -s ipinfo.io/json` 的 timezone 字段），写进脚本顶部 `TZ_TARGET="..."`
-4. 参照 `daemons/` 目录的模板，生成保镖与时区看门狗脚本（把 `__HOME__` / `__TZ_TARGET__` 替换为实际值），并安装对应的 launchd 服务到 `/Library/LaunchDaemons/`（需要 sudo）
-5. 编译界面 App（需要 Xcode 命令行工具）：
+2. 按出口 IP 城市确定锁定时区（`curl -s ipinfo.io/json` 的 timezone 字段），写进脚本顶部 `TZ_TARGET="..."`
+3. 参照 `daemons/` 目录的模板，生成保镖与时区看门狗脚本（把 `__HOME__` / `__TZ_TARGET__` 替换为实际值），并安装对应的 launchd 服务到 `/Library/LaunchDaemons/`（需要 sudo）
+4. 编译界面 App（需要 Xcode 命令行工具）：
    ```bash
    swiftc -O -parse-as-library app/main.swift -o Claude切换器.app/Contents/MacOS/ClaudeSwitcher -framework SwiftUI -framework AppKit
    ```
    图标已在 `assets/` 里，打进 `Contents/Resources/AppIcon.icns` 并在 `Info.plist` 声明 `CFBundleIconFile`
-6. 把 `installer/` 里的置顶规则写入 Clash Verge 的「全局扩展配置」(Merge.yaml)，重启 Clash Verge 使生效
-7. 时区与 IPv6：`systemsetup -settimezone <TZ_TARGET>`、`networksetup -setv6off Wi-Fi`（需管理员）
+5. **不要改写 Shadowrocket 配置**。路由覆盖是行为检测：`claude.ai` / `api.anthropic.com` / `claudeusercontent.com` 解析到 `198.18.x.x` 即通过；否则提示用户自己在 Shadowrocket 里加 `DOMAIN-SUFFIX` 规则
+6. 时区与 IPv6：`systemsetup -settimezone <TZ_TARGET>`、`networksetup -setv6off Wi-Fi`（需管理员）
 
 ## 验收标准（全部满足才算装完）
 
@@ -46,9 +45,9 @@
 
 | 症状 | 根因 | 处理 |
 |---|---|---|
-| TUN 网卡消失、出口变回国内 | **Clash Verge 更新/异常重启会把 `enable_tun_mode` 重置为 false**（生产环境已发生 4 次） | 退出 App → 改 `verge.yaml` 为 true → 重启 App。切换器的一键修复已内置此逻辑 |
+| TUN 网卡消失、出口变回国内 | Shadowrocket 断开或系统 VPN 配置被重置 | 打开 Shadowrocket 重新连接；确认 `scutil --nc status Shadowrocket` 为 Connected 且存在 `198.18.x.x`。切换器只做检测，不会重启 Shadowrocket |
 | 时区总是自己变回去 | macOS 自动时区或未知程序改动（生产环境已抓 8 次） | 看门狗会自动回滚；查 `~/Library/Logs/tz-watchdog.log` 留痕 |
-| 检查结果显示 0/11、数据为空 | 中文日志被 `cut -c` 按字节截断产生非法 UTF-8，Swift 严格解码整体失败 | 脚本必须 `export LC_ALL=en_US.UTF-8`；界面端用容错解码 `String(decoding:as:)` |
+| 检查结果显示 0/14、数据为空 | 中文日志被 `cut -c` 按字节截断产生非法 UTF-8，Swift 严格解码整体失败 | 脚本必须 `export LC_ALL=en_US.UTF-8`；界面端用容错解码 `String(decoding:as:)` |
 | 修改 App 后界面没变化 | 旧进程没死：App 关窗不退 + `pkill` 匹配中文路径会因 Unicode NFD 编码失配而静默失败 | 用 `pkill -x ClaudeSwitcher`（按进程名）；App 必须实现 `applicationShouldTerminateAfterLastWindowClosed` |
 | headless Chrome 做 WebRTC 检测无结果 | headless 模式 ICE 子系统不产出候选 | 不要走浏览器路线，用本项目的纯 Python STUN 探针 |
 | 代理节点报错但流量没泄漏 | 节点被重置时隧道内请求失败≠泄漏；Fail-Closed 下流量只断不绕 | 换线路即可 |

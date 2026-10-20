@@ -45,7 +45,7 @@ AI 服务平台的风控已经从"看 IP"进化到**全维度环境画像**：�
 | 08 | DNS 隧道 | Fake-IP 校验，杜绝明文 DNS 泄漏 |
 | 09 | WebRTC | 多节点 STUN 交叉探测（详见第 2 节） |
 | 10 | 保镖守护进程 | Kill-Switch 是否在线（详见第 3 节） |
-| 11 | 置顶路由规则 | 生态域名是否被强制走代理（详见第 6 节） |
+| 11 | 路由覆盖 | Claude 全家族域名是否真的命中了代理规则（详见第 6 节） |
 | 12 | 客户端语言 | 防止 JS 层 `navigator.language` / `Intl` 读出系统中文 |
 | 13 | ASN 属性 | 住宅宽带 vs 机房 IP（Residential vs Datacenter） |
 | 14 | 生态可达性 | claude.ai / api.anthropic.com 连通性验证 |
@@ -68,9 +68,9 @@ AI 服务平台的风控已经从"看 IP"进化到**全维度环境画像**：�
 
 软件更新会静默重置你的安全配置（我们的生产环境里，TUN 开关被代理客户端更新重置了 4 次，系统时区被改回 8 次）。Watchdog 周期巡检 + 基线回滚 + 全程留痕，配置漂移从"事故"降级为"日志里的一行记录"。
 
-### 6. Pinned Routing 置顶路由
+### 6. Route Coverage 路由覆盖
 
-目标服务全家族域名及其生态依赖（Turnstile 人机验证 / Telemetry / Payment / Support）置顶锁定代理路由，优先级高于任何第三方分流规则集——不信任、不验证、直接免疫规则库误判。
+不读配置文件、只验行为：Claude 全家族域名（claude.ai / api.anthropic.com / claudeusercontent.com）必须解析到 Shadowrocket 的 Fake-IP。拿到 Fake-IP 就证明命中代理规则；拿到真实 IP 就判定路由未覆盖。配置文本可以撒谎，DNS 结果不会。
 
 ## 实战战绩
 
@@ -89,13 +89,14 @@ AI 服务平台的风控已经从"看 IP"进化到**全维度环境画像**：�
 
 ## 安装
 
-**系统要求**：macOS · [Clash Verge](https://github.com/clash-verge-rev/clash-verge-rev)（TUN 可用）· Claude 桌面版 · python3
+**系统要求**：macOS · [Shadowrocket](https://apps.apple.com/app/shadowrocket/id932747118)（VPN 已连接、TUN/Fake-IP 生效）· Claude 桌面版 · python3 · Xcode 命令行工具（编译界面）
 
+> **macOS 版已适配 Shadowrocket**：安装器不再依赖 Clash Verge，也不会改写代理配置（Windows / Linux 目录仍基于 Clash Verge）。
 > **Windows 用户**：[`windows/`](windows/) 目录提供 Windows 版（PowerShell + WPF，Beta），安装与注意事项见 [windows/README.md](windows/README.md)。
 > **Linux 用户**：[`linux/`](linux/) 目录提供 Linux 版（bash + systemd，Beta），设计取舍（无官方桌面版→切换浏览器登录态）见 [linux/README.md](linux/README.md)。
 
 ```bash
-# 克隆后双击 installer/安装.command 即可,自动识别代理组名与时区
+# 克隆后双击 installer/安装.command 即可,自动识别时区并现场编译界面
 git clone https://github.com/YOURSJEYO/claude-switcher.git
 ```
 
@@ -149,7 +150,7 @@ git clone https://github.com/YOURSJEYO/claude-switcher.git
 - [ ] Linux 版稳定化：多发行版实测迭代
 - [ ] Web 版环境检测页：手机/平板浏览器打开即测，零安装
 - [ ] 更多指纹维度：字体地区特征、Canvas/WebGL 渲染特征
-- [ ] 更多代理客户端适配：Surge / sing-box / ClashX
+- [ ] 更多代理客户端适配：Clash Verge / Surge / sing-box / ClashX
 - [ ] 快照切换提速：增量归档（只写差量）
 - [ ] 应用内自动更新
 

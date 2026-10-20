@@ -17,17 +17,20 @@ enum Phase { case checking, ready, failed, switching, done, fixing }
 
 final class VM: ObservableObject {
     @Published var rows: [CheckRow] = [
-        CheckRow(name: "代理内核", icon: "cpu"),
+        CheckRow(name: "代理状态", icon: "cpu"),
         CheckRow(name: "TUN 网卡", icon: "cable.connector"),
         CheckRow(name: "出口 IP", icon: "globe.americas"),
         CheckRow(name: "IP 与上次一致", icon: "checkmark.seal"),
-        CheckRow(name: "时区(纽约)", icon: "clock"),
+        CheckRow(name: "时区锁定", icon: "clock"),
         CheckRow(name: "地区(美国)", icon: "flag"),
         CheckRow(name: "IPv6 关闭", icon: "6.circle"),
         CheckRow(name: "DNS 走隧道", icon: "magnifyingglass"),
         CheckRow(name: "WebRTC", icon: "eye.slash"),
         CheckRow(name: "保镖在线", icon: "hand.raised"),
-        CheckRow(name: "规则置顶", icon: "list.number"),
+        CheckRow(name: "路由覆盖", icon: "list.number"),
+        CheckRow(name: "客户端语言", icon: "character.bubble"),
+        CheckRow(name: "ASN 属性", icon: "network"),
+        CheckRow(name: "生态可达性", icon: "antenna.radiowaves.left.and.right"),
     ]
     @Published var phase: Phase = .checking
     @Published var current = "?"
@@ -91,10 +94,11 @@ final class VM: ObservableObject {
             var allOk = true
             var matched = 0
             let keyMap: [String: String] = [
-                "代理内核": "代理内核", "TUN网卡": "TUN 网卡", "出口IP": "出口 IP",
-                "IP一致": "IP 与上次一致", "时区": "时区(纽约)", "地区": "地区(美国)",
+                "代理状态": "代理状态", "TUN网卡": "TUN 网卡", "出口IP": "出口 IP",
+                "IP一致": "IP 与上次一致", "时区": "时区锁定", "地区": "地区(美国)",
                 "IPv6": "IPv6 关闭", "DNS": "DNS 走隧道", "WebRTC": "WebRTC",
-                "保镖": "保镖在线", "规则置顶": "规则置顶",
+                "保镖": "保镖在线", "路由覆盖": "路由覆盖",
+                "客户端语言": "客户端语言", "ASN属性": "ASN 属性", "生态可达性": "生态可达性",
             ]
             for line in out.split(separator: "\n") {
                 let parts = line.split(separator: "=", maxSplits: 1).map(String.init)
@@ -181,7 +185,7 @@ struct ContentView: View {
             }
             .padding(20)
         }
-        .frame(width: 440, height: 740)
+        .frame(width: 440, height: 820)
         .onAppear { vm.refresh() }
     }
 
@@ -374,11 +378,11 @@ struct NoticeView: View {
 
     let sections: [(String, String)] = [
         ("Full-Tunnel 全流量接管", "基于 TUN 虚拟网卡的内核级流量劫持，配合 Fake-IP DNS 解析机制，包括 UDP 在内的全部出站流量在网络栈底层被强制路由至加密隧道，应用层无法旁路。"),
-        ("Environment Audit 环境一致性审计", "每次启动前执行 11 项环境指纹审计：Egress IP 归属地与 ASN 属性、时区与 Geo-location 一致性、Locale、IPv6 双栈旁路、DNS Leak、WebRTC/STUN 多节点交叉探测等。任一指标不达标即 Block-on-Fail，杜绝带病启动。"),
+        ("Environment Audit 环境一致性审计", "每次启动前执行 14 项环境指纹审计：Egress IP 归属地与 ASN 属性、时区与 Geo-location 一致性、Locale、IPv6 双栈旁路、DNS Leak、WebRTC/STUN 多节点交叉探测等。任一指标不达标即 Block-on-Fail，杜绝带病启动。"),
         ("Kill-Switch 断网急停", "常驻守护进程以 10 秒周期巡检隧道健康度，隧道中断即刻终止受保护进程，确保没有任何数据包经物理网卡直连——Zero-Egress Guarantee。"),
-        ("Pinned Routing 域名置顶路由", "目标服务全家族域名及其生态依赖（Turnstile 人机验证、Telemetry 遥测、Payment 支付、Support 组件）置顶锁定代理路由，优先级高于任何第三方分流规则集，免疫规则库误判。"),
+        ("Route Coverage 路由覆盖", "用行为验证代替配置文本：Claude 全家族域名必须解析为 Shadowrocket 的 Fake-IP，证明其命中了代理规则；任一域名拿到真实 IP 即判定路由未覆盖。"),
         ("Session Isolation 会话隔离快照", "多账号采用完整快照隔离：各账号持有独立的 Device Fingerprint、OAuth Credential 与本地状态，切换即物理交换数据卷，账号间零交叉污染。"),
-        ("Drift Self-Healing 配置漂移自愈", "针对系统时区漂移、代理组件升级导致的配置重置等常见问题，内置 Watchdog 周期性校验并自动回滚至基线状态，全程留痕、可审计。"),
+        ("Drift Self-Healing 配置漂移自愈", "针对系统时区漂移、代理组件异常退出等常见问题，内置 Watchdog 周期性校验并自动回滚至基线状态，全程留痕、可审计。"),
         ("Anti-Tracking 反追踪卫生", "验证链接（Magic Link）闭环于受保护环境内打开；邮件追踪像素（Tracking Pixel）经由邮箱服务商代理层屏蔽；全程固定单一住宅出口，不产生 Geo 跳变。"),
     ]
 
