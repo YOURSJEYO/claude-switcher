@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import Combine
 
 // MARK: - 模型
 
@@ -14,6 +15,26 @@ struct CheckRow: Identifiable {
 }
 
 enum Phase { case checking, ready, failed, switching, done, fixing }
+enum NetStatus { case checking, safe, warn, danger }
+
+enum EnvironmentTemplate: String, CaseIterable, Identifiable {
+    case us = "US", taiwan = "TW", singapore = "SG"
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .us: return "美国"
+        case .taiwan: return "台湾"
+        case .singapore: return "新加坡"
+        }
+    }
+    var settings: String {
+        switch self {
+        case .us: return "洛杉矶时区 · 美国地区格式"
+        case .taiwan: return "台北时区 · 台湾地区格式"
+        case .singapore: return "新加坡时区 · 新加坡地区格式"
+        }
+    }
+}
 
 final class VM: ObservableObject {
     @Published var rows: [CheckRow] = [
@@ -21,21 +42,65 @@ final class VM: ObservableObject {
         CheckRow(name: "TUN 网卡", icon: "cable.connector"),
         CheckRow(name: "出口 IP", icon: "globe.americas"),
         CheckRow(name: "IP 与上次一致", icon: "checkmark.seal"),
-        CheckRow(name: "时区(纽约)", icon: "clock"),
-        CheckRow(name: "地区(美国)", icon: "flag"),
+        CheckRow(name: "时区一致", icon: "clock"),
+        CheckRow(name: "地区一致", icon: "flag"),
         CheckRow(name: "IPv6 关闭", icon: "6.circle"),
         CheckRow(name: "DNS 走隧道", icon: "magnifyingglass"),
         CheckRow(name: "WebRTC", icon: "eye.slash"),
         CheckRow(name: "保镖在线", icon: "hand.raised"),
         CheckRow(name: "规则置顶", icon: "list.number"),
+        CheckRow(name: "客户端语言", icon: "character.bubble"),
+        CheckRow(name: "ASN 属性", icon: "network"),
+        CheckRow(name: "生态可达性", icon: "link"),
     ]
     @Published var phase: Phase = .checking
     @Published var current = "?"
     @Published var hasB = false
     @Published var banner = ""
     @Published var note = ""
+    @Published var netStatus: NetStatus = .checking
+    var lastCheckAt = Date.distantPast
+    var hasData = false
+    @Published private(set) var isChecking = false
+    @Published var selectedTemplate: EnvironmentTemplate = .taiwan
+    @Published private(set) var currentTemplate: EnvironmentTemplate?
+    @Published private(set) var templatePinned = false
+    @Published private(set) var templateMessage = ""
+    @Published private(set) var templateError = false
+    @Published private(set) var isApplyingTemplate = false
 
-    let core = NSHomeDirectory() + "/.local/bin/claude-switch.sh"
+    var isBusy: Bool { isChecking || phase == .fixing || phase == .switching }
+
+    let core: String
+
+    init(core: String = NSHomeDirectory() + "/.local/bin/claude-switch.sh", monitoring: Bool = true) {
+        self.core = core
+        guard monitoring else { return }
+        // 菜单栏图标状态轮询: 10s 快检隧道, 60s 静默全量审计
+        Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in self?.fastCheck() }
+        Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in self?.quietCheck() }
+        quietCheck()
+    }
+
+    // 快检: 内核+TUN 掉线立刻转红
+    private func fastCheck() {
+        DispatchQueue.global(qos: .utility).async {
+            let p = Process()
+            p.launchPath = "/bin/bash"
+            p.arguments = ["-c", "pgrep -f verge-mihomo >/dev/null 2>&1 && ifconfig 2>/dev/null | grep -q 'inet 198\\.18\\.'"]
+            p.standardOutput = FileHandle.nullDevice
+            p.standardError = FileHandle.nullDevice
+            p.launch()
+            p.waitUntilExit()
+            let down = p.terminationStatus != 0
+            DispatchQueue.main.async { if down { self.netStatus = .danger } }
+        }
+    }
+
+    // 后台与手动检查共用结果，后台保留旧行直到新结果到达。
+    private func quietCheck() {
+        refresh(background: true)
+    }
 
     func run(_ args: [String], timeout: TimeInterval = 45, done: @escaping (String) -> Void) {
         DispatchQueue.global(qos: .userInitiated).async {
@@ -54,7 +119,10 @@ final class VM: ObservableObject {
                 if p.isRunning { timedOut = true; p.terminate() }
             }
             DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: watchdog)
-            do { try p.launch() } catch {
+            do { try p.run() } catch {
+                watchdog.cancel()
+                if let fh = p.standardOutput as? FileHandle { try? fh.close() }
+                try? FileManager.default.removeItem(atPath: tmp)
                 DispatchQueue.main.async { done("FAIL:无法启动脚本 \(error.localizedDescription)") }
                 return
             }
@@ -76,66 +144,121 @@ final class VM: ObservableObject {
         }
     }
 
-    func refresh() {
-        phase = .checking
+    // 距上次检查超过 maxAge 才自动重跑; 手动按钮随时可调 refresh()
+    func refreshIfStale(maxAge: TimeInterval = 60) {
+        if !hasData || Date().timeIntervalSince(lastCheckAt) > maxAge { refresh() }
+    }
+
+    func refresh(background: Bool = false) {
+        guard !isChecking, phase != .fixing, phase != .switching else { return }
+        isChecking = true
         banner = ""
         note = ""
-        for i in rows.indices { rows[i].state = .pending; rows[i].detail = "" }
-        run(["checkdetail"]) { out in
-            // 输出为空时回退到脚本落盘的结果文件(双保险)
-            var raw = out
-            if raw.isEmpty, let diskData = try? Data(contentsOf: URL(fileURLWithPath: NSHomeDirectory() + "/.claude-switcher/last-check.txt")), !diskData.isEmpty {
-                raw = String(decoding: diskData, as: UTF8.self)
-            }
-            let out = raw
-            var allOk = true
-            var matched = 0
-            let keyMap: [String: String] = [
-                "代理内核": "代理内核", "TUN网卡": "TUN 网卡", "出口IP": "出口 IP",
-                "IP一致": "IP 与上次一致", "时区": "时区(纽约)", "地区": "地区(美国)",
-                "IPv6": "IPv6 关闭", "DNS": "DNS 走隧道", "WebRTC": "WebRTC",
-                "保镖": "保镖在线", "规则置顶": "规则置顶",
-            ]
-            for line in out.split(separator: "\n") {
-                let parts = line.split(separator: "=", maxSplits: 1).map(String.init)
-                guard parts.count == 2 else { continue }
-                let rhs = parts[1]
-                let status = rhs.split(separator: ":", maxSplits: 1).map(String.init)
-                let code = status[0]
-                let detail = status.count > 1 ? status[1] : ""
-                guard let rowName = keyMap[parts[0]], let idx = self.rows.firstIndex(where: { $0.name == rowName }) else { continue }
-                matched += 1
-                switch code {
-                case "ok": self.rows[idx].state = .ok
-                case "warn": self.rows[idx].state = .warn
-                default: self.rows[idx].state = .fail; allOk = false
-                }
-                self.rows[idx].detail = detail
-            }
+        if !background || !hasData {
+            phase = .checking
+            netStatus = .checking
+            for i in rows.indices { rows[i].state = .pending; rows[i].detail = "" }
+        }
+        run(["checkdetail"], timeout: 60) { out in
+            self.applyCheckOutput(out)
             self.run(["status"]) { st in
-                self.current = st.contains("current=B") ? "B" : (st.contains("current=A") ? "A" : "未初始化")
-                self.hasB = st.contains("hasB=1")
-                if matched < self.rows.count {
-                    self.banner = "检测输出不完整(\(matched)/\(self.rows.count))，请点重新检查"
-                    self.phase = .failed
-                } else {
-                    self.phase = allOk ? .ready : .failed
-                }
+                self.applyStatusOutput(st)
+                self.isChecking = false
             }
         }
     }
 
+    func applyStatusOutput(_ out: String) {
+        let fields = out.split(whereSeparator: { $0.isWhitespace }).reduce(into: [String: String]()) { result, word in
+            let pair = word.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+            if pair.count == 2 { result[String(pair[0])] = String(pair[1]) }
+        }
+        current = fields["current"] == "B" ? "B" : (fields["current"] == "A" ? "A" : "未初始化")
+        hasB = fields["hasB"] == "1"
+        let detected = fields["template"].flatMap(EnvironmentTemplate.init(rawValue:))
+        if let detected, currentTemplate == nil || selectedTemplate == currentTemplate {
+            selectedTemplate = detected
+        }
+        currentTemplate = detected
+        templatePinned = fields["templateMode"] == "manual"
+    }
+
+    func applySelectedTemplate() {
+        guard !isBusy else { return }
+        let target = selectedTemplate
+        isApplyingTemplate = true
+        phase = .fixing
+        netStatus = .checking
+        templateError = false
+        templateMessage = "正在应用\(target.title)模板…"
+        banner = "正在应用模板；调整时区时可能需要管理员授权"
+        run(["apply-template", target.rawValue], timeout: 180) { out in
+            self.isApplyingTemplate = false
+            guard out == "OK:template=\(target.rawValue)" else {
+                self.templateError = true
+                self.templateMessage = out.hasPrefix("FAIL:") ? String(out.dropFirst(5)) : "应用失败，请重新检查系统设置"
+                self.phase = .failed
+                self.netStatus = .danger
+                self.banner = self.templateMessage
+                return
+            }
+            self.currentTemplate = target
+            self.templatePinned = true
+            self.templateMessage = "已应用\(target.title)模板；出口和环境检查见下方"
+            self.phase = .checking
+            self.refresh()
+        }
+    }
+
+    // 仅使用本次结果；旧缓存不能替代超时、空输出或缺失的检查项。
+    func applyCheckOutput(_ out: String) {
+        let keyMap: [String: String] = [
+            "代理内核": "代理内核", "TUN网卡": "TUN 网卡", "出口IP": "出口 IP",
+            "IP一致": "IP 与上次一致", "时区": "时区一致", "地区": "地区一致",
+            "IPv6": "IPv6 关闭", "DNS": "DNS 走隧道", "WebRTC": "WebRTC",
+            "保镖": "保镖在线", "规则置顶": "规则置顶",
+            "客户端语言": "客户端语言", "ASN属性": "ASN 属性", "生态可达性": "生态可达性",
+        ]
+        var updated = rows
+        for i in updated.indices {
+            updated[i].state = .fail
+            updated[i].detail = "未收到本次检查结果，请重新检查"
+        }
+        var matched = Set<Int>()
+        for line in out.split(separator: "\n") {
+            let parts = line.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false).map(String.init)
+            guard parts.count == 2, let name = keyMap[parts[0]],
+                  let idx = updated.firstIndex(where: { $0.name == name }) else { continue }
+            let status = parts[1].split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false).map(String.init)
+            guard let code = status.first, ["ok", "warn", "fail"].contains(code),
+                  matched.insert(idx).inserted else { continue }
+            updated[idx].state = code == "ok" ? .ok : (code == "warn" ? .warn : .fail)
+            updated[idx].detail = status.count > 1 ? status[1] : ""
+        }
+        rows = updated
+        hasData = matched.count == rows.count
+        if hasData { lastCheckAt = Date() }
+        banner = hasData ? "" : (out.hasPrefix("FAIL:") ? String(out.dropFirst(5)) :
+            "检测输出不完整(\(matched.count)/\(rows.count))，请点重新检查")
+        let failed = rows.contains { $0.state == .fail }
+        phase = failed ? .failed : .ready
+        netStatus = failed ? .danger : (rows.contains { $0.state == .warn } ? .warn : .safe)
+    }
+
     func fixAll() {
+        guard !isChecking, phase != .fixing, phase != .switching else { return }
         phase = .fixing
         banner = "正在修复…（若弹出密码框请输入开机密码）"
         run(["fix"], timeout: 180) { out in
             let steps = out.split(separator: "\n").map(String.init).filter { $0.hasPrefix("FIX:") }.map { String($0.dropFirst(4)) }
             self.banner = steps.last ?? ""
+            self.phase = .checking
             self.refresh()
         }
     }
 
     func switchTo(_ target: String) {
+        guard !isChecking, phase == .ready, netStatus != .danger else { return }
         phase = .switching
         banner = "正在切换到账号 \(target)…"
         run(["switch", target], timeout: 180) { out in
@@ -151,9 +274,7 @@ final class VM: ObservableObject {
             self.phase = .done
             self.banner = out.hasPrefix("INFO:") ? "当前已是账号 \(target)" : "已切换到账号 \(target)"
             self.note = extra
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2.2) {
-                NSApplication.shared.terminate(nil)
-            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.2) { self.refresh() }
         }
     }
 }
@@ -161,7 +282,7 @@ final class VM: ObservableObject {
 // MARK: - 视图
 
 struct ContentView: View {
-    @StateObject private var vm = VM()
+    @ObservedObject var vm: VM
     @State private var showNotice = false
 
     var body: some View {
@@ -170,7 +291,9 @@ struct ContentView: View {
                            startPoint: .top, endPoint: .bottom).ignoresSafeArea()
             VStack(spacing: 16) {
                 header
-                checksCard
+                templateCard
+                ScrollView { checksCard }
+                    .frame(maxHeight: 440)
                 if vm.phase == .ready || vm.phase == .switching || vm.phase == .done {
                     accountCard
                 } else if vm.phase == .failed || vm.phase == .fixing {
@@ -182,7 +305,48 @@ struct ContentView: View {
             .padding(20)
         }
         .frame(width: 440, height: 740)
-        .onAppear { vm.refresh() }
+    }
+
+    var templateCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("地区模板").font(.callout.bold()).foregroundColor(.white)
+                Spacer()
+                Text(vm.currentTemplate.map {
+                    "当前：\($0.title)" + (vm.templatePinned ? "" : "（按出口识别）")
+                } ?? "当前：待识别")
+                    .font(.caption).foregroundColor(.white.opacity(0.65))
+            }
+            Picker("地区模板", selection: $vm.selectedTemplate) {
+                ForEach(EnvironmentTemplate.allCases) { template in
+                    Text(template.title).tag(template)
+                }
+            }
+            .pickerStyle(.segmented)
+            .disabled(vm.isBusy)
+            HStack {
+                Text(vm.selectedTemplate.settings)
+                    .font(.caption).foregroundColor(.white.opacity(0.75))
+                Spacer()
+                Button(vm.isApplyingTemplate ? "应用中…" : "应用模板") {
+                    vm.applySelectedTemplate()
+                }
+                .disabled(vm.isBusy)
+                .buttonStyle(.borderedProminent)
+                .tint(.indigo)
+            }
+            Text("先在 Clash 选择对应地区节点；模板调整系统时区与地区格式。")
+                .font(.caption2).foregroundColor(.white.opacity(0.55))
+                .fixedSize(horizontal: false, vertical: true)
+            if !vm.templateMessage.isEmpty {
+                Text(vm.templateMessage).font(.caption)
+                    .foregroundColor(vm.templateError ? .red : .white.opacity(0.75))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(12)
+        .background(Color.white.opacity(0.05))
+        .clipShape(RoundedRectangle(cornerRadius: 12))
     }
 
     var header: some View {
@@ -198,6 +362,12 @@ struct ContentView: View {
                 Text("安全检查 · 切换 · 启动").font(.caption).foregroundColor(.white.opacity(0.55))
             }
             Spacer()
+            Button { vm.refresh() } label: {
+                Image(systemName: "arrow.clockwise").font(.title3).foregroundColor(.white.opacity(0.6))
+            }
+            .buttonStyle(.plain)
+            .help("重新检查")
+            .disabled(vm.isChecking || vm.phase == .fixing || vm.phase == .switching)
             Button { showNotice = true } label: {
                 Image(systemName: "info.circle").font(.title3).foregroundColor(.white.opacity(0.6))
             }
@@ -215,7 +385,7 @@ struct ContentView: View {
             case .ready: return ("环境安全", .green)
             case .failed: return ("检查未过", .red)
             case .switching: return ("切换中", .blue)
-            case .fixing: return ("修复中", .orange)
+            case .fixing: return (vm.isApplyingTemplate ? "应用中" : "修复中", .orange)
             case .done: return ("完成", .green)
             }
         }()
@@ -362,6 +532,12 @@ struct ContentView: View {
         HStack {
             Image(systemName: "lock.shield").font(.caption2)
             Text("任何一项检查不过，都不会启动 Claude").font(.caption2)
+            Spacer()
+            Button { NSApp.terminate(nil) } label: {
+                Text("退出").font(.caption2)
+            }
+            .buttonStyle(.plain)
+            .foregroundColor(.white.opacity(0.45))
         }
         .foregroundColor(.white.opacity(0.35))
     }
@@ -432,40 +608,86 @@ struct NoticeView: View {
     }
 }
 
-// MARK: - App
+// MARK: - 菜单栏
 
-class AppDelegate: NSObject, NSApplicationDelegate {
-    // 关闭窗口即退出进程,杜绝"旧实例残留"
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    private var item: NSStatusItem!
+    private var popover: NSPopover!
+    private let vm = VM()
+    private var cancellable: AnyCancellable?
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        item.button?.target = self
+        item.button?.action = #selector(toggle)
+
+        popover = NSPopover()
+        popover.behavior = .transient          // 点面板外自动关闭
+        popover.contentSize = NSSize(width: 440, height: 740)
+        popover.contentViewController = NSHostingController(rootView: ContentView(vm: vm))
+
+        cancellable = vm.$netStatus.receive(on: RunLoop.main).sink { [weak self] _ in self?.updateIcon() }
+        updateIcon()
+    }
+
+    // 纯像素染色图标: SF符号画进去再按 alpha 上色, isTemplate=false → 菜单栏显示真彩色
+    private func icon(_ symbol: String, _ color: NSColor) -> NSImage {
+        let size = NSSize(width: 18, height: 18)
+        let img = NSImage(size: size, flipped: false) { rect in
+            let cfg = NSImage.SymbolConfiguration(pointSize: 14, weight: .semibold)
+            guard let glyph = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
+                .withSymbolConfiguration(cfg) else { return false }
+            let gs = glyph.size
+            glyph.draw(in: NSRect(x: (18 - gs.width) / 2, y: (18 - gs.height) / 2, width: gs.width, height: gs.height))
+            color.setFill()
+            rect.fill(using: .sourceAtop)
+            return true
+        }
+        img.isTemplate = false
+        return img
+    }
+
+    private func updateIcon() {
+        let (sym, color): (String, NSColor) = {
+            switch vm.netStatus {
+            case .checking: return ("shield", .systemGray)
+            case .safe:     return ("checkmark.shield.fill", .systemGreen)
+            case .warn:     return ("exclamationmark.shield.fill", .systemYellow)
+            case .danger:   return ("xmark.shield.fill", .systemRed)
+            }
+        }()
+        item.button?.image = icon(sym, color)
+    }
+
+    @objc private func toggle() {
+        guard let button = item.button else { return }
+        if popover.isShown {
+            popover.performClose(nil)
+        } else {
+            vm.refreshIfStale()
+            popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+            NSApp.activate(ignoringOtherApps: true)
+        }
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        NSStatusBar.system.removeStatusItem(item)
+    }
 }
+
+// MARK: - App
 
 @main
 struct SwitcherApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
+    @State private var inserted = true
+
+    init() {
+        // 纯菜单栏附件模式: 无 Dock 图标(与 AgentMonitor 一致)
+        NSApplication.shared.setActivationPolicy(.accessory)
+    }
 
     var body: some Scene {
-        WindowGroup {
-            ContentView()
-                .background(WindowAccessor { win in
-                    guard let w = win else { return }
-                    w.titlebarAppearsTransparent = true
-                    w.titleVisibility = .hidden
-                    w.styleMask.insert(.fullSizeContentView)
-                    w.isMovableByWindowBackground = true
-                    w.standardWindowButton(.zoomButton)?.isEnabled = false
-                })
-        }
-        .windowStyle(.hiddenTitleBar)
-        .windowResizability(.contentSize)
+        Settings { EmptyView() }
     }
-}
-
-struct WindowAccessor: NSViewRepresentable {
-    let cb: (NSWindow?) -> Void
-    func makeNSView(context: Context) -> NSView {
-        let v = NSView()
-        DispatchQueue.main.async { self.cb(v.window) }
-        return v
-    }
-    func updateNSView(_ nsView: NSView, context: Context) {}
 }

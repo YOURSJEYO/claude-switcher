@@ -5,8 +5,10 @@ set -u
 export LC_ALL=en_US.UTF-8
 
 # ============ 安装时可配置项(安装程序会自动改写) ============
-TZ_TARGET="America/New_York"     # 锁定时区,应与出口IP所在城市一致
 PROXY_GROUP="IpEqual"            # Clash 代理组名(安装时自动探测)
+# 地区模板: 出口国家码 → 锁定时区 + AppleLocale,三者必须一致才判通过
+tpl_tz()     { case "$1" in US) echo "America/Los_Angeles";; TW) echo "Asia/Taipei";; SG) echo "Asia/Singapore";; *) echo "";; esac; }
+tpl_locale() { case "$1" in US) echo "en_US";; TW) echo "zh_TW";; SG) echo "en_SG";; *) echo "";; esac; }
 # ============================================================
 
 DATA="$HOME/Library/Application Support/Claude"
@@ -16,6 +18,48 @@ CLASH_DIR="$HOME/Library/Application Support/io.github.clash-verge-rev.clash-ver
 mkdir -p "$BASE/accounts"
 
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $1" >>"$LOG"; }
+
+# 用户明确应用过模板后固定该目标；旧安装仍按最近检测的出口识别。
+target_region() {
+    if [ -f "$BASE/template" ]; then
+        cat "$BASE/template"
+    else
+        printf '%s\n' "${1:-}"
+    fi
+}
+
+# 只调整模板对应的时区和地区格式，不改 Clash 节点或账号数据。
+apply_template() {
+    local code="${1:-}" target_tz target_locale saved
+    target_tz=$(tpl_tz "$code")
+    target_locale=$(tpl_locale "$code")
+    [ -n "$target_tz" ] || { echo "FAIL:未知模板，仅支持 US/TW/SG"; return 1; }
+    if [ "$(readlink /etc/localtime 2>/dev/null)" != "/var/db/timezone/zoneinfo/$target_tz" ]; then
+        if ! osascript - "$target_tz" <<'APPLESCRIPT' >/dev/null 2>&1
+on run argv
+    do shell script ("/usr/sbin/systemsetup -settimezone " & quoted form of (item 1 of argv)) with prompt "应用地区模板需要调整系统时区" with administrator privileges
+end run
+APPLESCRIPT
+        then
+            echo "FAIL:时区调整被取消或失败，模板未保存"
+            return 1
+        fi
+    fi
+    [ "$(readlink /etc/localtime 2>/dev/null)" = "/var/db/timezone/zoneinfo/$target_tz" ] || {
+        echo "FAIL:系统时区未生效，模板未保存"; return 1;
+    }
+    defaults write -g AppleLocale "$target_locale" &&
+        [ "$(defaults read -g AppleLocale 2>/dev/null)" = "$target_locale" ] || {
+        echo "FAIL:地区格式设置失败，请重新检查系统设置"; return 1;
+    }
+    saved=$(mktemp "$BASE/template.XXXXXX") || { echo "FAIL:无法保存模板"; return 1; }
+    if ! printf '%s\n' "$code" > "$saved" || ! mv "$saved" "$BASE/template"; then
+        rm -f "$saved"
+        echo "FAIL:无法保存模板，请重新检查系统设置"
+        return 1
+    fi
+    echo "OK:template=$code"
+}
 
 # TUN 在线判定:存在 fake-ip 网段地址即视为 TUN 已接管(兼容各种 TUN 设备名)
 tun_up() { ifconfig 2>/dev/null | grep -q 'inet 198\.18\.'; }
@@ -30,7 +74,9 @@ check() {
     trace=$(curl -s --max-time 8 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null)
     ip=$(echo "$trace" | grep '^ip=' | cut -d= -f2)
     loc=$(echo "$trace" | grep '^loc=' | cut -d= -f2)
-    [ "$loc" = "US" ] || fails="$fails;出口IP非美国(${ip:-无}/${loc:-未知})"
+    expected=$(target_region "$loc")
+    exptz=$(tpl_tz "$expected")
+    [ -n "$exptz" ] && [ "$loc" = "$expected" ] || fails="$fails;出口地区${loc:-未知}与模板${expected:-未知}不匹配"
     ipwarn=""
     lastip=""; [ -f "$BASE/lastip" ] && lastip=$(cat "$BASE/lastip")
     if [ -n "$ip" ] && [ -n "$lastip" ] && [ "$ip" != "$lastip" ]; then
@@ -39,10 +85,11 @@ check() {
     [ -n "$ip" ] && echo "$ip" > "$BASE/lastip"
 
     tz=$(readlink /etc/localtime 2>/dev/null)
-    [ "$tz" = "/var/db/timezone/zoneinfo/$TZ_TARGET" ] || fails="$fails;时区异常($tz)"
+    [ "$tz" = "/var/db/timezone/zoneinfo/$exptz" ] || fails="$fails;时区异常($tz,应为$exptz)"
 
     locale=$(defaults read -g AppleLocale 2>/dev/null)
-    [ "$locale" = "en_US" ] || fails="$fails;地区异常($locale)"
+    exploc=$(tpl_locale "$expected")
+    [ "$locale" = "$exploc" ] || fails="$fails;地区异常($locale,应为$exploc)"
 
     v6=$(networksetup -getinfo Wi-Fi 2>/dev/null | grep -i '^IPv6:')
     echo "$v6" | grep -qi 'off' || fails="$fails;IPv6未关闭"
@@ -100,7 +147,14 @@ checkdetail() {
     trace=$(curl -s --max-time 8 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null)
     ip=$(echo "$trace" | grep '^ip=' | cut -d= -f2)
     loc=$(echo "$trace" | grep '^loc=' | cut -d= -f2)
-    if [ "$loc" = "US" ]; then echo "出口IP=ok:$ip"; else echo "出口IP=fail:${ip:-无}/${loc:-未知}"; fi
+    expected=$(target_region "$loc")
+    exptz=$(tpl_tz "$expected")
+    [ -n "$loc" ] && echo "$loc" > "$BASE/region"
+    if [ -n "$exptz" ] && [ "$loc" = "$expected" ]; then
+        echo "出口IP=ok:$ip/$loc"
+    else
+        echo "出口IP=fail:出口${loc:-未知}，模板${expected:-未知}；请在Clash选择对应节点"
+    fi
     lastip=""; [ -f "$BASE/lastip" ] && lastip=$(cat "$BASE/lastip")
     if [ -z "$ip" ]; then echo 'IP一致=fail:未获取到出口IP'
     elif [ -z "$lastip" ]; then echo 'IP一致=ok:首次记录'
@@ -108,9 +162,10 @@ checkdetail() {
     else echo "IP一致=warn:$lastip → $ip"; fi
     [ -n "$ip" ] && echo "$ip" > "$BASE/lastip"
     tz=$(readlink /etc/localtime 2>/dev/null)
-    if [ "$tz" = "/var/db/timezone/zoneinfo/$TZ_TARGET" ]; then echo '时区=ok'; else echo "时区=fail:$tz"; fi
+    if [ -n "$exptz" ] && [ "$tz" = "/var/db/timezone/zoneinfo/$exptz" ]; then echo "时区=ok:$exptz"; else echo "时区=fail:$tz(应$exptz)"; fi
     locale=$(defaults read -g AppleLocale 2>/dev/null)
-    if [ "$locale" = "en_US" ]; then echo '地区=ok'; else echo "地区=fail:$locale"; fi
+    exploc=$(tpl_locale "$expected")
+    if [ -n "$exploc" ] && [ "$locale" = "$exploc" ]; then echo "地区=ok:$exploc"; else echo "地区=fail:$locale(应$exploc)"; fi
     v6=$(networksetup -getinfo Wi-Fi 2>/dev/null | grep -i '^IPv6:')
     if echo "$v6" | grep -qi 'off'; then echo 'IPv6=ok:已关闭'; else echo 'IPv6=fail:未关闭'; fi
     dnsip=$(dig +short +time=3 +tries=1 claude.ai 2>/dev/null | head -1)
@@ -155,7 +210,7 @@ checkdetail() {
     org=$(curl -s --max-time 6 https://ipinfo.io/json 2>/dev/null | grep '"org"' | cut -d'"' -f4)
     case "$org" in
         '') echo 'ASN属性=warn:未获取' ;;
-        *Comcast*|*AT\&T*|*Verizon*|*Spectrum*|*Charter*|*Cox*|*T-Mobile*|*Cable*|*esidential*) echo "ASN属性=ok:$org" ;;
+        *Comcast*|*AT\&T*|*Verizon*|*Spectrum*|*Charter*|*Cox*|*T-Mobile*|*Cable*|*esidential*|*HiNet*|*hinet*|*Chunghwa*|*CHT*|*kbro*|*Taiwan*|*FarEasTone*|*Data\ Communication*|*Singtel*|*StarHub*|*M1\ *) echo "ASN属性=ok:$org" ;;
         *) echo "ASN属性=warn:疑似机房($org)" ;;
     esac
     # 14. Anthropic 生态可达性
@@ -206,8 +261,12 @@ fix() {
     # B. 时区/IPv6/DNS缓存/保镖(需管理员权限,会弹一次密码框)
     tz=$(readlink /etc/localtime 2>/dev/null)
     v6=$(networksetup -getinfo Wi-Fi 2>/dev/null | grep -i '^IPv6:')
+    fixloc=$(curl -s --max-time 8 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | grep '^loc=' | cut -d= -f2)
+    fixloc=$(target_region "$fixloc")
+    expTZ=$(tpl_tz "$fixloc")
+    expLoc=$(tpl_locale "$fixloc")
     adminCmds=""
-    [ "$tz" != "/var/db/timezone/zoneinfo/$TZ_TARGET" ] && adminCmds="${adminCmds}/usr/sbin/systemsetup -settimezone $TZ_TARGET; "
+    [ -n "$expTZ" ] && [ "$tz" != "/var/db/timezone/zoneinfo/$expTZ" ] && adminCmds="${adminCmds}/usr/sbin/systemsetup -settimezone $expTZ; "
     echo "$v6" | grep -qi 'off' || adminCmds="${adminCmds}networksetup -setv6off Wi-Fi; "
     if ! launchctl print system/local.claude-bodyguard >/dev/null 2>&1; then
         adminCmds="${adminCmds}cp $HOME/.local/bin/local.claude-bodyguard.plist /Library/LaunchDaemons/ && chown root:wheel /Library/LaunchDaemons/local.claude-bodyguard.plist && launchctl bootstrap system /Library/LaunchDaemons/local.claude-bodyguard.plist; "
@@ -225,6 +284,12 @@ ASEOF
         fi
     else
         echo "FIX:时区/IPv6/保镖 无需修复 ✓"
+    fi
+
+    # B1. 地区与出口一致(用户级,无需密码)
+    if [ -n "$expLoc" ]; then
+        curloc=$(defaults read -g AppleLocale 2>/dev/null)
+        [ "$curloc" != "$expLoc" ] && defaults write -g AppleLocale "$expLoc" && echo "FIX:地区 → $expLoc ✓"
     fi
 
     # B3. Claude 客户端单独设英文(用户级,无需密码;系统首选语言已是英文则跳过)
@@ -275,8 +340,8 @@ MEOF
     trace=$(curl -s --max-time 8 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null)
     ip=$(echo "$trace" | grep '^ip=' | cut -d= -f2)
     loc=$(echo "$trace" | grep '^loc=' | cut -d= -f2)
-    if [ "$loc" = "US" ]; then
-        echo "FIX:出口IP ✓ ($ip)"
+    if [ -n "$(tpl_tz "$loc")" ] && [ "$loc" = "$(target_region "$loc")" ]; then
+        echo "FIX:出口IP ✓ ($ip/$loc)"
     else
         echo "FIX:出口IP ✗ (${ip:-无}/${loc:-未知}) — 可能是节点故障,请到 Clash 里换条线路"
     fi
@@ -287,7 +352,10 @@ status() {
     cur="none"; [ -f "$BASE/current" ] && cur=$(cat "$BASE/current")
     hasA=0; [ -d "$BASE/accounts/A" ] && hasA=1
     hasB=0; [ -d "$BASE/accounts/B" ] && hasB=1
-    echo "current=$cur hasA=$hasA hasB=$hasB"
+    recent=$(cat "$BASE/region" 2>/dev/null)
+    template=$(target_region "$recent")
+    template_mode=auto; [ -f "$BASE/template" ] && template_mode=manual
+    echo "current=$cur hasA=$hasA hasB=$hasB template=$template templateMode=$template_mode"
 }
 
 quit_claude() {
@@ -360,6 +428,7 @@ case "${1:-}" in
         ;;
     fix) fix ;;
     status) status ;;
+    apply-template) apply_template "${2:-}" ;;
     switch) switch_to "${2:-}" ;;
-    *) echo "用法: claude-switch.sh check|status|switch A|B"; exit 2 ;;
+    *) echo "用法: claude-switch.sh check|checkdetail|fix|status|switch A|B|apply-template US|TW|SG"; exit 2 ;;
 esac
