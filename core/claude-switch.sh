@@ -5,14 +5,14 @@ set -u
 export LC_ALL=en_US.UTF-8
 
 # ============ 安装时可配置项(安装程序会自动改写) ============
-TZ_TARGET="America/New_York"     # 锁定时区,应与出口IP所在城市一致
-PROXY_GROUP="IpEqual"            # Clash 代理组名(安装时自动探测)
+TZ_TARGET="America/Los_Angeles"  # 锁定时区,应与出口IP所在城市一致
+VPN_NAME="Shadowrocket"          # 代理客户端名称
+VPN_ID="com.liguangming.Shadowrocket"  # NetworkExtension bundle id
 # ============================================================
 
 DATA="$HOME/Library/Application Support/Claude"
 BASE="$HOME/.claude-switcher"
 LOG="$HOME/Library/Logs/claude-switch.log"
-CLASH_DIR="$HOME/Library/Application Support/io.github.clash-verge-rev.clash-verge-rev"
 mkdir -p "$BASE/accounts"
 
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $1" >>"$LOG"; }
@@ -20,11 +20,33 @@ log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $1" >>"$LOG"; }
 # TUN 在线判定:存在 fake-ip 网段地址即视为 TUN 已接管(兼容各种 TUN 设备名)
 tun_up() { ifconfig 2>/dev/null | grep -q 'inet 198\.18\.'; }
 
+# Shadowrocket 连接状态:Connected / Disconnected / Unknown(查询失败)
+vpn_status() {
+    line=$(scutil --nc list 2>/dev/null | grep "$VPN_ID" | head -1)
+    if [ -z "$line" ]; then
+        echo "Unknown"
+    elif echo "$line" | grep -q '(Connected)'; then
+        echo "Connected"
+    else
+        echo "Disconnected"
+    fi
+}
+vpn_up() { [ "$(vpn_status)" = "Connected" ]; }
+
+# 路由覆盖:Claude 全家族域名解析到 fake-ip 即证明命中了 Shadowrocket 的代理规则
+route_ok() {
+    for d in claude.ai api.anthropic.com claudeusercontent.com; do
+        ip=$(dig +short +time=3 +tries=1 "$d" 2>/dev/null | head -1)
+        case "$ip" in 198.18.*) ;; *) return 1 ;; esac
+    done
+    return 0
+}
+
 # ---------- 安全检查 ----------
 check() {
     fails=""
 
-    pgrep -f verge-mihomo >/dev/null 2>&1 || fails="$fails;代理内核未运行"
+    vpn_up || fails="$fails;Shadowrocket未连接($(vpn_status))"
     tun_up || fails="$fails;TUN网卡不在线"
 
     trace=$(curl -s --max-time 8 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null)
@@ -69,7 +91,7 @@ check() {
 
     launchctl print system/local.claude-bodyguard >/dev/null 2>&1 || fails="$fails;保镖未运行"
 
-    grep -q "DOMAIN-SUFFIX,claude.ai,$PROXY_GROUP" "$CLASH_DIR/clash-verge.yaml" 2>/dev/null || fails="$fails;置顶规则缺失"
+    route_ok || fails="$fails;路由未覆盖(Claude域名未走代理)"
 
     defaults read com.anthropic.claudefordesktop AppleLanguages 2>/dev/null | grep -q 'en-US' || {
         syslang=$(defaults read -g AppleLanguages 2>/dev/null | sed -n '2p' | tr -d ' ,"')
@@ -95,7 +117,12 @@ webrtc_test() {
 
 # 逐项输出检查结果(供UI使用): 名称=ok|fail:细节
 checkdetail() {
-    if pgrep -f verge-mihomo >/dev/null 2>&1; then echo '代理内核=ok'; else echo '代理内核=fail:未运行'; fi
+    st=$(vpn_status)
+    case "$st" in
+        Connected) echo "代理状态=ok:$VPN_NAME 已连接" ;;
+        Disconnected) echo "代理状态=fail:$VPN_NAME 未连接" ;;
+        *) echo "代理状态=fail:无法查询 $VPN_NAME 状态" ;;
+    esac
     if tun_up; then echo 'TUN网卡=ok'; else echo 'TUN网卡=fail:不在线'; fi
     trace=$(curl -s --max-time 8 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null)
     ip=$(echo "$trace" | grep '^ip=' | cut -d= -f2)
@@ -136,10 +163,15 @@ checkdetail() {
     else
         echo '保镖=fail:未安装'
     fi
-    if grep -q "DOMAIN-SUFFIX,claude.ai,$PROXY_GROUP" "$CLASH_DIR/clash-verge.yaml" 2>/dev/null; then
-        echo '规则置顶=ok'
+    if route_ok; then
+        echo '路由覆盖=ok:Claude域名均命中代理'
     else
-        echo '规则置顶=fail:未生效'
+        miss=""
+        for d in claude.ai api.anthropic.com claudeusercontent.com; do
+            got=$(dig +short +time=3 +tries=1 "$d" 2>/dev/null | head -1)
+            case "$got" in 198.18.*) ;; *) miss="$miss $d=${got:-空}" ;; esac
+        done
+        echo "路由覆盖=fail:未命中规则(${miss# })"
     fi
     # 12. Claude 客户端语言(单独设为英文,或系统首选语言为英文均可;防止 JS 层读出中文)
     clang=$(defaults read com.anthropic.claudefordesktop AppleLanguages 2>/dev/null | head -2)
@@ -172,35 +204,20 @@ checkdetail() {
 fix() {
     echo "FIX:开始一键修复"
 
-    # A. 代理内核 + TUN
-    if ! pgrep -f verge-mihomo >/dev/null 2>&1; then
-        echo "FIX:正在启动 Clash Verge..."
-        open -a "Clash Verge"
+    # A. Shadowrocket 连接状态 + TUN(不主动重启,避免打断用户现有连接)
+    if ! vpn_up; then
+        echo "FIX:正在打开 Shadowrocket..."
+        open -a "$VPN_NAME" 2>/dev/null || open -a "/Applications/$VPN_NAME.app" 2>/dev/null \
+            || echo "FIX:未找到 Shadowrocket.app,请手动打开"
     fi
     for i in $(seq 1 40); do
-        pgrep -f verge-mihomo >/dev/null 2>&1 && tun_up && break
+        vpn_up && tun_up && break
         sleep 1
     done
-    if pgrep -f verge-mihomo >/dev/null 2>&1 && tun_up; then
-        echo "FIX:代理内核+TUN ✓"
+    if vpn_up && tun_up; then
+        echo "FIX:代理+TUN ✓"
     else
-        V="$CLASH_DIR/verge.yaml"
-        if [ -f "$V" ] && grep -q '^enable_tun_mode: false' "$V"; then
-            echo "FIX:检测到 TUN 开关被关闭,正在恢复..."
-            osascript -e 'tell application "Clash Verge" to quit' >/dev/null 2>&1
-            sleep 3
-            sed -i '' 's/^enable_tun_mode: false/enable_tun_mode: true/' "$V"
-            open -a "Clash Verge"
-            for i in $(seq 1 40); do
-                tun_up && break
-                sleep 1
-            done
-        fi
-        if pgrep -f verge-mihomo >/dev/null 2>&1 && tun_up; then
-            echo "FIX:代理内核+TUN ✓(已恢复TUN开关)"
-        else
-            echo "FIX:代理内核/TUN ✗(请打开 Clash Verge 检查节点/线路)"
-        fi
+        echo "FIX:代理/TUN ✗(请在 Shadowrocket 中确认 VPN 已连接、节点可用)"
     fi
 
     # B. 时区/IPv6/DNS缓存/保镖(需管理员权限,会弹一次密码框)
@@ -234,40 +251,11 @@ ASEOF
         echo "FIX:Claude 客户端语言 → en-US ✓(重启 Claude 后生效)"
     fi
 
-    # B2. 置顶规则缺失 → 重写 Merge 配置并重启 Clash
-    if ! grep -q "DOMAIN-SUFFIX,claude.ai,$PROXY_GROUP" "$CLASH_DIR/clash-verge.yaml" 2>/dev/null; then
-        echo "FIX:重写置顶规则..."
-        cat > "$CLASH_DIR/profiles/Merge.yaml" <<MEOF
-# Profile Enhancement Merge Template for Clash Verge
-
-profile:
-  store-selected: true
-
-# Claude 全家族及生态域名置顶强制走代理(优先级高于任何国内规则集)
-prepend-rules:
-  - DOMAIN-SUFFIX,claude.ai,$PROXY_GROUP
-  - DOMAIN-SUFFIX,claude.com,$PROXY_GROUP
-  - DOMAIN-SUFFIX,anthropic.com,$PROXY_GROUP
-  - DOMAIN-SUFFIX,claudeusercontent.com,$PROXY_GROUP
-  - DOMAIN-SUFFIX,challenges.cloudflare.com,$PROXY_GROUP
-  - DOMAIN-SUFFIX,datadoghq.com,$PROXY_GROUP
-  - DOMAIN-SUFFIX,segment.io,$PROXY_GROUP
-  - DOMAIN-SUFFIX,stripe.com,$PROXY_GROUP
-  - DOMAIN-SUFFIX,stripe.network,$PROXY_GROUP
-  - DOMAIN-SUFFIX,stripecdn.com,$PROXY_GROUP
-  - DOMAIN-SUFFIX,intercom.io,$PROXY_GROUP
-  - DOMAIN-SUFFIX,intercomcdn.com,$PROXY_GROUP
-  - DOMAIN-SUFFIX,intercomassets.com,$PROXY_GROUP
-MEOF
-        osascript -e 'tell application "Clash Verge" to quit' >/dev/null 2>&1
-        sleep 3
-        open -a "Clash Verge"
-        for i in $(seq 1 40); do
-            tun_up && break
-            sleep 1
-        done
-        grep -q "DOMAIN-SUFFIX,claude.ai,$PROXY_GROUP" "$CLASH_DIR/clash-verge.yaml" 2>/dev/null \
-            && echo "FIX:置顶规则 ✓" || echo "FIX:置顶规则 ✗"
+    # B2. 路由覆盖(Shadowrocket 的规则由用户配置维护,脚本只检测并提示,不改写)
+    if route_ok; then
+        echo "FIX:路由覆盖 ✓"
+    else
+        echo "FIX:路由覆盖 ✗ — 请在 Shadowrocket 配置中为 claude.ai / anthropic.com / claudeusercontent.com 添加 DOMAIN-SUFFIX 规则并指向代理组"
     fi
 
     # C. 出口IP最终验证
@@ -278,7 +266,7 @@ MEOF
     if [ "$loc" = "US" ]; then
         echo "FIX:出口IP ✓ ($ip)"
     else
-        echo "FIX:出口IP ✗ (${ip:-无}/${loc:-未知}) — 可能是节点故障,请到 Clash 里换条线路"
+        echo "FIX:出口IP ✗ (${ip:-无}/${loc:-未知}) — 可能是节点故障,请在 Shadowrocket 里换条线路"
     fi
     echo "FIX:修复流程结束"
 }
