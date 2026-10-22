@@ -87,7 +87,7 @@ if [ "$MODE" = "clash-verge" ]; then
 fi
 
 # ---- 2. 地区自适应(按出口IP自动锁定 国家/时区/地区格式;必须先挂代理) ----
-IPINFO=$(curl -s --max-time 6 https://ipinfo.io/json 2>/dev/null)
+IPINFO=$(curl -fs --max-time 20 --retry 2 --retry-all-errors https://ipinfo.io/json 2>/dev/null)
 CTRY=$(echo "$IPINFO" | grep '"country"' | cut -d'"' -f4)
 if [ "$CTRY" = "CN" ] && [ -z "$FORCE" ]; then
     echo ""
