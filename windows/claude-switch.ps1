@@ -76,46 +76,119 @@ function Get-Egress {
 
 # STUN 探针(纯 .NET UDP,手工构造 RFC5389 报文)
 function Get-StunPublicIP([string]$server, [int]$port, [int]$timeoutMs = 2000) {
-    try { $addr = ([System.Net.Dns]::GetHostAddresses($server) | Where-Object { $_.AddressFamily -eq 'InterNetwork' } | Select-Object -First 1) } catch { return $null }
-    if (-not $addr) { return $null }
-    $udp = New-Object System.Net.Sockets.UdpClient
-    $udp.Client.ReceiveTimeout = $timeoutMs
     try {
-        $txn = New-Object byte[] 12; (New-Object Random).NextBytes($txn)
-        $req = [byte[]](0x00, 0x01, 0x00, 0x00) + [byte[]](0x21, 0x12, 0xA4, 0x42) + $txn
-        $udp.Connect($addr, $port)
-        [void]$udp.Send($req, $req.Length)
-        $remote = New-Object System.Net.IPEndPoint([System.Net.IPAddress]::Any, 0)
-        $resp = $udp.Receive([ref]$remote)
-        $pos = 20
-        while ($pos + 4 -le $resp.Length) {
-            $atype = ([int]$resp[$pos] -shl 8) -bor $resp[$pos + 1]
-            $alen  = ([int]$resp[$pos + 2] -shl 8) -bor $resp[$pos + 3]
-            if (($atype -eq 0x20 -or $atype -eq 0x01) -and $alen -ge 8 -and $resp[$pos + 5] -eq 0x01) {
-                $ipBytes = @($resp[$pos + 8], $resp[$pos + 9], $resp[$pos + 10], $resp[$pos + 11])
-                if ($atype -eq 0x20) {
+        $addr = ([System.Net.Dns]::GetHostAddresses($server) | Where-Object { $_.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork } | Select-Object -First 1)
+        if (-not $addr) { return @{ State = 'no-response'; Ip = $null } }
+        $udp = New-Object System.Net.Sockets.UdpClient
+        $udp.Client.ReceiveTimeout = $timeoutMs
+        try {
+            $txn = New-Object byte[] 12
+            (New-Object System.Random).NextBytes($txn)
+            $req = [byte[]](0x00, 0x01, 0x00, 0x00) + [byte[]](0x21, 0x12, 0xA4, 0x42) + $txn
+            $udp.Connect($addr, $port)
+            [void]$udp.Send($req, $req.Length)
+            $remote = New-Object System.Net.IPEndPoint([System.Net.IPAddress]::Any, 0)
+            $resp = $udp.Receive([ref]$remote)
+            if ($null -eq $resp) { return @{ State = 'no-response'; Ip = $null } }
+            if ($resp.Length -lt 20 -or $resp[0] -ne 0x01 -or $resp[1] -ne 0x01 -or
+                $resp[4] -ne 0x21 -or $resp[5] -ne 0x12 -or $resp[6] -ne 0xA4 -or $resp[7] -ne 0x42) {
+                return @{ State = 'malformed'; Ip = $null }
+            }
+            for ($i = 0; $i -lt 12; $i++) {
+                if ($resp[8 + $i] -ne $txn[$i]) { return @{ State = 'malformed'; Ip = $null } }
+            }
+            $messageLength = ([int]$resp[2] -shl 8) -bor $resp[3]
+            if (($messageLength % 4) -ne 0 -or (20 + $messageLength) -ne $resp.Length) {
+                return @{ State = 'malformed'; Ip = $null }
+            }
+            $pos = 20
+            while ($pos + 4 -le $resp.Length) {
+                $atype = ([int]$resp[$pos] -shl 8) -bor $resp[$pos + 1]
+                $alen  = ([int]$resp[$pos + 2] -shl 8) -bor $resp[$pos + 3]
+                $next = $pos + 4 + $alen + ((4 - ($alen % 4)) % 4)
+                if ($next -gt $resp.Length) { return @{ State = 'malformed'; Ip = $null } }
+                if ($atype -eq 0x0020 -and $alen -eq 8 -and $resp[$pos + 5] -eq 0x01) {
+                    $ipBytes = @($resp[$pos + 8], $resp[$pos + 9], $resp[$pos + 10], $resp[$pos + 11])
                     $cookie = [byte[]](0x21, 0x12, 0xA4, 0x42)
                     for ($i = 0; $i -lt 4; $i++) { $ipBytes[$i] = $ipBytes[$i] -bxor $cookie[$i] }
+                    $ip = $ipBytes -join '.'
+                    if (-not (Test-IPv4Literal $ip)) { return @{ State = 'malformed'; Ip = $null } }
+                    return @{ State = 'response'; Ip = $ip }
                 }
-                return ($ipBytes -join '.')
+                $pos = $next
             }
-            $pos += 4 + $alen + ((4 - ($alen % 4)) % 4)
+            return @{ State = 'malformed'; Ip = $null }
+        } catch {
+            if ($_.Exception -is [System.Net.Sockets.SocketException] -and
+                $_.Exception.SocketErrorCode -eq [System.Net.Sockets.SocketError]::TimedOut) {
+                return @{ State = 'no-response'; Ip = $null }
+            }
+            return @{ State = 'error'; Ip = $null }
+        } finally {
+            if ($udp) { $udp.Close() }
         }
-    } catch { return $null } finally { $udp.Close() }
-    return $null
+    } catch {
+        return @{ State = 'error'; Ip = $null }
+    }
+}
+
+function Get-StunAssessment([string]$ExitIp) {
+    if (-not (Test-PublicIPv4Address $ExitIp)) {
+        return @{ Ok = $false; Code = 'unknown'; Detail = '当前出口地址无效，无法验证 UDP 暴露' }
+    }
+    $servers = @(@("stun.miwifi.com", 3478), @("stun.chat.bilibili.com", 3478), @("stun.l.google.com", 19302), @("stun.cloudflare.com", 3478))
+    $responses = @()
+    $probeError = $false
+    foreach ($s in $servers) {
+        try { $probe = Get-StunPublicIP $s[0] $s[1] } catch { $probeError = $true; continue }
+        if ($probe -is [string]) {
+            if (Test-PublicIPv4Address $probe) { $responses += $probe } else { $probeError = $true }
+        } elseif ($probe -is [hashtable] -and $probe.State -eq 'response') {
+            if (Test-PublicIPv4Address ([string]$probe.Ip)) { $responses += [string]$probe.Ip } else { $probeError = $true }
+        } elseif ($probe -is [hashtable] -and $probe.State -in @('error', 'malformed')) {
+            $probeError = $true
+        }
+    }
+    if ($responses.Count -eq 0) {
+        if ($probeError) { return @{ Ok = $false; Code = 'fail'; Detail = 'STUN 探测异常，无法确认 UDP 暴露状态' } }
+        return @{ Ok = $false; Code = 'unknown'; Detail = 'STUN 无响应，无法确认 UDP 暴露状态' }
+    }
+    $mismatch = @($responses | Where-Object { $_ -ne $ExitIp })
+    if ($mismatch.Count -gt 0) {
+        return @{ Ok = $false; Code = 'fail'; Detail = 'STUN 观察到与当前出口不一致的公网地址' }
+    }
+    return @{ Ok = $true; Code = 'ok'; Detail = 'STUN 响应与当前代理出口一致' }
+}
+
+function Test-IPv4Literal([string]$Value) {
+    $address = $null
+    if ($Value -cnotmatch '^(?:0|[1-9][0-9]{0,2})(?:\.(?:0|[1-9][0-9]{0,2})){3}$') { return $false }
+    if (-not [System.Net.IPAddress]::TryParse($Value, [ref]$address)) { return $false }
+    return $address.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork
+}
+
+function Test-PublicIPv4Address([string]$Value) {
+    if (-not (Test-IPv4Literal $Value)) { return $false }
+    $b = [System.Net.IPAddress]::Parse($Value).GetAddressBytes()
+    # IANA IPv4 Special-Purpose Address Registry (checked 2026-10-27):
+    # https://www.iana.org/assignments/iana-ipv4-special-registry/
+    # Reject non-global/reserved source ranges, including multicast; no DNS/network lookup.
+    if ($b[0] -in @(0, 10, 127) -or $b[0] -ge 224) { return $false }
+    if ($b[0] -eq 100 -and $b[1] -ge 64 -and $b[1] -le 127) { return $false }
+    if ($b[0] -eq 169 -and $b[1] -eq 254) { return $false }
+    if ($b[0] -eq 172 -and $b[1] -ge 16 -and $b[1] -le 31) { return $false }
+    if ($b[0] -eq 192) {
+        if ($b[1] -eq 0 -and $b[2] -eq 0) { return $b[3] -in @(9, 10) }
+        if (($b[1] -eq 0 -and $b[2] -eq 2) -or ($b[1] -eq 88 -and $b[2] -eq 99) -or $b[1] -eq 168) { return $false }
+    }
+    if ($b[0] -eq 198 -and ($b[1] -in @(18, 19) -or ($b[1] -eq 51 -and $b[2] -eq 100))) { return $false }
+    if ($b[0] -eq 203 -and $b[1] -eq 0 -and $b[2] -eq 113) { return $false }
+    return $true
 }
 
 function Test-WebRTC($exitIp) {
-    $servers = @(@("stun.miwifi.com", 3478), @("stun.chat.bilibili.com", 3478), @("stun.l.google.com", 19302), @("stun.cloudflare.com", 3478))
-    $found = @()
-    foreach ($s in $servers) {
-        $r = Get-StunPublicIP $s[0] $s[1]
-        if ($r -and ($found -notcontains $r)) { $found += $r }
-    }
-    if ($found.Count -eq 0) { return @{ code = 'ok'; detail = 'UDP不出网,零暴露' } }
-    $leak = $found | Where-Object { $_ -ne $exitIp }
-    if ($leak) { return @{ code = 'fail'; detail = "暴露非代理IP: $($leak -join ',')" } }
-    return @{ code = 'ok'; detail = '仅暴露代理IP' }
+    $assessment = Get-StunAssessment -ExitIp $exitIp
+    return @{ code = $assessment.Code; detail = $assessment.Detail }
 }
 
 function Test-RulesPinned { (Test-Path "$CLASH_DIR\clash-verge.yaml") -and (Select-String -Path "$CLASH_DIR\clash-verge.yaml" -Pattern "DOMAIN-SUFFIX,claude.ai,$PROXY_GROUP" -Quiet) -and (Select-String -Path "$CLASH_DIR\clash-verge.yaml" -Pattern "DST-PORT,3478," -Quiet) }
@@ -268,6 +341,98 @@ function Invoke-Status {
     "current=$cur hasA=$hasA hasB=$hasB"
 }
 
+function Test-LaunchGate {
+    $required = @(
+        '代理内核', 'TUN网卡', '出口IP', 'IP一致', '时区', '地区', 'IPv6',
+        'DNS', 'WebRTC', '保镖', '规则置顶', '客户端语言', 'ASN属性', '生态可达性'
+    )
+    $checks = @{}
+    $seen = @{}
+    try {
+        foreach ($line in @(Invoke-CheckDetail)) {
+            $row = [string]$line
+            if ([string]::IsNullOrWhiteSpace($row)) { continue }
+            $parts = $row -split '=', 2
+            if ($parts.Count -ne 2) {
+                return [pscustomobject]@{
+                    CanLaunch = $false
+                    Checks = $checks
+                    BlockingReason = 'checks-malformed'
+                }
+            }
+            $name = [string]$parts[0]
+            if ($required -notcontains $name) {
+                return [pscustomobject]@{
+                    CanLaunch = $false
+                    Checks = $checks
+                    BlockingReason = 'checks-unknown'
+                }
+            }
+            if ($seen.ContainsKey($name)) {
+                return [pscustomobject]@{
+                    CanLaunch = $false
+                    Checks = $checks
+                    BlockingReason = 'checks-duplicate'
+                }
+            }
+            $state = $parts[1] -split ':', 2
+            if ($state.Count -lt 1 -or -not $state[0]) {
+                return [pscustomobject]@{
+                    CanLaunch = $false
+                    Checks = $checks
+                    BlockingReason = 'checks-malformed'
+                }
+            }
+            $seen[$name] = $true
+            $checks[$name] = [string]$state[0]
+        }
+    } catch {
+        return [pscustomobject]@{
+            CanLaunch = $false
+            Checks = $checks
+            BlockingReason = 'checks-error'
+        }
+    }
+    foreach ($name in $required) {
+        if (-not $checks.ContainsKey($name)) {
+            return [pscustomobject]@{
+                CanLaunch = $false
+                Checks = $checks
+                BlockingReason = 'checks-incomplete'
+            }
+        }
+    }
+    if ($checks['出口IP'] -ne 'ok') {
+        return [pscustomobject]@{
+            CanLaunch = $false
+            Checks = $checks
+            BlockingReason = 'egress'
+        }
+    }
+    if ($checks['WebRTC'] -eq 'unknown') {
+        return [pscustomobject]@{
+            CanLaunch = $false
+            Checks = $checks
+            BlockingReason = 'stun-unknown'
+        }
+    }
+    $warningAllowlist = @('IP一致', 'ASN属性')
+    foreach ($name in $required) {
+        if ($checks[$name] -eq 'ok') { continue }
+        if ($checks[$name] -eq 'warn' -and $warningAllowlist -contains $name) { continue }
+        return [pscustomobject]@{
+            CanLaunch = $false
+            Checks = $checks
+            BlockingReason = 'check-failed'
+        }
+    }
+    return [pscustomobject]@{
+        CanLaunch = $true
+        Checks = $checks
+        BlockingReason = ''
+    }
+}
+
 function Stop-ClaudeApp {
     $p = Get-Process -Name 'Claude' -ErrorAction SilentlyContinue
     if (-not $p) { return $true }
@@ -278,7 +443,13 @@ function Stop-ClaudeApp {
 
 function Save-Account($name) {
     robocopy "$DATA" "$BASE\accounts\$name" /MIR /NFL /NDL /NJH /NJS | Out-Null
+    $copyExitCode = $LASTEXITCODE
+    if ($copyExitCode -lt 0 -or $copyExitCode -ge 8) {
+        Log "账号$name 存档失败(robocopy=$copyExitCode)"
+        return $false
+    }
     Log "已存档账号$name"
+    return $true
 }
 
 function Start-ClaudeApp {
@@ -286,39 +457,116 @@ function Start-ClaudeApp {
     if ($exe) { Start-Process $exe } else { Start-Process "shell:AppsFolder" -ErrorAction SilentlyContinue }
 }
 
-function Invoke-Switch($target) {
+function Invoke-Switch([ValidateSet('A','B')][string]$Target) {
+    $script:SwitchExitCode = 0
     $cur = if (Test-Path "$BASE\current.txt") { (Get-Content "$BASE\current.txt" -Raw).Trim() } else { 'none' }
 
+    $preGate = Test-LaunchGate
+    if (-not $preGate.CanLaunch) {
+        $script:SwitchExitCode = 1
+        "FAIL:切换前检查未通过($($preGate.BlockingReason))，未修改账号数据且 Claude 未启动"
+        return
+    }
+
     # 首次运行:收编当前登录为账号A
-    if ($cur -eq 'none' -and (Test-Path $DATA) -and (Get-ChildItem $DATA -ErrorAction SilentlyContinue)) {
-        if (-not (Stop-ClaudeApp)) { "FAIL:Claude 未能退出，请手动退出后重试"; return }
-        Save-Account A
+    $collectCurrent = $cur -eq 'none' -and (Test-Path $DATA) -and (Get-ChildItem $DATA -ErrorAction SilentlyContinue)
+    $willRestoreTarget = $cur -ne $Target
+    if ($collectCurrent -and $Target -eq 'A') { $willRestoreTarget = $false }
+    $stagingData = "$DATA.claude-switch-staging"
+    if ($willRestoreTarget -and (Test-Path -LiteralPath $stagingData)) {
+        $script:SwitchExitCode = 1
+        "FAIL:检测到未处理的账号暂存目录，拒绝覆盖($stagingData)，Claude 未启动"
+        return
+    }
+
+    $collectedCurrent = $false
+    if ($collectCurrent) {
+        if (-not (Stop-ClaudeApp)) {
+            $script:SwitchExitCode = 1
+            "FAIL:Claude 未能退出，请手动退出后重试"
+            return
+        }
+        if (-not (Save-Account A)) {
+            $script:SwitchExitCode = 1
+            "FAIL:当前登录状态存档失败，未更新 current.txt 且 Claude 未启动"
+            return
+        }
         $cur = 'A'; 'A' | Out-File -Encoding ascii -NoNewline "$BASE\current.txt"
+        $collectedCurrent = $true
         Log "首次运行:当前登录状态已收编为账号A"
         "NOTE:已将当前登录收编为账号A"
     }
 
-    if ($cur -eq $target) { Start-ClaudeApp; "INFO:当前已是账号$target"; return }
-
-    if (-not (Stop-ClaudeApp)) { "FAIL:Claude 未能退出，请手动退出后重试"; return }
-
-    if ($cur -ne 'none' -and (Test-Path $DATA)) { Save-Account $cur }
-
-    if (Test-Path "$BASE\accounts\$target") {
-        Remove-Item $DATA -Recurse -Force -ErrorAction SilentlyContinue
-        robocopy "$BASE\accounts\$target" "$DATA" /E /NFL /NDL /NJH /NJS | Out-Null
-        Log "已载入账号$target 存档"
-    } else {
-        Remove-Item $DATA -Recurse -Force -ErrorAction SilentlyContinue
-        New-Item -ItemType Directory -Force -Path $DATA | Out-Null
-        Log "账号$target 无存档，将以全新状态初始化"
+    if ($cur -eq $Target) {
+        $launchGate = if ($collectedCurrent) { Test-LaunchGate } else { $preGate }
+        if (-not $launchGate.CanLaunch) {
+            $script:SwitchExitCode = 1
+            "FAIL:启动前检查未通过($($launchGate.BlockingReason))，Claude 未启动"
+            return
+        }
+        Start-ClaudeApp
+        "INFO:当前已是账号$Target"
+        return
     }
-    $target | Out-File -Encoding ascii -NoNewline "$BASE\current.txt"
-    Start-ClaudeApp
-    Log "已切换到账号$target 并启动"
-    "OK:已切换到账号$target"
-}
 
+    if (-not (Stop-ClaudeApp)) {
+        $script:SwitchExitCode = 1
+        "FAIL:Claude 未能退出，请手动退出后重试"
+        return
+    }
+
+    if ($cur -ne 'none' -and (Test-Path $DATA)) {
+        if (-not (Save-Account $cur)) {
+            $script:SwitchExitCode = 1
+            "FAIL:账号$cur 存档失败，未替换当前数据且 Claude 未启动"
+            return
+        }
+    }
+
+    try {
+        New-Item -ItemType Directory -Path $stagingData -ErrorAction Stop | Out-Null
+    } catch {
+        $script:SwitchExitCode = 1
+        "FAIL:无法创建账号暂存目录，未替换当前数据且 Claude 未启动"
+        return
+    }
+
+    if (Test-Path "$BASE\accounts\$Target") {
+        robocopy "$BASE\accounts\$Target" "$stagingData" /E /NFL /NDL /NJH /NJS | Out-Null
+        $restoreExitCode = $LASTEXITCODE
+        if ($restoreExitCode -lt 0 -or $restoreExitCode -ge 8) {
+            $script:SwitchExitCode = 1
+            "FAIL:账号$Target 存档载入失败(robocopy=$restoreExitCode)，已保留暂存目录$stagingData，Claude 未启动"
+            return
+        }
+        Log "已载入账号$Target 存档"
+    } else {
+        Log "账号$Target 无存档，将以全新状态初始化"
+    }
+
+    try {
+        if (Test-Path -LiteralPath $DATA) {
+            Remove-Item -LiteralPath $DATA -Recurse -Force -ErrorAction Stop
+        }
+        Move-Item -LiteralPath $stagingData -Destination $DATA -ErrorAction Stop
+    } catch {
+        $script:SwitchExitCode = 1
+        "FAIL:账号$Target 暂存数据无法切换到活动目录，Claude 未启动"
+        return
+    }
+    $Target | Out-File -Encoding ascii -NoNewline "$BASE\current.txt"
+
+    $finalGate = Test-LaunchGate
+    if (-not $finalGate.CanLaunch) {
+        $script:SwitchExitCode = 1
+        "FAIL:启动前检查未通过($($finalGate.BlockingReason))，Claude 未启动"
+        return
+    }
+
+    Start-ClaudeApp
+    Log "已切换到账号$Target 并启动"
+    "OK:已切换到账号$Target"
+}
 switch ($args[0]) {
     'checkdetail' {
         $r = Invoke-CheckDetail
@@ -327,6 +575,10 @@ switch ($args[0]) {
     }
     'status' { Invoke-Status }
     'fix'    { Invoke-Fix }
-    'switch' { Invoke-Switch $args[1] }
+    'switch' {
+        $result = @(Invoke-Switch $args[1])
+        $result
+        if ($script:SwitchExitCode -ne 0) { exit $script:SwitchExitCode }
+    }
     default  { "用法: claude-switch.ps1 checkdetail|status|fix|switch A|B" }
 }
