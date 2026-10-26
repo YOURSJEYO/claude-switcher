@@ -160,18 +160,42 @@ public sealed class CoreClientTests
         Assert.Empty(fixture.MarkerFiles());
     }
 
-    [Fact]
-    public async Task RunAsync_QueryTimeoutKillsOnlyThatQueryProcess()
+    [Theory]
+    [InlineData(CoreCommand.CheckDetail)]
+    [InlineData(CoreCommand.Status)]
+    public async Task RunAsync_QueryTimeoutKillsOnlyThatQueryProcess(CoreCommand command)
     {
         using var fixture = new CoreFixture();
         fixture.WriteSleepingScript();
         var client = fixture.CreateClient(queryTimeout: TimeSpan.FromMilliseconds(150));
 
         var error = await Assert.ThrowsAsync<CoreClientException>(() =>
-            client.RunAsync(CoreCommand.CheckDetail, null, OperationId, CancellationToken.None));
+            client.RunAsync(command, null, OperationId, CancellationToken.None));
 
         Assert.Equal(CoreClientError.QueryTimedOut, error.Error);
         Assert.True(fixture.LastProcessKilled);
+        Assert.Empty(fixture.MarkerFiles());
+    }
+
+    [Fact]
+    public async Task RunAsync_DefaultStatusTimeoutIsTenSeconds()
+    {
+        using var fixture = new CoreFixture();
+        fixture.WriteSleepingScript();
+        var killed = false;
+        var client = new CoreClient(fixture.CorePath, fixture.PowerShellPath,
+            processKilledObserver: () => killed = true);
+        // A fallback cancellation keeps a regressed 90-second default bounded and
+        // cleans up only this synthetic query process during the RED run.
+        using var fallback = new CancellationTokenSource(TimeSpan.FromSeconds(14));
+        var stopwatch = Stopwatch.StartNew();
+
+        var error = await Assert.ThrowsAsync<CoreClientException>(() =>
+            client.RunAsync(CoreCommand.Status, null, OperationId, fallback.Token));
+
+        Assert.Equal(CoreClientError.QueryTimedOut, error.Error);
+        Assert.InRange(stopwatch.Elapsed, TimeSpan.FromSeconds(9), TimeSpan.FromSeconds(14));
+        Assert.True(killed);
         Assert.Empty(fixture.MarkerFiles());
     }
 

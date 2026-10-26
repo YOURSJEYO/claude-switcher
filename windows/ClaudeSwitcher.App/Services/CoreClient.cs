@@ -43,6 +43,7 @@ public sealed record CoreInvocation(IReadOnlyList<string> Arguments);
 public sealed class CoreClient
 {
     private static readonly TimeSpan ProcessExitGrace = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan StatusTimeout = TimeSpan.FromSeconds(10);
 
     public CoreClient(
         string corePath,
@@ -155,7 +156,10 @@ public sealed class CoreClient
         }
         else
         {
-            using var timeoutSource = new CancellationTokenSource(QueryTimeout);
+            var queryTimeout = command == CoreCommand.Status && QueryTimeout > StatusTimeout
+                ? StatusTimeout
+                : QueryTimeout;
+            using var timeoutSource = new CancellationTokenSource(queryTimeout);
             using var linkedSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutSource.Token);
             var completed = await Task.WhenAny(operation, Task.Delay(Timeout.InfiniteTimeSpan, linkedSource.Token)).ConfigureAwait(false);
             if (completed != operation)

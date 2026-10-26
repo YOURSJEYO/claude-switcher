@@ -25,7 +25,13 @@
                   RowHeaderWidth="0" Background="White" BorderBrush="#DCE2E8" BorderThickness="1"
                   SelectionUnit="FullRow" MinRowHeight="34">
             <DataGrid.Columns>
-                <DataGridTextColumn Header="状态" Binding="{Binding Icon}" Width="58" />
+                <DataGridTextColumn Header="状态" Binding="{Binding Icon}" Width="58">
+                    <DataGridTextColumn.ElementStyle>
+                        <Style TargetType="TextBlock">
+                            <Setter Property="Foreground" Value="{Binding Accent}" />
+                        </Style>
+                    </DataGridTextColumn.ElementStyle>
+                </DataGridTextColumn>
                 <DataGridTextColumn Header="检查项" Binding="{Binding Name}" Width="155" />
                 <DataGridTextColumn Header="结果" Binding="{Binding Detail}" Width="*" />
             </DataGrid.Columns>
