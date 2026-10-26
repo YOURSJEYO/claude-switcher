@@ -7,5 +7,7 @@ last-check.txt
 
 build/
 _trash/
+**/bin/
+**/obj/
 
 .superpowers/
