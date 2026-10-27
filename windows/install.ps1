@@ -1,204 +1,218 @@
-﻿# Claude 切换器 Windows 版 - 安装器
-# 右键 -> 使用 PowerShell 以管理员身份运行(或在管理员 PowerShell 里执行)
+﻿# Claude Switcher user configuration. Run from an ordinary desktop session.
+[CmdletBinding()]
+param(
+    [switch]$NonInteractive,
+    [string]$ProxyMode,
+    [string]$ProxyGroup,
+    [string]$Country,
+    [string]$TimeZoneId,
+    [string]$Culture,
+    [switch]$Preview,
+    [switch]$Json,
+    [switch]$Initialize,
+    [switch]$RemoveUserTask,
+    [switch]$RequireNoOtherTasks
+)
 $ErrorActionPreference = 'Stop'
-$BASE = "$env:USERPROFILE\.claude-switcher"
-$CLASH_DIR = @(
-    "$env:APPDATA\io.github.clash-verge-rev.clash-verge-rev",
-    "$env:LOCALAPPDATA\io.github.clash-verge-rev.clash-verge-rev"
-) | Where-Object { Test-Path $_ } | Select-Object -First 1
-
-Write-Host "==================================" -ForegroundColor Cyan
-Write-Host "  Claude 账号切换器 · Windows 安装" -ForegroundColor Cyan
-Write-Host "==================================" -ForegroundColor Cyan
-Write-Host ""
-
-# ---- 0. 前置检查 + 代理客户端探测 ----
-$PROXY_MODE = $null
-if ($CLASH_DIR) {
-    $PROXY_MODE = 'clash-verge'
-} elseif (Get-Process -Name 'sing-box' -ErrorAction SilentlyContinue) {
-    $PROXY_MODE = 'sing-box'
-} elseif (Get-Process -Name 'ClashX' -ErrorAction SilentlyContinue) {
-    $PROXY_MODE = 'clashx'
-} elseif (Get-Process -Name 'Surge' -ErrorAction SilentlyContinue) {
-    $PROXY_MODE = 'surge'
-} elseif (Get-Service -Name 'WireGuardTunnel*' -ErrorAction SilentlyContinue | Where-Object Status -eq 'Running') {
-    $PROXY_MODE = 'wireguard'
+$script:SetupSourceDirectory = $PSScriptRoot
+$taskSetupLibrary = Join-Path $PSScriptRoot 'helpers\UserSetup.ps1'
+if (-not (Test-Path -LiteralPath $taskSetupLibrary -PathType Leaf)) {
+    $taskSetupLibrary = Join-Path (Split-Path $PSScriptRoot -Parent) 'helpers\UserSetup.ps1'
 }
-if (-not $PROXY_MODE) {
-    Write-Host "未自动识别到代理客户端,请选择:" -ForegroundColor Yellow
-    Write-Host "  1) clash-verge  2) sing-box  3) clashx  4) surge"
-    Write-Host "  5) wireguard    6) other(仅TUN)  7) auto(任一命中即活)"
-    $pick = Read-Host "请输入序号或名称(直接回车=auto)"
-    switch ($pick) {
-        '1' { $PROXY_MODE = 'clash-verge' }
-        '2' { $PROXY_MODE = 'sing-box' }
-        '3' { $PROXY_MODE = 'clashx' }
-        '4' { $PROXY_MODE = 'surge' }
-        '5' { $PROXY_MODE = 'wireguard' }
-        '6' { $PROXY_MODE = 'other' }
-        '7' { $PROXY_MODE = 'auto' }
-        'clash-verge' { $PROXY_MODE = 'clash-verge' }
-        'sing-box'    { $PROXY_MODE = 'sing-box' }
-        'clashx'      { $PROXY_MODE = 'clashx' }
-        'surge'       { $PROXY_MODE = 'surge' }
-        'wireguard'   { $PROXY_MODE = 'wireguard' }
-        'other'       { $PROXY_MODE = 'other' }
-        'auto'        { $PROXY_MODE = 'auto' }
-        default       { $PROXY_MODE = 'auto' }
+. $taskSetupLibrary
+
+function New-InstallerFlowResult {
+    param([int]$ExitCode, [string]$Stage, [string]$Code, [string]$Message)
+    [pscustomobject]@{
+        ExitCode=$ExitCode
+        Result=[pscustomobject][ordered]@{schemaVersion=1;success=($ExitCode -eq 0);stage=$Stage;code=$Code;message=$Message}
     }
 }
-Write-Host "[OK] 代理客户端: $PROXY_MODE" -ForegroundColor Green
-Write-Host "[OK] 前置检查通过" -ForegroundColor Green
 
-# ---- 1. 出口国家检查(不能是 CN,否则时区会锁错) ----
-$info = try { (& curl.exe -s --max-time 8 "https://ipinfo.io/json" 2>$null | ConvertFrom-Json) } catch { $null }
-$country = if ($info) { $info.country } else { '' }
-$ip = if ($info) { $info.ip } else { '未知' }
-$FORCE = $env:FORCE
-if ($country -eq 'CN' -and -not $FORCE) {
-    Write-Host "X 当前出口在国内(CN),请先开启代理(TUN模式)并确认节点可用再运行" -ForegroundColor Red
-    pause; exit 1
+function Get-SetupIdentity {
+    $identity=[Security.Principal.WindowsIdentity]::GetCurrent()
+    try {
+        $principal=New-Object Security.Principal.WindowsPrincipal($identity)
+        $sid=$identity.User.Value
+        $session=[Diagnostics.Process]::GetCurrentProcess().SessionId
+        if (-not (Test-UserSidForSetup $sid) -or $session -le 0) { throw 'Interactive user required.' }
+        [pscustomobject]@{Sid=$sid;SessionId=$session;Elevated=$principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)}
+    } finally { $identity.Dispose() }
 }
-if (-not $country) {
-    if ($FORCE) {
-        $country = 'US'
-        Write-Host "[WARN] 未能识别出口国家,FORCE 已跳过检查,按 US 写入" -ForegroundColor Yellow
-    } else {
-        Write-Host "X 未能识别出口国家,请确认代理已开启后重试(或用 FORCE=1 跳过)" -ForegroundColor Red
-        pause; exit 1
+
+function Get-SetupEgress {
+    # Only reviewed region scalars leave this function. Never print the raw response.
+    $response=Invoke-RestMethod -Uri 'https://ipinfo.io/json' -TimeoutSec 8 -ErrorAction Stop
+    $country=[string](Get-UserSetupProperty $response 'country')
+    $zone=Get-WindowsTimeZoneId ([string](Get-UserSetupProperty $response 'timezone'))
+    $culture=Get-CultureTarget $country
+    if ($country -cnotmatch '^[A-Z]{2}$' -or $country -eq 'CN' -or -not $zone -or -not $culture) { throw 'Supported non-CN region required.' }
+    [pscustomobject]@{Country=$country;TimeZoneId=$zone;Culture=$culture}
+}
+
+function Get-SetupDetectedProxyMode {
+    foreach($parent in @($env:APPDATA,$env:LOCALAPPDATA)) {
+        if (Test-Path -LiteralPath (Join-Path $parent 'io.github.clash-verge-rev.clash-verge-rev')) { return 'clash-verge' }
+    }
+    foreach($name in @('sing-box','ClashX','Surge')) {
+        if (Get-Process -Name $name -ErrorAction SilentlyContinue) { return $name.ToLowerInvariant() }
+    }
+    if (Get-Service -Name 'WireGuardTunnel*' -ErrorAction SilentlyContinue | Where-Object Status -eq 'Running') { return 'wireguard' }
+    return ''
+}
+
+function Test-SetupProtectedPath {
+    param([string]$Path,[string]$Boundary)
+    $cursor=[IO.Path]::GetFullPath($Path)
+    $boundaryPath=[IO.Path]::GetFullPath($Boundary).TrimEnd('\')
+    if (-not $cursor.StartsWith($boundaryPath+'\',[StringComparison]::OrdinalIgnoreCase)) { return $false }
+    $trusted=@('S-1-5-18','S-1-5-32-544','S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464')
+    $mask=[Security.AccessControl.FileSystemRights]::WriteData -bor [Security.AccessControl.FileSystemRights]::AppendData -bor [Security.AccessControl.FileSystemRights]::WriteExtendedAttributes -bor [Security.AccessControl.FileSystemRights]::WriteAttributes -bor [Security.AccessControl.FileSystemRights]::Delete -bor [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor [Security.AccessControl.FileSystemRights]::ChangePermissions -bor [Security.AccessControl.FileSystemRights]::TakeOwnership
+    while ($true) {
+        $item=Get-Item -LiteralPath $cursor -Force -ErrorAction Stop
+        if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { return $false }
+        $acl=Get-Acl -LiteralPath $cursor -ErrorAction Stop
+        if ($trusted -notcontains $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value) { return $false }
+        foreach($rule in $acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])) {
+            if ($rule.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly) { continue }
+            if ($rule.AccessControlType -eq 'Allow' -and $trusted -notcontains $rule.IdentityReference.Value) {
+                $bits=[BitConverter]::ToUInt32([BitConverter]::GetBytes([int]$rule.FileSystemRights),0)
+                if (($rule.FileSystemRights -band $mask) -or ($bits -band [uint32]0x50000000)) { return $false }
+            }
+        }
+        if ($cursor.TrimEnd('\').Equals($boundaryPath,[StringComparison]::OrdinalIgnoreCase)) { return $true }
+        $cursor=Split-Path -Parent $cursor
     }
 }
-Write-Host "[OK] 出口: $ip ($country)" -ForegroundColor Green
 
-# ---- 2. 自动识别代理组名(仅 Clash Verge) ----
-$grp = 'GLOBAL'
-if ($PROXY_MODE -eq 'clash-verge' -and $CLASH_DIR) {
-    $grp = $null
-    $inGroups = $false; $name = $null
-    foreach ($line in Get-Content "$CLASH_DIR\clash-verge.yaml" -ErrorAction SilentlyContinue) {
-        if ($line -match '^proxy-groups:') { $inGroups = $true; continue }
-        if ($inGroups -and $line -match '^[a-zA-Z]') { $inGroups = $false }
-        if ($inGroups -and $line -match '- name:\s*(.+)') { $name = $Matches[1].Trim('"',"'",' ') }
-        if ($inGroups -and $line -match 'type:\s*select') { $grp = $name; break }
+function Get-SetupProtectedPayload {
+    try {
+        $programFiles=[Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles)
+        $root=Join-Path $programFiles 'ClaudeSwitcher'
+        $helper=Join-Path $root 'helpers\ClaudeSwitcher.Admin.exe'
+        $application=Join-Path $root 'ClaudeSwitcher.exe'
+        foreach($path in @($helper,$application,(Join-Path $root 'scripts\claude-bodyguard.ps1'),(Join-Path $root 'scripts\claude-switch.ps1'),(Join-Path $root 'scripts\install.ps1'))) {
+            if (-not (Test-SetupProtectedPath $path $programFiles)) { return $null }
+        }
+        foreach($entry in @(Get-ChildItem -LiteralPath (Split-Path $helper -Parent) -Recurse -Force -ErrorAction Stop)) {
+            if (-not (Test-SetupProtectedPath $entry.FullName $programFiles)) { return $null }
+        }
+        [pscustomobject]@{Helper=$helper;App=$application}
+    } catch { return $null }
+}
+
+function Copy-SetupUserTemplates {
+    param([string]$Destination)
+    foreach($name in @('claude-switch.ps1','SwitcherUI.ps1','claude-bodyguard.ps1')) {
+        $text=[IO.File]::ReadAllText((Join-Path $script:SetupSourceDirectory $name))
+        $target=Join-Path $Destination $name
+        $temporary=Join-Path $Destination ('.setup.'+[guid]::NewGuid().ToString('N')+'.tmp')
+        try {
+            [IO.File]::WriteAllText($temporary,$text,(New-Object Text.UTF8Encoding($true)))
+            if ([IO.File]::Exists($target)) { [IO.File]::Replace($temporary,$target,[NullString]::Value) }
+            else { [IO.File]::Move($temporary,$target) }
+        } finally { if ([IO.File]::Exists($temporary)) { [IO.File]::Delete($temporary) } }
     }
-    if (-not $grp) { $grp = Read-Host "未能自动识别代理组名,请打开 Clash Verge 查看后输入" }
-    if (-not $grp) { $grp = 'GLOBAL' }
-    Write-Host "[OK] 代理组: $grp" -ForegroundColor Green
 }
 
-# ---- 3. IANA 时区 -> Windows 时区ID ----
-$tzMap = @{
-    'America/New_York'    = 'Eastern Standard Time'
-    'America/Chicago'     = 'Central Standard Time'
-    'America/Denver'      = 'Mountain Standard Time'
-    'America/Los_Angeles' = 'Pacific Standard Time'
-    'America/Toronto'     = 'Eastern Standard Time'
-    'America/Vancouver'   = 'Pacific Standard Time'
-    'Asia/Singapore'      = 'Singapore Standard Time'
-    'Asia/Tokyo'          = 'Tokyo Standard Time'
-    'Asia/Seoul'          = 'Korea Standard Time'
-    'Asia/Taipei'         = 'Taipei Standard Time'
-    'Asia/Hong_Kong'      = 'China Standard Time'
-    'Europe/London'       = 'GMT Standard Time'
-    'Europe/Berlin'       = 'W. Europe Standard Time'
-    'Europe/Paris'        = 'Romance Standard Time'
-    'Australia/Sydney'    = 'AUS Eastern Standard Time'
-    'Australia/Melbourne' = 'AUS Eastern Standard Time'
-}
-$tzIana = if ($info -and $info.timezone) { $info.timezone } else { '' }
-$tzId = $tzMap[$tzIana]
-if (-not $tzId) { $tzId = 'Eastern Standard Time' }
-Write-Host "[OK] 锁定时区: $tzId (按出口IP识别)" -ForegroundColor Green
-
-# ---- 4. 安装文件 ----
-New-Item -ItemType Directory -Force -Path $BASE | Out-Null
-Copy-Item "$PSScriptRoot\claude-switch.ps1"   "$BASE\claude-switch.ps1" -Force
-Copy-Item "$PSScriptRoot\SwitcherUI.ps1"      "$BASE\SwitcherUI.ps1" -Force
-Copy-Item "$PSScriptRoot\claude-bodyguard.ps1" "$BASE\claude-bodyguard.ps1" -Force
-
-# 写入探测到的客户端模式/代理组名/国家/时区(替换串里的 $ 用 $$ 转义,避免被当作捕获组)
-$core = Get-Content "$BASE\claude-switch.ps1" -Raw
-$modeEsc = $PROXY_MODE.Replace('$', '$$')
-$countryEsc = $country.Replace('$', '$$')
-$tzEsc = $tzId.Replace('$', '$$')
-$grpEsc = $grp.Replace('$', '$$')
-$core = $core -replace '\$PROXY_MODE = "[^"]*"', ('$$PROXY_MODE = "' + $modeEsc + '"')
-$core = $core -replace '\$COUNTRY_TARGET = "[^"]*"', ('$$COUNTRY_TARGET = "' + $countryEsc + '"')
-$core = $core -replace '\$TZ_TARGET = "[^"]*"', ('$$TZ_TARGET = "' + $tzEsc + '"')
-$core = $core -replace '\$PROXY_GROUP = "[^"]*"', ('$$PROXY_GROUP = "' + $grpEsc + '"')
-# 强制写回 UTF-8 BOM:计划任务用 powershell.exe 5.1 读取,无 BOM 会把中文读成乱码
-$utf8Bom = New-Object System.Text.UTF8Encoding -ArgumentList $true
-[System.IO.File]::WriteAllText("$BASE\claude-switch.ps1", $core, $utf8Bom)
-$PROXY_MODE | Out-File -Encoding ascii -NoNewline "$BASE\proxy-mode.txt"
-Write-Host "[OK] 核心文件已安装到 $BASE (代理模式: $PROXY_MODE)" -ForegroundColor Green
-
-# ---- 5. 桌面快捷方式 ----
-$ws = New-Object -ComObject WScript.Shell
-$sc = $ws.CreateShortcut("$env:USERPROFILE\Desktop\Claude切换器.lnk")
-$sc.TargetPath = "powershell.exe"
-$sc.Arguments = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$BASE\SwitcherUI.ps1`""
-$sc.WorkingDirectory = $BASE
-$sc.Save()
-Write-Host "[OK] 桌面快捷方式已创建" -ForegroundColor Green
-
-# ---- 6. 置顶规则(仅 Clash Verge) ----
-if ($PROXY_MODE -eq 'clash-verge' -and $CLASH_DIR) {
-    New-Item -ItemType Directory -Force -Path "$CLASH_DIR\profiles" | Out-Null
-    @"
-profile:
-  store-selected: true
-
-prepend-rules:
-  - DOMAIN-SUFFIX,claude.ai,$grp
-  - DOMAIN-SUFFIX,claude.com,$grp
-  - DOMAIN-SUFFIX,anthropic.com,$grp
-  - DOMAIN-SUFFIX,claudeusercontent.com,$grp
-  - DOMAIN-SUFFIX,challenges.cloudflare.com,$grp
-  - DOMAIN-SUFFIX,datadoghq.com,$grp
-  - DOMAIN-SUFFIX,segment.io,$grp
-  - DOMAIN-SUFFIX,stripe.com,$grp
-  - DOMAIN-SUFFIX,stripe.network,$grp
-  - DOMAIN-SUFFIX,stripecdn.com,$grp
-  - DOMAIN-SUFFIX,intercom.io,$grp
-  - DOMAIN-SUFFIX,intercomcdn.com,$grp
-  - DOMAIN-SUFFIX,intercomassets.com,$grp
-  - DST-PORT,3478,$grp
-  - DST-PORT,5349,$grp
-  - DST-PORT,19302,$grp
-"@ | Out-File -Encoding utf8 "$CLASH_DIR\profiles\Merge.yaml"
-    Write-Host "[OK] Claude 域名置顶规则已写入(重启 Clash Verge 后生效)" -ForegroundColor Green
-} elseif ($PROXY_MODE -eq 'clash-verge') {
-    Write-Host "[WARN] 未找到 Clash Verge 配置目录,跳过置顶规则;请手动在 Clash Verge 中添加" -ForegroundColor Yellow
-} else {
-    Write-Host "[OK] 非 Clash Verge:请在你的代理客户端中为 Claude 域名添加置顶/直连规则" -ForegroundColor Yellow
-}
-
-# ---- 7. 系统级配置 ----
-Set-TimeZone -Id $tzId
-Get-NetAdapterBinding -ComponentID ms_tcpip6 -ErrorAction SilentlyContinue | Where-Object { $_.Enabled } | Disable-NetAdapterBinding -Confirm:$false
-Clear-DnsClientCache
-Write-Host "[OK] 时区已锁定 / IPv6 已关闭 / DNS 缓存已刷新" -ForegroundColor Green
-
-# ---- 8. 注册保镖计划任务 ----
-$action  = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$BASE\claude-bodyguard.ps1`""
-$trigger = New-ScheduledTaskTrigger -AtLogOn
-Register-ScheduledTask -TaskName 'ClaudeBodyguard' -Action $action -Trigger $trigger -Force | Out-Null
-Stop-ScheduledTask -TaskName 'ClaudeBodyguard' -ErrorAction SilentlyContinue
-Start-ScheduledTask -TaskName 'ClaudeBodyguard'
-Write-Host "[OK] 保镖已注册并启动(计划任务,登录自动运行)" -ForegroundColor Green
-
-# ---- 9. 重启 Clash 使规则生效(仅 Clash Verge) ----
-if ($PROXY_MODE -eq 'clash-verge') {
-    Get-Process -Name 'clash-verge','Clash Verge' -ErrorAction SilentlyContinue | Stop-Process -Force
-    Start-Sleep 2
-    $cv = Get-ChildItem "$env:LOCALAPPDATA\Programs" -Recurse -Filter 'Clash Verge*.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($cv) { Start-Process $cv.FullName }
+function Invoke-NativeUserSetupFlow {
+    param([hashtable]$Options,[string]$BasePath=(Join-Path $env:USERPROFILE '.claude-switcher'))
+    $stage='user'; $handle=$null
+    try {
+        $entryCount=0
+        foreach($entry in @('Preview','Initialize','RemoveUserTask')) {
+            if ([bool](Get-UserSetupProperty $Options $entry)) { $entryCount++ }
+        }
+        if ($entryCount -gt 1 -or ([bool](Get-UserSetupProperty $Options 'RequireNoOtherTasks') -and -not [bool](Get-UserSetupProperty $Options 'RemoveUserTask'))) {
+            return New-InstallerFlowResult 1 'user' 'invalid_entry_mode' 'Choose exactly one setup entry; task inventory checks are valid only for task removal.'
+        }
+        $identity=Get-SetupIdentity
+        if ([bool](Get-UserSetupProperty $Options 'Initialize')) {
+            if ($identity.Elevated) { return New-InstallerFlowResult 1 'user' 'normal_user_required' 'Open configuration from your ordinary desktop session.' }
+            $payload=Get-SetupProtectedPayload
+            if ($null -eq $payload) { return New-InstallerFlowResult 1 'user' 'protected_payload_required' 'Install the native Setup EXE before system configuration.' }
+            Start-Process -FilePath $payload.App -ArgumentList '--setup' -ErrorAction Stop | Out-Null
+            return New-InstallerFlowResult 0 'completed' 'ok' 'configuration window opened'
+        }
+        if ([bool](Get-UserSetupProperty $Options 'RemoveUserTask')) {
+            $payload=Get-SetupProtectedPayload
+            if ($null -eq $payload) { return New-InstallerFlowResult 1 'user' 'protected_payload_required' 'Protected helper is unavailable.' }
+            if ([bool](Get-UserSetupProperty $Options 'RequireNoOtherTasks')) {
+                try {
+                    $taskPrefix='ClaudeSwitcher.Bodyguard.'
+                    $otherTasks=@(Get-ScheduledTask -TaskPath '\' -ErrorAction Stop | Where-Object {
+                        $_.TaskName.StartsWith($taskPrefix,[StringComparison]::Ordinal) -and
+                        $_.TaskName -cne ($taskPrefix+$identity.Sid)
+                    })
+                    if ($otherTasks.Count -gt 0) { return New-InstallerFlowResult 1 'user' 'other_user_tasks_exist' 'Other configured users must remove their owned task from their own desktop session first.' }
+                } catch { return New-InstallerFlowResult 1 'user' 'task_inventory_failed' 'Owned task inventory could not be verified; uninstallation was blocked.' }
+            }
+            $locked=Enter-UserSetupOperation -BasePath $BasePath
+            if (-not $locked.Success) { return New-InstallerFlowResult 2 'user' 'busy_or_recovery_required' 'A running operation or pending recovery blocks task removal.' }
+            $handle=$locked.Handle; $stage='system'
+            $removed=Invoke-ElevatedSystemSetup -HelperPath $payload.Helper -Operation 'remove-bodyguard-task' -UserSid $identity.Sid -SessionId $identity.SessionId
+            if (-not $removed.Success) {
+                if ([bool](Get-UserSetupProperty $removed 'Cancelled')) { return New-InstallerFlowResult 4 'system' 'uac_cancelled' 'Task removal was cancelled; user data has been retained and removal can be retried.' }
+                return New-InstallerFlowResult 1 'system' 'task_removal_failed' 'Owned task removal failed; user data has been retained.'
+            }
+            return New-InstallerFlowResult 0 'completed' 'ok' 'owned task removed; user data retained'
+        }
+        if ($identity.Elevated) { return New-InstallerFlowResult 1 'user' 'normal_user_required' 'Open configuration from your ordinary desktop session.' }
+        $stage='preview'
+        $interactive=-not [bool](Get-UserSetupProperty $Options 'NonInteractive')
+        $reader=$null
+        if ($interactive) { $reader={param($prompt) Read-Host $prompt} }
+        $selectedMode=[string](Get-UserSetupProperty $Options 'ProxyMode')
+        $detectedMode=if ($selectedMode) { $selectedMode } else { Get-SetupDetectedProxyMode }
+        $proxy=Resolve-ProxyConfiguration -DetectedMode $detectedMode -RequestedMode $selectedMode -ProxyGroup ([string](Get-UserSetupProperty $Options 'ProxyGroup')) -NonInteractive (-not $interactive) -ReadHost $reader
+        if (-not $proxy.Success) { return New-InstallerFlowResult 1 'preview' 'invalid_proxy_configuration' $proxy.Error }
+        $observed=Get-SetupEgress
+        $validated=Test-UserSetupConfiguration -InputObject @{NonInteractive=$true;ProxyMode=$proxy.ProxyMode;ProxyGroup=$proxy.ProxyGroup;Country=$observed.Country;TimeZoneId=$observed.TimeZoneId;Culture=$observed.Culture}
+        if (-not $validated.Success) { return New-InstallerFlowResult 1 'preview' 'unsupported_region' 'A supported non-CN region and known time zone are required.' }
+        if ([bool](Get-UserSetupProperty $Options 'Preview')) {
+            return [pscustomobject]@{ExitCode=0;Result=[pscustomobject][ordered]@{schemaVersion=1;success=$true;country=$validated.Country;timeZoneId=$validated.TimeZoneId;culture=$validated.Culture;proxyMode=$validated.ProxyMode;proxyGroup=$validated.ProxyGroup}}
+        }
+        foreach($field in @('Country','TimeZoneId','Culture')) {
+            $reviewed=[string](Get-UserSetupProperty $Options $field)
+            if (-not $reviewed -and $interactive) { $Options[$field]=$validated.$field }
+            elseif ($reviewed -cne $validated.$field) { return New-InstallerFlowResult 1 'preview' 'reviewed_region_mismatch' ('Reviewed '+$field+' must match the current egress region.') }
+        }
+        if ($interactive) {
+            $answer=Read-Host ('Apply '+$validated.Country+' / '+$validated.TimeZoneId+' and configure IPv6, DNS cache and bodyguard? Type YES')
+            if ($answer -cne 'YES') { return New-InstallerFlowResult 4 'user' 'cancelled' 'Configuration was cancelled before changes.' }
+        }
+        $stage='user'
+        $payload=Get-SetupProtectedPayload
+        if ($null -eq $payload) { return New-InstallerFlowResult 1 'user' 'protected_payload_required' 'Install the native Setup EXE before system configuration.' }
+        foreach($name in @('claude-switch.ps1','SwitcherUI.ps1','claude-bodyguard.ps1')) {
+            if (-not (Test-Path -LiteralPath (Join-Path $script:SetupSourceDirectory $name) -PathType Leaf)) { return New-InstallerFlowResult 1 'user' 'template_missing' 'Bundled user templates are incomplete.' }
+        }
+        $locked=Enter-UserSetupOperation -BasePath $BasePath
+        if (-not $locked.Success) { return New-InstallerFlowResult 2 'user' 'busy_or_recovery_required' 'A running operation or pending recovery blocks configuration.' }
+        $handle=$locked.Handle
+        Copy-SetupUserTemplates -Destination $BasePath
+        $written=Write-UserConfiguration -ConfigPath (Join-Path $BasePath 'config.json') -InputObject $validated
+        if (-not $written.Success) { return New-InstallerFlowResult 1 'user' 'configuration_write_failed' 'User configuration could not be saved; system configuration has not started.' }
+        $stage='system'
+        $system=Invoke-ElevatedSystemSetup -HelperPath $payload.Helper -Operation 'repair-system' -UserSid $identity.Sid -SessionId $identity.SessionId -TimeZoneId $validated.TimeZoneId
+        if (-not $system.Success) {
+            if ([bool](Get-UserSetupProperty $system 'Cancelled')) { return New-InstallerFlowResult 4 'system' 'uac_cancelled' 'System configuration was cancelled; user configuration was saved and can be retried.' }
+            return New-InstallerFlowResult 1 'system' 'system_configuration_failed' 'System configuration failed; earlier completed steps may remain applied. Retry configuration.'
+        }
+        return New-InstallerFlowResult 0 'completed' 'ok' 'configuration complete'
+    } catch {
+        return New-InstallerFlowResult 1 $stage 'setup_failed' 'Configuration failed at the reported stage. Review the selected proxy and region, then retry.'
+    } finally {
+        if ($null -ne $handle) { Exit-UserSetupOperation -Handle $handle }
+    }
 }
 
-Write-Host ""
-Write-Host "==================================" -ForegroundColor Green
-Write-Host "  安装完成! 双击桌面「Claude切换器」使用" -ForegroundColor Green
-Write-Host "  首次使用: 打开后选账号A(自动收编当前登录)" -ForegroundColor Green
-Write-Host "==================================" -ForegroundColor Green
-pause
+if ($MyInvocation.InvocationName -ne '.') {
+    try { [Console]::OutputEncoding=New-Object Text.UTF8Encoding($false) } catch {}
+    $taskOptions=@{NonInteractive=[bool]$NonInteractive;ProxyMode=$ProxyMode;ProxyGroup=$ProxyGroup;Country=$Country;TimeZoneId=$TimeZoneId;Culture=$Culture;Preview=[bool]$Preview;Initialize=[bool]$Initialize;RemoveUserTask=[bool]$RemoveUserTask;RequireNoOtherTasks=[bool]$RequireNoOtherTasks}
+    if ($Json) { $taskOptions.NonInteractive=$true }
+    $taskOutcome=Invoke-NativeUserSetupFlow -Options $taskOptions
+    if ($Json) { ConvertTo-Json -InputObject $taskOutcome.Result -Compress -Depth 5 }
+    else { Write-Host $taskOutcome.Result.message }
+    exit $taskOutcome.ExitCode
+}

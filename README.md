@@ -102,7 +102,7 @@ AI 服务平台的风控已经从"看 IP"进化到**全维度环境画像**：�
 
 **系统要求**：macOS · Clash Verge / Shadowrocket / sing-box / ClashX / Surge 任一（TUN 可用）· Claude 桌面版 · python3
 
-> **Windows 用户**：[`windows/`](windows/) 目录提供 Windows 版（PowerShell + WPF，Beta），安装与注意事项见 [windows/README.md](windows/README.md)。
+> **Windows 用户**：[`windows/`](windows/) 目录提供 Windows x64 原生版源码（WPF + PowerShell 核心，Development Beta）。Inno 模板、受保护 helper、受控 Preview/Apply 安装流程、原生 SetupClient/协议和 Windows CI 打包定义均已存在；但本机没有 ISCC，尚未成功编译 Setup EXE，也没有安装器/UAC/Windows 10/11 VM acceptance 或 Windows release readiness。详见 [windows/README.md](windows/README.md)。
 > **Linux 用户**：[`linux/`](linux/) 目录提供 Linux 版（bash + systemd，Beta），设计取舍（无官方桌面版→切换浏览器登录态）见 [linux/README.md](linux/README.md)。
 
 ### 直接下载（推荐）
@@ -111,9 +111,13 @@ AI 服务平台的风控已经从"看 IP"进化到**全维度环境画像**：�
 
 - `ClaudeSwitcher-<版本>-installer-kit.zip`：**首次安装推荐**。解压后双击 `installer/安装.command`，安装核心脚本、守护进程与桌面 App。
 - `ClaudeSwitcher-<版本>-macos-arm64.dmg` / `.zip`：仅包含 macOS 界面 App；核心脚本已安装时可用于替换旧版界面。
-- `ClaudeSwitcher-<版本>-windows.zip` / `ClaudeSwitcher-<版本>-linux.tar.gz`：Windows / Linux 脚本包（Beta），说明见各自目录的 README。
+- `ClaudeSwitcher-<version>-windows-setup.exe`：**计划中的** Windows x64 Inno Setup 安装包（Development Beta，未签名，.NET 10 self-contained App/Admin）。源码中的 `windows/ClaudeSwitcher.iss`、`windows/helpers/` 和受控安装流程已存在，但本机没有 ISCC，尚未成功编译 Setup EXE；安装/UAC/升级/卸载/保留行为仍待 Windows 10/11 VM acceptance，见 [windows/README.md](windows/README.md)。
+- `ClaudeSwitcher-<version>-windows.zip`：**计划中的** Windows PowerShell 脚本兼容包，不是便携原生 EXE，也不是原生安装器。It is a compatibility UI/CLI package only: it does not contain the protected Admin helper executable and does not install the protected helper; it provides no full install or system-repair parity. Protected system changes require native setup or a separately documented, auditable administrator procedure; never run user-writable scripts elevated. 当前没有 Setup EXE 编译或 Windows 10/11 VM acceptance 证据，不要把它当作完整安装路径或当前已发布的资产。
+- `ClaudeSwitcher-<版本>-linux.tar.gz`：Linux 脚本包（Beta），说明见 [linux/README.md](linux/README.md)。
 
-> macOS 产物为 ad-hoc 签名、未公证。首次打开若被 Gatekeeper 拦截，请右键打开，或在「系统设置 → 隐私与安全性」中放行。每个 Release 附带 `SHA256SUMS-release.txt`，可用 `shasum -a 256 -c` 校验下载文件。
+> macOS 产物为 ad-hoc 签名、未公证。首次打开若被 Gatekeeper 拦截，请右键打开，或在「系统设置 → 隐私与安全性」中放行。计划中的 Windows 安装包也将是未签名产物，完成后 SmartScreen 可能提示风险；在发布前必须核对 `SHA256SUMS-release.txt` 和下载来源。每个 Release 附带 `SHA256SUMS-release.txt`，可用 `shasum -a 256 -c` 校验下载文件。
+
+> **Windows 验收边界**：托管 CI 只执行构建、测试和打包，不是 Windows 10/11 安装验收；本文不声称已有成功的 hosted run。发布工作流设计为：Windows 原生资产只有在受保护环境中验证了绑定精确 commit、版本和 Setup EXE SHA256 的签名 VM 验收报告后才会发布。当前本机没有 ISCC，未成功编译 Setup EXE，且安装器执行/UAC/升级/卸载/VM acceptance 仍 outstanding；没有 Windows release readiness。
 
 ### 从源码安装
 
@@ -308,7 +312,7 @@ WEBRTC_POLICY=proxy ~/.local/bin/claude-switch.sh fix
 ├── core/
 │   ├── claude-switch.sh    # 核心逻辑:审计/切换/修复
 │   └── stun-probe.py       # STUN 探针(手工协议实现)
-├── windows/                # Windows 版(PowerShell 核心 + WPF 界面, Beta)
+├── windows/                # Windows x64 原生版(PowerShell 核心 + WPF 界面, Development Beta)
 ├── linux/                  # Linux 版(bash 核心 + systemd 保镖 + 终端菜单, Beta)
 ├── docs/                   # Web 版环境检测页(index.html 等, GitHub Pages 从这里发布) + 项目文档
 ├── daemons/                # Kill-Switch / Watchdog / 自动更新 launchd 模板
@@ -349,9 +353,9 @@ Bug 反馈和功能建议仍建议提交 Issue，便于跟踪与处理。
 本项目按"实战驱动"迭代——风控怎么进化，防护就怎么跟上：
 
 - [x] macOS 版：14 项环境审计 + Kill-Switch + 快照切换 + 漂移自愈（已稳定）
-- [x] Windows 版（Beta）：核心逻辑全移植
+- [x] Windows 版（Development Beta）：PowerShell 核心、WPF/Admin 源码、受控安装流程、Inno 模板和发布/打包自动化已接入
 - [x] Linux 版（Beta）：bash 核心 + systemd 保镖 + 终端菜单
-- [ ] Windows 版稳定化：多客户端/地区自适应/TUN 通用判定已落地（静态验证通过），真机回归持续进行
+- [ ] Windows 版稳定化：在本机成功编译 Setup EXE，并完成安装器执行/UAC/升级/卸载与数据保留验证，再通过 Windows 11/Windows 10 签名 VM acceptance；托管 CI 不替代真机验收
 - [ ] Linux 版稳定化：多客户端/地区自适应/COW 快照已落地（桩测试通过），多发行版真机回归持续进行
 - [x] Web 版环境检测页：手机/平板浏览器打开即测，零安装
 - [x] 更多指纹维度：桌面端 `fingerprint` 命令覆盖字体地区特征 + GPU/虚拟机特征，Canvas/WebGL 由 Web 检测页覆盖

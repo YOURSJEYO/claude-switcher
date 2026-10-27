@@ -1,5 +1,6 @@
 ﻿# Claude 账号切换器 - Windows 核心脚本
 # 用法: powershell -NoProfile -File claude-switch.ps1 check|status|switch A|B|checkdetail|fix
+param([Parameter(Position=0)][string]$Command, [Parameter(Position=1)][string]$Target, [switch]$Json, [string]$OperationId)
 $ErrorActionPreference = 'Continue'
 try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {}
 
@@ -8,6 +9,7 @@ $PROXY_MODE = "clash-verge"            # 代理客户端: clash-verge|sing-box|c
 $COUNTRY_TARGET = "US"                 # 目标出口国家(安装时按出口自动识别)
 $TZ_TARGET = "Eastern Standard Time"   # Windows 时区ID
 $PROXY_GROUP = "GLOBAL"                # Clash 代理组名
+$LOCALE_TARGET = "en-US"               # 旧版默认值；版本化用户配置会覆盖
 # =======================================================
 
 $BASE = Join-Path $env:USERPROFILE ".claude-switcher"
@@ -18,9 +20,404 @@ $CLASH_DIR = @(
     (Join-Path $env:LOCALAPPDATA "io.github.clash-verge-rev.clash-verge-rev")
 ) | Where-Object { Test-Path $_ } | Select-Object -First 1
 if (-not $CLASH_DIR) { $CLASH_DIR = Join-Path $env:APPDATA "io.github.clash-verge-rev.clash-verge-rev" }
-New-Item -ItemType Directory -Force -Path "$BASE\accounts" | Out-Null
 
-function Log($m) { "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') $m" | Out-File -Append -Encoding utf8 $LOG }
+function Log($m) { "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') $(Protect-CoreText ([string]$m))" | Out-File -Append -Encoding utf8 $LOG }
+
+function Import-CoreConfiguration {
+    # Configuration is data, never dot-sourced or interpolated into executable code.
+    $path = Join-Path $BASE 'config.json'
+    if (-not (Test-Path -LiteralPath $path)) {
+        $script:CoreConfigurationKind='Legacy'
+        return $true
+    }
+    $script:CoreConfigurationKind='Invalid'
+    try {
+        $file = Get-Item -LiteralPath $path -ErrorAction Stop
+        if ($file.PSIsContainer -or $file.Length -gt 65536 -or ($file.Attributes -band [IO.FileAttributes]::ReparsePoint)) { return $false }
+        $config = [IO.File]::ReadAllText($path) | ConvertFrom-Json -ErrorAction Stop
+        if ($null -eq $config -or $config -is [array]) { return $false }
+        $fields = @('schemaVersion','proxyMode','proxyGroup','country','timeZoneId','culture')
+        $properties = @($config.PSObject.Properties)
+        if ($properties.Count -ne $fields.Count) { return $false }
+        foreach ($property in $properties) { if ($fields -cnotcontains $property.Name) { return $false } }
+        if ($config.schemaVersion -isnot [int] -and $config.schemaVersion -isnot [long]) { return $false }
+        if ($config.schemaVersion -ne 1) { return $false }
+        foreach ($field in @('proxyMode','proxyGroup','country','timeZoneId','culture')) {
+            if ($config.$field -isnot [string]) { return $false }
+        }
+        if ($config.proxyMode -cnotin @('auto','clash-verge','sing-box','clashx','surge','wireguard','other')) { return $false }
+        $group = $config.proxyGroup
+        if ($group.Length -gt 128 -or $group -match '[\x00-\x1f\x7f;`$"''<>|&{}\\/]' -or $group.Contains('..')) { return $false }
+        if ($config.proxyMode -eq 'clash-verge' -and [string]::IsNullOrWhiteSpace($group)) { return $false }
+        $cultures = @{ US='en-US'; JP='ja-JP'; TW='zh-TW'; HK='zh-HK'; SG='en-SG'; GB='en-GB'; DE='de-DE'; FR='fr-FR'; KR='ko-KR'; AU='en-AU'; CA='en-CA' }
+        if ($config.country -cnotmatch '^[A-Z]{2}$' -or -not $cultures.ContainsKey($config.country) -or $config.culture -cne $cultures[$config.country]) { return $false }
+        if ($config.timeZoneId.Length -gt 128 -or $config.timeZoneId -notmatch '^[A-Za-z0-9 .()+-]+$') { return $false }
+        $null = [TimeZoneInfo]::FindSystemTimeZoneById($config.timeZoneId)
+        $null = [Globalization.CultureInfo]::GetCultureInfo($config.culture)
+        # Apply only after the whole record validates, so partial records cannot mix targets.
+        $script:PROXY_MODE = $config.proxyMode
+        $script:PROXY_GROUP = $group
+        $script:COUNTRY_TARGET = $config.country
+        $script:TZ_TARGET = $config.timeZoneId
+        $script:LOCALE_TARGET = $config.culture
+        $script:CoreConfigurationKind='Native'
+        return $true
+    } catch { $script:CoreConfigurationKind='Invalid'; return $false }
+}
+
+function Get-CoreCallerIdentity {
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    try {
+        $sid = $identity.User.Value
+        $session = [Diagnostics.Process]::GetCurrentProcess().SessionId
+        if ($sid -cnotmatch '^S-1-(?:5-21|12-1)(?:-[0-9]+){4}$' -or $session -le 0) { throw '普通用户交互会话不可确认' }
+        return [pscustomobject]@{ Sid=$sid; SessionId=$session }
+    } finally { $identity.Dispose() }
+}
+
+function Test-UnsafeWindowsAllow([string]$Sid, $Rights, $PropagationFlags) {
+    if ($PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly) { return $false }
+    if ($Sid -in @('S-1-5-18','S-1-5-32-544','S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464')) { return $false }
+    $mutation=[Security.AccessControl.FileSystemRights]::WriteData -bor [Security.AccessControl.FileSystemRights]::AppendData -bor [Security.AccessControl.FileSystemRights]::WriteExtendedAttributes -bor [Security.AccessControl.FileSystemRights]::WriteAttributes -bor [Security.AccessControl.FileSystemRights]::Delete -bor [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor [Security.AccessControl.FileSystemRights]::ChangePermissions -bor [Security.AccessControl.FileSystemRights]::TakeOwnership
+    $bits=[BitConverter]::ToUInt32([BitConverter]::GetBytes([int]$Rights),0)
+    return [bool](($Rights -band $mutation) -or ($bits -band [uint32]0x50000000))
+}
+
+function Test-ProtectedWindowsPath([string]$Path, [string]$ProgramFiles) {
+    try {
+        $full=[IO.Path]::GetFullPath($Path)
+        $boundary=[IO.Path]::GetFullPath($ProgramFiles).TrimEnd('\')
+        if (-not $full.StartsWith($boundary+'\',[StringComparison]::OrdinalIgnoreCase)) { return $false }
+        $trusted=@('S-1-5-18','S-1-5-32-544','S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464')
+        $cursor=$full
+        while ($true) {
+            $item=Get-Item -LiteralPath $cursor -Force -ErrorAction Stop
+            if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { return $false }
+            $acl=Get-Acl -LiteralPath $cursor -ErrorAction Stop
+            if ($trusted -notcontains $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value) { return $false }
+            foreach($rule in $acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])) {
+                if ($rule.AccessControlType -eq 'Allow' -and (Test-UnsafeWindowsAllow $rule.IdentityReference.Value $rule.FileSystemRights $rule.PropagationFlags)) { return $false }
+            }
+            if ($cursor.TrimEnd('\').Equals($boundary,[StringComparison]::OrdinalIgnoreCase)) { break }
+            $cursor=Split-Path -Parent $cursor
+        }
+        return $true
+    } catch { return $false }
+}
+
+function Get-ProtectedWindowsPayload([switch]$ForElevation) {
+    $programFiles=[Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles)
+    $root=Join-Path $programFiles 'ClaudeSwitcher'
+    $helper=Join-Path $root 'helpers\ClaudeSwitcher.Admin.exe'
+    $bodyguard=Join-Path $root 'scripts\claude-bodyguard.ps1'
+    if (-not (Test-Path -LiteralPath $helper -PathType Leaf) -or -not (Test-Path -LiteralPath $bodyguard -PathType Leaf)) { return $null }
+    foreach($path in @($helper,$bodyguard,(Join-Path $root 'scripts\claude-switch.ps1'))) {
+        if (-not (Test-ProtectedWindowsPath $path $programFiles)) { return $null }
+    }
+    # The self-contained helper loads its own runtime; writable dependency files are unsafe too.
+    if ($ForElevation) {
+        foreach($file in @(Get-ChildItem -LiteralPath (Split-Path $helper -Parent) -File -Recurse -Force -ErrorAction Stop)) {
+            if (-not (Test-ProtectedWindowsPath $file.FullName $programFiles)) { return $null }
+        }
+    }
+    return [pscustomobject]@{ Root=$root; Helper=$helper; Script=$bodyguard; PowerShell=(Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::System)) 'WindowsPowerShell\v1.0\powershell.exe') }
+}
+
+function Invoke-ProtectedSystemRepair {
+    try {
+        $payload=Get-ProtectedWindowsPayload -ForElevation
+        if ($null -eq $payload) { return 1 }
+        $caller=Get-CoreCallerIdentity
+        if ($TZ_TARGET -notmatch '^[A-Za-z0-9 .()+-]{1,128}$') { return 1 }
+        $null=[TimeZoneInfo]::FindSystemTimeZoneById($TZ_TARGET)
+        $arguments='--operation repair-system --user-sid '+$caller.Sid+' --session-id '+$caller.SessionId+' --time-zone-id "'+$TZ_TARGET+'"'
+        $helper=Start-Process -FilePath $payload.Helper -Verb RunAs -WindowStyle Hidden -Wait -PassThru -ArgumentList $arguments -ErrorAction Stop
+        if ($helper.ExitCode -eq 0) { return 0 }
+        return 1
+    } catch {
+        $errorObject=$_.Exception
+        while ($errorObject) {
+            if ($errorObject -is [ComponentModel.Win32Exception] -and $errorObject.NativeErrorCode -eq 1223) { return 4 }
+            $errorObject=$errorObject.InnerException
+        }
+        return 1
+    }
+}
+
+function Get-BodyguardPowerShellPath {
+    $system=[Environment]::GetFolderPath([Environment+SpecialFolder]::System)
+    return Join-Path $system 'WindowsPowerShell\v1.0\powershell.exe'
+}
+
+function Get-BodyguardArguments([string]$ScriptPath) {
+    return '-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "'+$ScriptPath+'"'
+}
+
+function Get-BodyguardLegacyArguments([string]$ScriptPath) {
+    return '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "'+$ScriptPath+'"'
+}
+
+function Get-BodyguardAccountSid([string]$Value) {
+    if ([string]::IsNullOrWhiteSpace($Value)) { return $null }
+    if ($Value -cmatch '^S-1-(?:5-21|12-1)(?:-[0-9]+){4}$') { return $Value }
+    try {
+        $account=New-Object -TypeName Security.Principal.NTAccount -ArgumentList $Value
+        $sid=$account.Translate([Security.Principal.SecurityIdentifier])
+        return $sid.Value
+    } catch { return $null }
+}
+
+function Get-BodyguardTriggerKind($Trigger) {
+    if ($null -eq $Trigger) { return '' }
+    try {
+        $class=$Trigger.CimClass
+        if ($null -ne $class -and -not [string]::IsNullOrEmpty([string]$class.CimClassName)) { return [string]$class.CimClassName }
+    } catch {}
+    foreach($name in @($Trigger.PSObject.TypeNames)) {
+        if ($name -like 'MSFT_Task*Trigger') { return $name }
+    }
+    return ''
+}
+
+function Test-BodyguardLogonTrigger($Trigger, [string]$Sid, [switch]$AllowUnscopedUser) {
+    if ((Get-BodyguardTriggerKind $Trigger) -cne 'MSFT_TaskLogonTrigger') { return $false }
+    $enabled=$Trigger.PSObject.Properties['Enabled']
+    if ($null -eq $enabled -or $enabled.Value -isnot [bool] -or $enabled.Value -ne $true) { return $false }
+    $user=$Trigger.PSObject.Properties['UserId']
+    if ($null -eq $user) { return [bool]$AllowUnscopedUser }
+    if ([string]::IsNullOrWhiteSpace([string]$user.Value)) { return $false }
+    $resolved=Get-BodyguardAccountSid ([string]$user.Value)
+    return $resolved -ceq $Sid
+}
+
+function Get-BodyguardTaskSetting($Settings, [string]$Name) {
+    if ($null -eq $Settings) { return $null }
+    $property=$Settings.PSObject.Properties[$Name]
+    if ($null -eq $property) { return $null }
+    return $property.Value
+}
+
+function Test-BodyguardTaskSetting($Settings, [string]$Name, $Expected) {
+    if ($null -eq $Settings) { return $false }
+    $property=$Settings.PSObject.Properties[$Name]
+    if ($null -eq $property) { return $false }
+    if ($Expected -is [bool]) {
+        if ($property.Value -isnot [bool]) { return $false }
+        return $property.Value -eq $Expected
+    }
+    return ([string]$property.Value) -ceq ([string]$Expected)
+}
+
+function Test-BodyguardUnlimitedExecution($Value) {
+    if ($null -eq $Value) { return $false }
+    if ($Value -is [TimeSpan]) { return $Value -eq [TimeSpan]::Zero }
+    return ([string]$Value) -ceq 'PT0S'
+}
+
+function Test-ProtectedBodyguardTaskSettings($Settings) {
+    if (-not (Test-BodyguardTaskSetting $Settings 'Enabled' $true)) { return $false }
+    if (-not (Test-BodyguardTaskSetting $Settings 'AllowDemandStart' $true)) { return $false }
+    if (-not (Test-BodyguardTaskSetting $Settings 'MultipleInstances' 'IgnoreNew')) { return $false }
+    if (-not (Test-BodyguardTaskSetting $Settings 'DisallowStartIfOnBatteries' $false)) { return $false }
+    if (-not (Test-BodyguardTaskSetting $Settings 'StopIfGoingOnBatteries' $false)) { return $false }
+    $limit=$Settings.PSObject.Properties['ExecutionTimeLimit']
+    if ($null -eq $limit) { return $false }
+    return Test-BodyguardUnlimitedExecution $limit.Value
+}
+
+function Test-BodyguardOwnedFile([string]$Path, [string]$Sid, [long]$MaxBytes) {
+    try {
+        $item=Get-Item -LiteralPath $Path -ErrorAction Stop
+        if ($null -eq $item -or $item.PSIsContainer -or $item.Length -gt $MaxBytes -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) { return $false }
+        $acl=Get-Acl -LiteralPath $Path -ErrorAction Stop
+        if ($null -eq $acl) { return $false }
+        $owner=$acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
+        return $owner -ceq $Sid
+    } catch { return $false }
+}
+
+function Get-BodyguardTaskLastRunTime($Task) {
+    $info=Get-ScheduledTaskInfo -TaskName $Task.TaskName -TaskPath $Task.TaskPath -ErrorAction Stop
+    if ($null -eq $info) { throw 'Scheduled task run time is unavailable.' }
+    $property=$info.PSObject.Properties['LastRunTime']
+    if ($null -eq $property -or $null -eq $property.Value) { throw 'Scheduled task run time is unavailable.' }
+    $value=$property.Value
+    $lastRun=if ($value -is [DateTime]) { [DateTimeOffset]$value } elseif ($value -is [DateTimeOffset]) { $value } else { [DateTimeOffset]::Parse([string]$value,[Globalization.CultureInfo]::InvariantCulture) }
+    if ($lastRun -le [DateTimeOffset]::MinValue.AddDays(1)) { throw 'Scheduled task has no verified run instance.' }
+    return $lastRun
+}
+
+function Test-BodyguardProcessMatchesRun($Process, [DateTimeOffset]$LastRunTime) {
+    if ($null -eq $Process) { return $false }
+    $startProperty=$Process.PSObject.Properties['StartTime']
+    if ($null -eq $startProperty -or $null -eq $startProperty.Value) { return $false }
+    try { $start=[DateTimeOffset]$startProperty.Value } catch { return $false }
+    $offset=($start-$LastRunTime).TotalSeconds
+    return $offset -ge -15 -and $offset -le 60
+}
+
+function Test-BodyguardCimOwner($Info, [string]$Sid) {
+    if ($null -eq $Info) { return $false }
+    try {
+        $owner=Invoke-CimMethod -InputObject $Info -MethodName GetOwnerSid -ErrorAction Stop
+        return $null -ne $owner -and $owner.ReturnValue -eq 0 -and -not [string]::IsNullOrEmpty([string]$owner.Sid) -and ([string]$owner.Sid) -ceq $Sid
+    } catch { return $false }
+}
+
+function Test-BodyguardPrincipal($Principal, $Caller) {
+    if ($null -eq $Principal -or $null -eq $Caller) { return $false }
+    $user=$Principal.PSObject.Properties['UserId']
+    $runLevel=$Principal.PSObject.Properties['RunLevel']
+    $logonType=$Principal.PSObject.Properties['LogonType']
+    if ($null -eq $user -or $null -eq $runLevel -or $null -eq $logonType) { return $false }
+    $resolved=Get-BodyguardAccountSid ([string]$user.Value)
+    if ($resolved -cne $Caller.Sid) { return $false }
+    if ([string]$runLevel.Value -cnotin @('Limited','LeastPrivilege')) { return $false }
+    return [string]$logonType.Value -cin @('Interactive','InteractiveToken')
+}
+
+function Test-ProtectedBodyguardTask($Task, $Caller, $Payload) {
+    if ($null -eq $Task -or $null -eq $Caller -or $null -eq $Payload) { return $false }
+    $name='ClaudeSwitcher.Bodyguard.'+$Caller.Sid
+    $arguments=Get-BodyguardArguments $Payload.Script
+    if ([string]$Task.TaskName -cne $name -or [string]$Task.TaskPath -cne '\' -or [string]$Task.State -notin @('Running','4')) { return $false }
+    if (-not (Test-BodyguardPrincipal $Task.Principal $Caller)) { return $false }
+    if (-not (Test-ProtectedBodyguardTaskSettings $Task.Settings)) { return $false }
+    if (@($Task.Actions).Count -ne 1 -or @($Task.Triggers).Count -ne 1) { return $false }
+    if (-not (Test-BodyguardLogonTrigger $Task.Triggers[0] $Caller.Sid)) { return $false }
+    if ([string]$Task.Actions[0].Execute -ine $Payload.PowerShell -or [string]$Task.Actions[0].Arguments -cne $arguments) { return $false }
+    $lastRun=Get-BodyguardTaskLastRunTime $Task
+    $path=Join-Path $BASE 'bodyguard-heartbeat.json'
+    if (-not (Test-BodyguardOwnedFile $path $Caller.Sid 4096)) { return $false }
+    $heartbeat=[IO.File]::ReadAllText($path) | ConvertFrom-Json -ErrorAction Stop
+    if ($null -eq $heartbeat -or $heartbeat -is [array]) { return $false }
+    foreach($field in @('schemaVersion','userSid','sessionId','processId','updatedAt')) {
+        if ($null -eq $heartbeat.PSObject.Properties[$field]) { return $false }
+    }
+    if ($heartbeat.schemaVersion -ne 1 -or $heartbeat.userSid -cne $Caller.Sid -or $heartbeat.sessionId -ne $Caller.SessionId -or ($heartbeat.processId -isnot [int] -and $heartbeat.processId -isnot [long]) -or $heartbeat.processId -le 0 -or $heartbeat.processId -gt [int]::MaxValue) { return $false }
+    # PowerShell 7.6 materializes ISO JSON timestamps as DateTime; 5.1 keeps strings.
+    $updated=if ($heartbeat.updatedAt -is [DateTime]) { [DateTimeOffset]$heartbeat.updatedAt } else { [DateTimeOffset]::ParseExact($heartbeat.updatedAt,'o',[Globalization.CultureInfo]::InvariantCulture) }
+    $age=([DateTimeOffset]::UtcNow-$updated).TotalSeconds
+    if ($age -lt -5 -or $age -gt 45) { return $false }
+    $process=Get-Process -Id $heartbeat.processId -ErrorAction Stop
+    if ($null -eq $process -or $process.Id -ne $heartbeat.processId -or $process.SessionId -ne $Caller.SessionId -or $process.Path -ine $Payload.PowerShell) { return $false }
+    if (-not (Test-BodyguardProcessMatchesRun $process $lastRun)) { return $false }
+    $infos=@(Get-CimInstance -ClassName Win32_Process -Filter ('ProcessId='+$heartbeat.processId) -ErrorAction Stop)
+    if ($infos.Count -ne 1 -or -not (Test-BodyguardCimOwner $infos[0] $Caller.Sid)) { return $false }
+    $command=[string]$infos[0].CommandLine
+    return $command -ieq ('"'+$Payload.PowerShell+'" '+$arguments) -or $command -ieq ($Payload.PowerShell+' '+$arguments)
+}
+
+function Get-BodyguardExactTasks([string]$TaskName) {
+    return @(Get-ScheduledTask -TaskPath '\' -ErrorAction Stop | Where-Object {
+        [string]$_.TaskName -ceq $TaskName -and [string]$_.TaskPath -ceq '\'
+    })
+}
+
+function Get-LegacyBodyguardTask {
+    try {
+        $tasks=@(Get-BodyguardExactTasks 'ClaudeBodyguard')
+        if ($tasks.Count -ne 1) { return $null }
+        return $tasks[0]
+    } catch { return $null }
+}
+
+function Test-LegacyBodyguardTask($Task, $Caller, [string]$PowerShellPath) {
+    if ($null -eq $Task -or $null -eq $Caller -or [string]::IsNullOrWhiteSpace($PowerShellPath)) { return $false }
+    if ([string]$Task.TaskName -cne 'ClaudeBodyguard' -or [string]$Task.TaskPath -cne '\' -or [string]$Task.State -cnotin @('Running','4')) { return $false }
+    if (-not (Test-BodyguardPrincipal $Task.Principal $Caller)) { return $false }
+    if (-not (Test-ProtectedBodyguardTaskSettings $Task.Settings)) { return $false }
+    if (@($Task.Actions).Count -ne 1 -or @($Task.Triggers).Count -ne 1) { return $false }
+    if (-not (Test-BodyguardLogonTrigger $Task.Triggers[0] $Caller.Sid -AllowUnscopedUser)) { return $false }
+    $scriptPath=Join-Path $BASE 'claude-bodyguard.ps1'
+    $arguments=Get-BodyguardLegacyArguments $scriptPath
+    $execute=[string]$Task.Actions[0].Execute
+    if ($execute -ine 'powershell.exe' -and $execute -ine $PowerShellPath) { return $false }
+    if ([string]$Task.Actions[0].Arguments -cne $arguments) { return $false }
+    if (-not (Test-BodyguardOwnedFile $scriptPath $Caller.Sid 1048576)) { return $false }
+    $lastRun=Get-BodyguardTaskLastRunTime $Task
+    $expectedCommands=@(
+        ('"{0}" {1}' -f $PowerShellPath,$arguments),
+        ('{0} {1}' -f $PowerShellPath,$arguments),
+        ('"powershell.exe" {0}' -f $arguments),
+        ('powershell.exe {0}' -f $arguments)
+    )
+    $candidateCount=0
+    $matches=@()
+    foreach($info in @(Get-CimInstance -ClassName Win32_Process -Filter "Name='powershell.exe'" -ErrorAction Stop)) {
+        if ($null -eq $info) { continue }
+        $command=[string]$info.CommandLine
+        # Windows executable paths are case-insensitive; the full command remains exact otherwise.
+        if (-not @($expectedCommands | Where-Object { $_ -ieq $command }).Count) { continue }
+        $candidateCount++
+        try { $process=Get-Process -Id $info.ProcessId -ErrorAction Stop } catch { return $false }
+        if ($null -eq $process -or $process.Id -ne $info.ProcessId -or $process.SessionId -ne $Caller.SessionId -or $process.Path -ine $PowerShellPath) { return $false }
+        if (-not (Test-BodyguardCimOwner $info $Caller.Sid)) { return $false }
+        if (Test-BodyguardProcessMatchesRun $process $lastRun) { $matches += $process }
+    }
+    return $candidateCount -eq 1 -and @($matches).Count -eq 1
+}
+
+function Get-BodyguardTaskAssessment {
+    $caller=Get-CoreCallerIdentity
+    $kind=[string]$script:CoreConfigurationKind
+    if ($kind -notin @('Legacy','Native','Invalid')) {
+        $configured=Import-CoreConfiguration
+        $kind=[string]$script:CoreConfigurationKind
+        if ($kind -notin @('Legacy','Native','Invalid')) {
+            if ($configured) {
+                if (Test-Path -LiteralPath (Join-Path $BASE 'config.json')) { $kind='Native' } else { $kind='Legacy' }
+            } else { $kind='Invalid' }
+        }
+    }
+    if ($kind -eq 'Invalid') { return [pscustomobject]@{ Kind='Invalid'; Task=$null; Reason='configuration-invalid' } }
+    $protectedName='ClaudeSwitcher.Bodyguard.'+$caller.Sid
+    try { $protectedTasks=@(Get-BodyguardExactTasks $protectedName) } catch { return [pscustomobject]@{ Kind='Invalid'; Task=$null; Reason='protected-task-query-failed' } }
+    if ($protectedTasks.Count -gt 1) { return [pscustomobject]@{ Kind='Invalid'; Task=$null; Reason='duplicate-protected-task' } }
+    if ($protectedTasks.Count -eq 1) {
+        $payload=$null
+        try { $payload=Get-ProtectedWindowsPayload } catch {}
+        if ($null -ne $payload -and (Test-ProtectedBodyguardTask $protectedTasks[0] $caller $payload)) {
+            return [pscustomobject]@{ Kind='Protected'; Task=$protectedTasks[0]; Reason='verified' }
+        }
+        return [pscustomobject]@{ Kind='Invalid'; Task=$protectedTasks[0]; Reason='protected-task-invalid' }
+    }
+    if ($kind -ne 'Legacy') { return [pscustomobject]@{ Kind='Invalid'; Task=$null; Reason='legacy-not-allowed' } }
+    try { $legacyTasks=@(Get-BodyguardExactTasks 'ClaudeBodyguard') } catch { return [pscustomobject]@{ Kind='Invalid'; Task=$null; Reason='legacy-task-query-failed' } }
+    if ($legacyTasks.Count -eq 0) { return [pscustomobject]@{ Kind='Invalid'; Task=$null; Reason='bodyguard-task-missing' } }
+    if ($legacyTasks.Count -ne 1) { return [pscustomobject]@{ Kind='LegacyMigration'; Task=$null; Reason='duplicate-legacy-task' } }
+    if (Test-LegacyBodyguardTask $legacyTasks[0] $caller (Get-BodyguardPowerShellPath)) {
+        return [pscustomobject]@{ Kind='Legacy'; Task=$legacyTasks[0]; Reason='verified-legacy' }
+    }
+    return [pscustomobject]@{ Kind='LegacyMigration'; Task=$legacyTasks[0]; Reason='legacy-task-invalid' }
+}
+
+function Test-BodyguardHealth {
+    try { return (Get-BodyguardTaskAssessment).Kind -in @('Protected','Legacy') } catch { return $false }
+}
+function Test-SystemRepairRequired {
+    if ((Get-TimeZone).Id -ne $TZ_TARGET) { return $true }
+    if (@(Get-NetAdapterBinding -ComponentID ms_tcpip6 -ErrorAction SilentlyContinue | Where-Object { $_.Enabled -eq $true }).Count -gt 0) { return $true }
+    return -not (Test-BodyguardHealth) -or -not (Test-DNS)
+}
+
+function Test-DNS {
+    try {
+        $addresses=@(Resolve-DnsName claude.ai -Type A -ErrorAction Stop | Where-Object { $_.IPAddress })
+        return $addresses.Count -gt 0 -and @($addresses | Where-Object { $_.IPAddress -notlike '198.18.*' }).Count -eq 0
+    } catch { return $false }
+}
+
+function Get-OwnedClaudeProcesses {
+    $caller=Get-CoreCallerIdentity
+    foreach($process in @(Get-Process -Name 'Claude' -ErrorAction SilentlyContinue)) {
+        if ($process.SessionId -ne $caller.SessionId) { continue }
+        $info=Get-CimInstance -ClassName Win32_Process -Filter ('ProcessId='+$process.Id) -ErrorAction Stop
+        $owner=Invoke-CimMethod -InputObject $info -MethodName GetOwnerSid -ErrorAction Stop
+        if ($owner.ReturnValue -ne 0 -or [string]::IsNullOrEmpty($owner.Sid)) { throw '无法验证 Claude 进程归属' }
+        if ($owner.Sid -eq $caller.Sid) { $process }
+    }
+}
 
 # 代理客户端显示名(供检查细节输出)
 function Get-ProxyName {
@@ -194,6 +591,10 @@ function Test-WebRTC($exitIp) {
 function Test-RulesPinned { (Test-Path "$CLASH_DIR\clash-verge.yaml") -and (Select-String -Path "$CLASH_DIR\clash-verge.yaml" -Pattern "DOMAIN-SUFFIX,claude.ai,$PROXY_GROUP" -Quiet) -and (Select-String -Path "$CLASH_DIR\clash-verge.yaml" -Pattern "DST-PORT,3478," -Quiet) }
 
 function Invoke-CheckDetail {
+    if (-not (Import-CoreConfiguration)) {
+        foreach ($definition in @(Get-CoreCheckDefinitions)) { "$($definition.name)=fail:用户配置无效，请重新配置" }
+        return
+    }
     $pname = Get-ProxyName
     if (Test-ProxyAlive) {
         if ($PROXY_MODE -eq 'other') { "代理内核=ok:$pname(仅校验TUN)" }
@@ -215,13 +616,13 @@ function Invoke-CheckDetail {
     elseif (-not $lastip) { "IP一致=ok:首次记录" }
     elseif ($e.ip -eq $lastip) { "IP一致=ok" }
     else { "IP一致=warn:$lastip → $($e.ip)" }
-    if ($e.ip) { $e.ip | Out-File -Encoding ascii -NoNewline $lastipFile }
+    if ($e.ip) { Write-AtomicState $lastipFile $e.ip }
 
     $tz = (Get-TimeZone).Id
     if ($tz -eq $TZ_TARGET) { "时区=ok" } else { "时区=fail:$tz" }
 
     $cult = (Get-Culture).Name
-    if ($cult -eq 'en-US') { "地区=ok" } else { "地区=fail:$cult" }
+    if ($cult -eq $LOCALE_TARGET) { "地区=ok" } else { "地区=fail:$cult" }
 
     $v6off = [bool](Get-NetAdapterBinding -ComponentID ms_tcpip6 -ErrorAction SilentlyContinue | Where-Object { $_.Enabled -eq $true })
     if (-not $v6off) { "IPv6=ok:已关闭" } else { "IPv6=fail:未关闭" }
@@ -232,8 +633,7 @@ function Invoke-CheckDetail {
     $w = Test-WebRTC $e.ip
     "WebRTC=$($w.code):$($w.detail)"
 
-    $bg = Get-ScheduledTask -TaskName 'ClaudeBodyguard' -ErrorAction SilentlyContinue
-    if ($bg) { "保镖=ok" } else { "保镖=fail:未安装" }
+    if (Test-BodyguardHealth) { "保镖=ok" } else { "保镖=fail:任务归属、运行状态或存活证据未验证；请重新配置" }
 
     if (Test-RulesPinned) { "规则置顶=ok" } else { "规则置顶=fail:未生效" }
 
@@ -252,6 +652,18 @@ function Invoke-CheckDetail {
 }
 
 function Invoke-Fix {
+    $script:FixExitCode=0
+    if (-not (Import-CoreConfiguration)) { $script:FixExitCode=1; 'FIX:用户配置无效，请重新配置；未执行修复'; return }
+    $assessment=Get-BodyguardTaskAssessment
+    if ($assessment.Kind -cin @('Legacy','LegacyMigration')) {
+        $script:FixExitCode=5
+        if ($assessment.Kind -eq 'Legacy') {
+            'FIX:检测到旧版 ClaudeBodyguard；当前构建不支持自动迁移，也不会停止或删除旧任务。请先按兼容迁移指引处理旧任务/进程，再配置受保护任务。'
+        } else {
+            'FIX:检测到旧版 ClaudeBodyguard，但任务归属、触发、设置或运行实例无法完整验证；当前构建不支持自动迁移，也不会停止或删除旧任务。请先按兼容迁移指引处理旧任务/进程，再配置受保护任务。'
+        }
+        return
+    }
     "FIX:开始一键修复"
 
     # A. 拉起代理客户端并等待内核+TUN(仅 Clash Verge 可自动拉起)
@@ -271,23 +683,18 @@ function Invoke-Fix {
         else { "FIX:TUN 未在线($pname),请检查客户端 TUN 开关" }
     }
 
-    # B. 时区/IPv6/DNS/保镖(需管理员:通过 UAC 弹一次)
-    $adminScript = @()
-    if ((Get-TimeZone).Id -ne $TZ_TARGET) { $adminScript += "Set-TimeZone -Id '$TZ_TARGET'" }
-    if (Get-NetAdapterBinding -ComponentID ms_tcpip6 -ErrorAction SilentlyContinue | Where-Object { $_.Enabled }) { $adminScript += "Get-NetAdapterBinding -ComponentID ms_tcpip6 | Disable-NetAdapterBinding -Confirm:`$false" }
-    $adminScript += "Clear-DnsClientCache"
-    if (-not (Get-ScheduledTask -TaskName 'ClaudeBodyguard' -ErrorAction SilentlyContinue)) {
-        $adminScript += "`$a = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$BASE\claude-bodyguard.ps1`"'; `$t = New-ScheduledTaskTrigger -AtLogOn; Register-ScheduledTask -TaskName 'ClaudeBodyguard' -Action `$a -Trigger `$t -Force | Out-Null; Start-ScheduledTask -TaskName 'ClaudeBodyguard'"
-    }
-    if ($adminScript.Count -gt 0) {
-        "FIX:修复时区/IPv6/DNS/保镖(需要管理员授权)..."
-        $tmp = "$env:TEMP\claude-fix-$([guid]::NewGuid().Guid).ps1"
-        ($adminScript -join "`n") | Out-File -Encoding utf8 $tmp
-        try { Start-Process powershell -Verb RunAs -Wait -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$tmp`"" } catch { "FIX:管理员授权被取消" }
-        Remove-Item $tmp -ErrorAction SilentlyContinue
-        "FIX:时区/IPv6/DNS/保镖 ✓"
+    # B. One fixed protected helper owns all elevated system changes.
+    if (Test-SystemRepairRequired) {
+        'FIX:修复时区/IPv6/DNS/保镖(需要管理员授权)...'
+        $script:FixExitCode=Invoke-ProtectedSystemRepair
+        if ($script:FixExitCode -ne 0) {
+            if ($script:FixExitCode -eq 4) { 'FIX:管理员授权已取消；请重新检查实际状态' }
+            else { 'FIX:系统修复未完成；请安装原生版本或检查受保护助手，已完成的步骤不会标成全部成功' }
+            return
+        }
+        'FIX:时区/IPv6/DNS/保镖 ✓'
     } else {
-        "FIX:时区/IPv6/保镖 无需修复 ✓"
+        'FIX:时区/IPv6/保镖无需修复 ✓'
     }
 
     # B2. 置顶规则(仅 Clash Verge 可自动改写)
@@ -342,6 +749,9 @@ function Invoke-Status {
 }
 
 function Test-LaunchGate {
+    if (-not (Import-CoreConfiguration)) {
+        return [pscustomobject]@{ CanLaunch=$false; Checks=@{}; BlockingReason='configuration-invalid' }
+    }
     $required = @(
         '代理内核', 'TUN网卡', '出口IP', 'IP一致', '时区', '地区', 'IPv6',
         'DNS', 'WebRTC', '保镖', '规则置顶', '客户端语言', 'ASN属性', '生态可达性'
@@ -434,11 +844,257 @@ function Test-LaunchGate {
 }
 
 function Stop-ClaudeApp {
-    $p = Get-Process -Name 'Claude' -ErrorAction SilentlyContinue
+    $p = @(Get-OwnedClaudeProcesses)
     if (-not $p) { return $true }
     $p | Stop-Process -Force
-    for ($i = 0; $i -lt 15; $i++) { if (-not (Get-Process -Name 'Claude' -ErrorAction SilentlyContinue)) { return $true }; Start-Sleep 1 }
+    for ($i = 0; $i -lt 15; $i++) { if (-not @(Get-OwnedClaudeProcesses).Count) { return $true }; Start-Sleep 1 }
     return $false
+}
+
+function Enter-OperationLock([int]$WaitMilliseconds = 2000) {
+    $timer = [Diagnostics.Stopwatch]::StartNew()
+    do {
+        try { return [IO.File]::Open((Join-Path $BASE 'operation.lock'), [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None) }
+        catch [IO.IOException] { if ($timer.ElapsedMilliseconds -ge $WaitMilliseconds) { return $null }; Start-Sleep -Milliseconds 25 }
+    } while ($true)
+}
+
+function Exit-OperationLock($Handle) { if ($null -ne $Handle) { $Handle.Dispose() } }
+
+function Write-AtomicState([string]$Path, [string]$Text) {
+    $temporary = "$Path.$([guid]::NewGuid().ToString('N')).tmp"
+    try {
+        [IO.File]::WriteAllText($temporary, $Text, (New-Object Text.UTF8Encoding $true))
+        if ([IO.File]::Exists($Path)) { [IO.File]::Replace($temporary, $Path, [NullString]::Value) }
+        else { [IO.File]::Move($temporary, $Path) }
+    } finally { if ([IO.File]::Exists($temporary)) { [IO.File]::Delete($temporary) } }
+}
+
+function Get-CurrentAccount {
+    $current = if (Test-Path -LiteralPath "$BASE\current.txt") { ([IO.File]::ReadAllText("$BASE\current.txt")).Trim() } else { 'none' }
+    if ($current -cnotin @('A', 'B', 'none')) { throw 'Invalid current account marker.' }
+    return $current
+}
+
+function Get-AccountTreeManifest([string]$Path) {
+    $root = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    if (-not $root.PSIsContainer -or ($root.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'Invalid account tree.' }
+    $pending = New-Object 'Collections.Generic.Stack[string]'
+    $pending.Push($root.FullName)
+    $prefix = $root.FullName.TrimEnd('\') + '\'
+    $manifest = @()
+    while ($pending.Count) {
+        $dir = $pending.Pop()
+        foreach ($item in @(Get-ChildItem -LiteralPath $dir -Force -ErrorAction Stop)) {
+            if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Reparse points are not supported in account trees.' }
+            $relative = $item.FullName.Substring($prefix.Length)
+            if ($item.PSIsContainer) {
+                $manifest += [pscustomobject][ordered]@{ path=$relative; kind='directory'; length=0; hash='' }
+                $pending.Push($item.FullName)
+            } else {
+                $hash = (Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256 -ErrorAction Stop).Hash
+                $manifest += [pscustomobject][ordered]@{ path=$relative; kind='file'; length=$item.Length; hash=$hash }
+            }
+        }
+    }
+    return @($manifest | Sort-Object -Property path)
+}
+
+function Test-AccountTree([string]$Path, $Manifest) {
+    try {
+        $actual = @(Get-AccountTreeManifest $Path)
+        $expected = @($Manifest)
+        if ($actual.Count -ne $expected.Count) { return $false }
+        for ($i=0; $i -lt $actual.Count; $i++) {
+            foreach ($field in @('path', 'kind', 'length', 'hash')) {
+                if ([string]$actual[$i].$field -cne [string]$expected[$i].$field) { return $false }
+            }
+        }
+        return $true
+    } catch { return $false }
+}
+
+function Invoke-AccountCopy([string]$Source, [string]$Destination) {
+    # /R and /W are bounded; terminate only this child on timeout, then wait before recovery.
+    $copy = New-Object Diagnostics.Process
+    $copy.StartInfo = New-Object Diagnostics.ProcessStartInfo
+    $copy.StartInfo.FileName = Join-Path $env:SystemRoot 'System32\robocopy.exe'
+    $copy.StartInfo.Arguments = '"' + $Source.TrimEnd('\') + '" "' + $Destination.TrimEnd('\') + '" /E /R:1 /W:1 /XJ /COPY:DAT /DCOPY:DAT /NFL /NDL /NJH /NJS /NP'
+    $copy.StartInfo.UseShellExecute = $false
+    $copy.StartInfo.CreateNoWindow = $true
+    $copy.StartInfo.RedirectStandardOutput = $true
+    $copy.StartInfo.RedirectStandardError = $true
+    try {
+        if (-not $copy.Start()) { return 16 }
+        $stdoutDrain = $copy.StandardOutput.BaseStream.CopyToAsync([IO.Stream]::Null)
+        $stderrDrain = $copy.StandardError.BaseStream.CopyToAsync([IO.Stream]::Null)
+        $timedOut = -not $copy.WaitForExit(600000)
+        if ($timedOut) { $copy.Kill(); $copy.WaitForExit() }
+        $drains = [Threading.Tasks.Task[]]@($stdoutDrain,$stderrDrain)
+        try {
+            if (-not [Threading.Tasks.Task]::WaitAll($drains, 5000)) { return 16 }
+        } catch {
+            # WaitAll observes faults; never report a copy as successful after a drain failure.
+            foreach ($drain in $drains) { if ($drain.IsFaulted) { $null = $drain.Exception } }
+            return 16
+        }
+        if ($timedOut) { return 16 }
+        return $copy.ExitCode
+    } finally { $copy.Dispose() }
+}
+
+function Invoke-TransactionCheckpoint([string]$Phase) { }
+
+function New-TransactionResult($OperationId, [string]$Current, [bool]$Success, [bool]$RecoveryRequired, [string]$Code) {
+    $phase = if ($RecoveryRequired) { 'recoveryRequired' } elseif ($Success) { 'completed' } else { 'idle' }
+    return [pscustomobject]@{ operationId=[string]$OperationId; phase=$phase; current=$Current; success=$Success; recoveryRequired=$RecoveryRequired; code=$Code }
+}
+
+function Save-TransactionRecord($Record) {
+    Write-AtomicState "$BASE\transaction.json" (ConvertTo-Json -InputObject $Record -Depth 8 -Compress)
+}
+
+function Remove-VerifiedTransactionArtifacts($Record) {
+    # Validate every sidecar before deleting any of them. A valid committed target
+    # does not prove that an unrelated .previous directory belongs to this operation.
+    if (-not (Test-AccountTree $DATA $Record.targetManifest)) { throw 'Committed target verification failed.' }
+    if ($Record.source -in @('A','B') -and -not (Test-AccountTree "$BASE\accounts\$($Record.source)" $Record.sourceManifest)) { throw 'Source archive verification failed.' }
+    $verified = @()
+    if (Test-Path -LiteralPath "$DATA.new") { throw 'Unexpected active staging tree must be preserved.' }
+    if (Test-Path -LiteralPath "$DATA.previous") {
+        if (-not $Record.hadActive -or -not (Test-AccountTree "$DATA.previous" $Record.sourceManifest)) { throw 'Previous active tree cannot be verified.' }
+        $verified += "$DATA.previous"
+    }
+    if ($Record.source -in @('A','B')) {
+        $archive = "$BASE\accounts\$($Record.source)"
+        if (Test-Path -LiteralPath "$archive.new") { throw 'Unexpected archive staging tree must be preserved.' }
+        if (Test-Path -LiteralPath "$archive.previous") {
+            if ($Record.hadArchive -isnot [bool] -or -not $Record.hadArchive -or
+                $null -eq $Record.priorArchiveManifest -or -not (Test-AccountTree "$archive.previous" $Record.priorArchiveManifest)) { throw 'Previous archive cannot be verified.' }
+            $verified += "$archive.previous"
+        }
+    }
+    Invoke-TransactionCheckpoint -Phase beforeCleanup
+    foreach ($path in $verified) { Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction Stop }
+    [IO.File]::Delete("$BASE\transaction.json")
+    Invoke-TransactionCheckpoint -Phase afterCleanup
+}
+
+function Recover-PendingTransactionCore {
+    $journal = "$BASE\transaction.json"
+    $current = 'none'
+    try { $current = Get-CurrentAccount } catch { return (New-TransactionResult '' $current $false $true 'invalid-current') }
+    if (-not (Test-Path -LiteralPath $journal)) {
+        $residue = @("$DATA.new", "$DATA.previous", "$DATA.claude-switch-staging", "$BASE\accounts\A.new", "$BASE\accounts\A.previous", "$BASE\accounts\B.new", "$BASE\accounts\B.previous")
+        if (@($residue | Where-Object { Test-Path -LiteralPath $_ }).Count) { return (New-TransactionResult '' $current $false $true 'unowned-residue') }
+        return (New-TransactionResult '' $current $true $false 'idle')
+    }
+    try {
+        $tx = [IO.File]::ReadAllText($journal) | ConvertFrom-Json -ErrorAction Stop
+        $id = [guid]::Empty
+        if ($tx.schemaVersion -ne 1 -or -not [guid]::TryParse([string]$tx.operationId, [ref]$id) -or $id -eq [guid]::Empty -or
+            $tx.source -cnotin @('A','B','none') -or $tx.target -cnotin @('A','B') -or
+            $tx.phase -cnotin @('started','archived','prepared','replacing','activeReplaced','committed')) { throw 'Invalid transaction record.' }
+        if ($tx.phase -eq 'committed' -or ($current -eq $tx.target -and $tx.phase -eq 'activeReplaced')) {
+            if (-not (Test-AccountTree $DATA $tx.targetManifest)) { throw 'Committed tree cannot be verified.' }
+            Write-AtomicState "$BASE\current.txt" $tx.target
+            Remove-VerifiedTransactionArtifacts $tx
+            return (New-TransactionResult $tx.operationId $tx.target $true $false 'recovered-commit')
+        }
+        # Before marker commit, restore only from the verified original active tree.
+        if ($tx.hadActive) {
+            if (-not (Test-AccountTree $DATA $tx.sourceManifest)) {
+                if (-not (Test-AccountTree "$DATA.previous" $tx.sourceManifest)) { throw 'Original active tree cannot be verified.' }
+                if (Test-Path -LiteralPath $DATA) {
+                    if ((Test-Path -LiteralPath "$DATA.new") -or -not (Test-AccountTree $DATA $tx.targetManifest)) { throw 'Unknown active data must be preserved.' }
+                    [IO.Directory]::Move($DATA, "$DATA.new")
+                }
+                [IO.Directory]::Move("$DATA.previous", $DATA)
+            }
+        } elseif (Test-Path -LiteralPath $DATA) {
+            # A fresh profile has no source; preserve every tree and require explicit recovery.
+            throw 'Fresh account transaction requires recovery.'
+        }
+        Write-AtomicState "$BASE\current.txt" $tx.source
+        # Preserve all stage/archive data on rollback. A later mutation is blocked until reviewed.
+        $tx.phase = 'started'
+        Save-TransactionRecord $tx
+        return (New-TransactionResult $tx.operationId $tx.source $false $true 'rolled-back-review-required')
+    } catch { return (New-TransactionResult '' $current $false $true 'recovery-required') }
+}
+
+function Invoke-AccountTransactionCore([ValidateSet('A','B')][string]$Target, [guid]$OperationId = [guid]::NewGuid()) {
+    $current = Get-CurrentAccount
+    $prior = Recover-PendingTransactionCore
+    if ($prior.recoveryRequired) { return $prior }
+    $current = Get-CurrentAccount
+    $hadActive = Test-Path -LiteralPath $DATA
+    $source = $current
+    if ($source -eq 'none' -and $hadActive -and @(Get-ChildItem -LiteralPath $DATA -Force -ErrorAction Stop).Count) { $source = 'A' }
+    $tx = [ordered]@{ schemaVersion=1; operationId=$OperationId.ToString('D'); source=$source; target=$Target; phase='started'; hadActive=[bool]$hadActive; sourceManifest=@(); targetManifest=@(); hadArchive=$false; priorArchiveManifest=@() }
+    try {
+        if ($hadActive) { $tx.sourceManifest = @(Get-AccountTreeManifest $DATA) }
+        Save-TransactionRecord $tx
+        if ($source -in @('A','B') -and $hadActive) {
+            $archive = "$BASE\accounts\$source"
+            if (Test-Path -LiteralPath $archive) {
+                $tx.hadArchive = $true
+                $tx.priorArchiveManifest = @(Get-AccountTreeManifest $archive)
+                Save-TransactionRecord $tx
+            }
+            $copyCode = Invoke-AccountCopy -Source $DATA -Destination "$archive.new"
+            if ($copyCode -lt 0 -or $copyCode -ge 8 -or -not (Test-AccountTree "$archive.new" $tx.sourceManifest)) { throw 'Archive copy failed verification.' }
+            if (Test-Path -LiteralPath $archive) {
+                Invoke-TransactionCheckpoint -Phase beforeArchiveBackup
+                [IO.Directory]::Move($archive, "$archive.previous")
+                Invoke-TransactionCheckpoint -Phase afterArchiveBackup
+            }
+            Invoke-TransactionCheckpoint -Phase beforeArchivePromote
+            [IO.Directory]::Move("$archive.new", $archive)
+            Invoke-TransactionCheckpoint -Phase afterArchivePromote
+        }
+        $tx.phase = 'archived'; Save-TransactionRecord $tx
+        $targetArchive = "$BASE\accounts\$Target"
+        if (Test-Path -LiteralPath $targetArchive) {
+            $tx.targetManifest = @(Get-AccountTreeManifest $targetArchive)
+            $copyCode = Invoke-AccountCopy -Source $targetArchive -Destination "$DATA.new"
+            if ($copyCode -lt 0 -or $copyCode -ge 8 -or -not (Test-AccountTree "$DATA.new" $tx.targetManifest)) { throw 'Target copy failed verification.' }
+        } else { [void][IO.Directory]::CreateDirectory("$DATA.new") }
+        $tx.phase = 'prepared'; Save-TransactionRecord $tx; Invoke-TransactionCheckpoint -Phase prepared
+        $tx.phase = 'replacing'; Save-TransactionRecord $tx
+        if ($hadActive) {
+            Invoke-TransactionCheckpoint -Phase beforeActiveBackup
+            [IO.Directory]::Move($DATA, "$DATA.previous")
+            Invoke-TransactionCheckpoint -Phase afterActiveBackup
+        }
+        Invoke-TransactionCheckpoint -Phase beforeTargetPromote
+        [IO.Directory]::Move("$DATA.new", $DATA)
+        Invoke-TransactionCheckpoint -Phase afterTargetPromote
+        $tx.phase = 'activeReplaced'; Save-TransactionRecord $tx; Invoke-TransactionCheckpoint -Phase activeReplaced
+        Write-AtomicState "$BASE\current.txt" $Target
+        $tx.phase = 'committed'; Save-TransactionRecord $tx; Invoke-TransactionCheckpoint -Phase committed
+        if (-not (Test-AccountTree $DATA $tx.targetManifest)) { throw 'Committed target failed verification.' }
+        Remove-VerifiedTransactionArtifacts $tx
+        return (New-TransactionResult $OperationId $Target $true $false 'ok')
+    } catch {
+        $script:TransactionFailure = $_.Exception.Message
+        $recovered = Recover-PendingTransactionCore
+        return (New-TransactionResult $OperationId $recovered.current $false $recovered.recoveryRequired 'transaction-failed')
+    }
+}
+
+function Recover-PendingTransaction([int]$WaitMilliseconds = 2000) {
+    $handle = Enter-OperationLock -WaitMilliseconds $WaitMilliseconds
+    if ($null -eq $handle) { return (New-TransactionResult '' (Get-CurrentAccount) $false $true 'busy') }
+    try { return Recover-PendingTransactionCore }
+    finally { Exit-OperationLock -Handle $handle }
+}
+
+function Invoke-AccountTransaction([ValidateSet('A','B')][string]$Target, [guid]$OperationId = [guid]::NewGuid(), [int]$WaitMilliseconds = 2000) {
+    $handle = Enter-OperationLock -WaitMilliseconds $WaitMilliseconds
+    if ($null -eq $handle) { return (New-TransactionResult $OperationId (Get-CurrentAccount) $false $false 'busy') }
+    try { return Invoke-AccountTransactionCore -Target $Target -OperationId $OperationId }
+    finally { Exit-OperationLock -Handle $handle }
 }
 
 function Save-Account($name) {
@@ -454,131 +1110,223 @@ function Save-Account($name) {
 
 function Start-ClaudeApp {
     $exe = @("$env:LOCALAPPDATA\AnthropicClaude\Claude.exe", "$env:LOCALAPPDATA\Programs\Claude\Claude.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
-    if ($exe) { Start-Process $exe } else { Start-Process "shell:AppsFolder" -ErrorAction SilentlyContinue }
+    if (-not $exe) { throw 'Claude executable not found; no launch was performed.' }
+    Start-Process -FilePath $exe -ErrorAction Stop | Out-Null
 }
 
-function Invoke-Switch([ValidateSet('A','B')][string]$Target) {
+function Invoke-Switch([ValidateSet('A','B')][string]$Target, [guid]$OperationId = [guid]::NewGuid()) {
     $script:SwitchExitCode = 0
-    $cur = if (Test-Path "$BASE\current.txt") { (Get-Content "$BASE\current.txt" -Raw).Trim() } else { 'none' }
-
-    $preGate = Test-LaunchGate
-    if (-not $preGate.CanLaunch) {
-        $script:SwitchExitCode = 1
-        "FAIL:切换前检查未通过($($preGate.BlockingReason))，未修改账号数据且 Claude 未启动"
-        return
-    }
-
-    # 首次运行:收编当前登录为账号A
-    $collectCurrent = $cur -eq 'none' -and (Test-Path $DATA) -and (Get-ChildItem $DATA -ErrorAction SilentlyContinue)
-    $willRestoreTarget = $cur -ne $Target
-    if ($collectCurrent -and $Target -eq 'A') { $willRestoreTarget = $false }
-    $stagingData = "$DATA.claude-switch-staging"
-    if ($willRestoreTarget -and (Test-Path -LiteralPath $stagingData)) {
-        $script:SwitchExitCode = 1
-        "FAIL:检测到未处理的账号暂存目录，拒绝覆盖($stagingData)，Claude 未启动"
-        return
-    }
-
-    $collectedCurrent = $false
-    if ($collectCurrent) {
-        if (-not (Stop-ClaudeApp)) {
-            $script:SwitchExitCode = 1
-            "FAIL:Claude 未能退出，请手动退出后重试"
+    $script:LastOperationResult = $null
+    $handle = Enter-OperationLock
+    if ($null -eq $handle) { $script:SwitchExitCode=2; 'FAIL:busy，另一个操作正在处理'; return }
+    try {
+        Write-CoreActivity $OperationId 'switch' 'checking'
+        $recovery = Recover-PendingTransactionCore
+        if ($recovery.recoveryRequired) {
+            $script:LastOperationResult = $recovery
+            $script:SwitchExitCode=3
+            'FAIL:recoveryRequired，存在需要核实的账号恢复数据，未启动 Claude'
             return
         }
-        if (-not (Save-Account A)) {
-            $script:SwitchExitCode = 1
-            "FAIL:当前登录状态存档失败，未更新 current.txt 且 Claude 未启动"
-            return
-        }
-        $cur = 'A'; 'A' | Out-File -Encoding ascii -NoNewline "$BASE\current.txt"
-        $collectedCurrent = $true
-        Log "首次运行:当前登录状态已收编为账号A"
-        "NOTE:已将当前登录收编为账号A"
-    }
-
-    if ($cur -eq $Target) {
-        $launchGate = if ($collectedCurrent) { Test-LaunchGate } else { $preGate }
-        if (-not $launchGate.CanLaunch) {
-            $script:SwitchExitCode = 1
-            "FAIL:启动前检查未通过($($launchGate.BlockingReason))，Claude 未启动"
-            return
+        $current = Get-CurrentAccount
+        $gate = Test-LaunchGate
+        if (-not $gate.CanLaunch) { $script:SwitchExitCode=1; "FAIL:切换前检查未通过($($gate.BlockingReason))，未修改账号数据且 Claude 未启动"; return }
+        if ($current -ne $Target) {
+            if (-not (Stop-ClaudeApp)) { $script:SwitchExitCode=1; 'FAIL:Claude 未能退出，请手动退出后重试'; return }
+            $transaction = Invoke-AccountTransactionCore -Target $Target -OperationId $OperationId
+            $script:LastOperationResult = $transaction
+            if (-not $transaction.success -or $transaction.recoveryRequired) {
+                $script:SwitchExitCode=if($transaction.recoveryRequired){3}else{1}
+                "FAIL:账号切换未提交($($transaction.code))，当前账号$($transaction.current)，recoveryRequired=$($transaction.recoveryRequired)"
+                return
+            }
+            $gate = Test-LaunchGate
+            if (-not $gate.CanLaunch) { $script:SwitchExitCode=1; "FAIL:启动前检查未通过($($gate.BlockingReason))，当前账号$Target，Claude 未启动"; return }
         }
         Start-ClaudeApp
-        "INFO:当前已是账号$Target"
-        return
-    }
-
-    if (-not (Stop-ClaudeApp)) {
-        $script:SwitchExitCode = 1
-        "FAIL:Claude 未能退出，请手动退出后重试"
-        return
-    }
-
-    if ($cur -ne 'none' -and (Test-Path $DATA)) {
-        if (-not (Save-Account $cur)) {
-            $script:SwitchExitCode = 1
-            "FAIL:账号$cur 存档失败，未替换当前数据且 Claude 未启动"
-            return
-        }
-    }
-
-    try {
-        New-Item -ItemType Directory -Path $stagingData -ErrorAction Stop | Out-Null
+        $script:LastOperationResult = New-TransactionResult $OperationId $Target $true $false 'ok'
+        "OK:已切换到账号$Target"
     } catch {
-        $script:SwitchExitCode = 1
-        "FAIL:无法创建账号暂存目录，未替换当前数据且 Claude 未启动"
-        return
-    }
-
-    if (Test-Path "$BASE\accounts\$Target") {
-        robocopy "$BASE\accounts\$Target" "$stagingData" /E /NFL /NDL /NJH /NJS | Out-Null
-        $restoreExitCode = $LASTEXITCODE
-        if ($restoreExitCode -lt 0 -or $restoreExitCode -ge 8) {
-            $script:SwitchExitCode = 1
-            "FAIL:账号$Target 存档载入失败(robocopy=$restoreExitCode)，已保留暂存目录$stagingData，Claude 未启动"
-            return
-        }
-        Log "已载入账号$Target 存档"
-    } else {
-        Log "账号$Target 无存档，将以全新状态初始化"
-    }
-
-    try {
-        if (Test-Path -LiteralPath $DATA) {
-            Remove-Item -LiteralPath $DATA -Recurse -Force -ErrorAction Stop
-        }
-        Move-Item -LiteralPath $stagingData -Destination $DATA -ErrorAction Stop
-    } catch {
-        $script:SwitchExitCode = 1
-        "FAIL:账号$Target 暂存数据无法切换到活动目录，Claude 未启动"
-        return
-    }
-    $Target | Out-File -Encoding ascii -NoNewline "$BASE\current.txt"
-
-    $finalGate = Test-LaunchGate
-    if (-not $finalGate.CanLaunch) {
-        $script:SwitchExitCode = 1
-        "FAIL:启动前检查未通过($($finalGate.BlockingReason))，Claude 未启动"
-        return
-    }
-
-    Start-ClaudeApp
-    Log "已切换到账号$Target 并启动"
-    "OK:已切换到账号$Target"
+        $script:SwitchExitCode=1
+        'FAIL:切换状态无法验证，Claude 未启动；请检查恢复状态'
+    } finally { try{Remove-CoreActivity}catch{}; Exit-OperationLock -Handle $handle }
 }
-switch ($args[0]) {
-    'checkdetail' {
-        $r = Invoke-CheckDetail
-        $r | Out-File -Encoding utf8 "$BASE\last-check.txt"
-        $r
+
+function Invoke-CheckCommand {
+    $script:CoreExitCode=0
+    $handle=Enter-OperationLock
+    if ($null -eq $handle) { $script:CoreExitCode=2; 'FAIL:busy，另一个操作正在处理'; return }
+    try {
+        Write-CoreActivity ([guid]::NewGuid()) 'checkdetail' 'checking'
+        $assessment=ConvertTo-CoreChecks @(Invoke-CheckDetail *>&1)
+        $rows=@($assessment.checks | ForEach-Object { "$($_.name)=$($_.status):$($_.detail)" -replace '=unknown:', '=fail:' })
+        if(-not $assessment.canLaunch){$script:CoreExitCode=1}
+        Write-AtomicState "$BASE\last-check.txt" ($rows -join "`n")
+        $rows
+    } catch { $script:CoreExitCode=1; 'FAIL:检查未完成' }
+    finally { try{Remove-CoreActivity}catch{}; Exit-OperationLock -Handle $handle }
+}
+
+function Invoke-FixCommand([guid]$OperationId=[guid]::NewGuid()) {
+    $script:CoreExitCode=0
+    $script:FixExitCode=0
+    $handle=Enter-OperationLock
+    if ($null -eq $handle) { $script:CoreExitCode=2; 'FAIL:busy，另一个操作正在处理'; return }
+    try {
+        Write-CoreActivity $OperationId 'fix' 'repairing'
+        $recovery=Recover-PendingTransactionCore
+        if($recovery.recoveryRequired){ $script:CoreExitCode=3; 'FAIL:recoveryRequired，先核实账号恢复数据'; return }
+        Invoke-Fix
+        if($script:FixExitCode){$script:CoreExitCode=$script:FixExitCode; return}
+        if(-not (Test-LaunchGate).CanLaunch){$script:CoreExitCode=1; 'FAIL:修复后检查仍有阻断项'}
+    } catch { $script:CoreExitCode=1; 'FAIL:修复未完成' }
+    finally { try{Remove-CoreActivity}catch{}; Exit-OperationLock -Handle $handle }
+}
+
+function Get-CoreCheckDefinitions {
+    $ids = @('proxy_engine','tun_interface','egress_country','ip_consistency','timezone','locale','ipv6','dns','webrtc','bodyguard','routing_rules','client_language','asn','ecosystem')
+    $names = @('代理内核','TUN网卡','出口IP','IP一致','时区','地区','IPv6','DNS','WebRTC','保镖','规则置顶','客户端语言','ASN属性','生态可达性')
+    for ($i=0; $i -lt $ids.Count; $i++) { [pscustomobject]@{ id=$ids[$i]; name=$names[$i] } }
+}
+
+function Protect-CoreText([string]$Text) {
+    $value = [regex]::Replace($Text, '(?i)\b(https?|socks5h?)://[^/\s:@]+:[^/\s@]+@', '$1://[redacted]@')
+    $value = [regex]::Replace($value, '(?i)\b(password|passwd|pwd|token|secret|api[_-]?key|authorization)\s*[:=]\s*[^\s,;]+', '$1=[redacted]')
+    $value = [regex]::Replace($value, '(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+', 'Bearer [redacted]')
+    $value = [regex]::Replace($value, '(?<![0-9A-Za-z:])[0-9A-Za-z:.]*:[0-9A-Za-z:.]*(?![0-9A-Za-z:])', [Text.RegularExpressions.MatchEvaluator]{ param($m)
+        $address = $null; $candidate = $m.Value.TrimEnd('.', ',')
+        if ([Net.IPAddress]::TryParse($candidate, [ref]$address) -and $address.AddressFamily -eq [Net.Sockets.AddressFamily]::InterNetworkV6) { return '[redacted]' + $m.Value.Substring($candidate.Length) }
+        return $m.Value
+    })
+    $value = [regex]::Replace($value, '\b(?:\d{1,3}\.){3}\d{1,3}(?:/\d{1,2})?\b', '[redacted]')
+    return [regex]::Replace($value, '(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b', '[redacted]')
+}
+
+function ConvertTo-CoreChecks([object[]]$Rows) {
+    $definitions = @(Get-CoreCheckDefinitions); $seen = @{}; $valid = $true
+    foreach ($row in $Rows) {
+        if ($row -isnot [string] -or [string]::IsNullOrWhiteSpace($row)) { $valid=$false; continue }
+        $parts = $row -split '=', 2
+        if ($parts.Count -ne 2 -or $definitions.name -cnotcontains $parts[0] -or $seen.ContainsKey($parts[0])) { $valid=$false; continue }
+        $fields = $parts[1] -split ':', 2
+        if ($fields[0] -cnotin @('ok','warn','fail','unknown')) { $valid=$false; continue }
+        $seen[$parts[0]] = @{ status=$fields[0]; detail=$(if($fields.Count -eq 2){Protect-CoreText $fields[1]}else{''}) }
     }
-    'status' { Invoke-Status }
-    'fix'    { Invoke-Fix }
-    'switch' {
-        $result = @(Invoke-Switch $args[1])
-        $result
-        if ($script:SwitchExitCode -ne 0) { exit $script:SwitchExitCode }
+    if ($seen.Count -ne 14) { $valid=$false }
+    $checks = @(foreach ($definition in $definitions) {
+        $status='unknown'; $detail='检查输出未通过完整性验证'
+        if($valid) { $status=$seen[$definition.name].status; $detail=$seen[$definition.name].detail }
+        $blocking=$status -ne 'ok' -and -not ($status -eq 'warn' -and $definition.id -in @('ip_consistency','asn'))
+        [pscustomobject][ordered]@{ id=$definition.id; name=$definition.name; status=$status; blocking=[bool]$blocking; detail=$detail }
+    })
+    return [pscustomobject]@{ valid=$valid; checks=$checks; canLaunch=[bool]($valid -and @($checks | Where-Object blocking).Count -eq 0) }
+}
+
+function Write-CoreActivity([guid]$Id, [string]$Command, [string]$Phase) {
+    $activity=[ordered]@{ schemaVersion=1; operationId=$Id.ToString('D'); command=$Command; phase=$Phase; ownerPid=$PID }
+    Write-AtomicState "$BASE\operation.json" (ConvertTo-Json -InputObject $activity -Compress)
+}
+
+function Remove-CoreActivity { if([IO.File]::Exists("$BASE\operation.json")){ [IO.File]::Delete("$BASE\operation.json") } }
+
+function Get-CoreOperationStatus {
+    $state=[ordered]@{ current='none'; phase='idle'; recoveryRequired=$false; activeOperationId=$null; transactionPhase=$null }
+    $invalid=$false
+    try { $state.current=Get-CurrentAccount } catch { $invalid=$true }
+    $handle=$null; $busy=$false
+    if([IO.File]::Exists("$BASE\operation.lock")) {
+        try { $handle=[IO.File]::Open("$BASE\operation.lock",[IO.FileMode]::Open,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None) }
+        catch [IO.IOException] { $busy=$true }
+        catch { $invalid=$true }
     }
-    default  { "用法: claude-switch.ps1 checkdetail|status|fix|switch A|B" }
+    try {
+        $journal=$null; $activity=$null
+        if([IO.File]::Exists("$BASE\transaction.json")){ try{$journal=[IO.File]::ReadAllText("$BASE\transaction.json") | ConvertFrom-Json -ErrorAction Stop}catch{$invalid=$true} }
+        if($busy -and [IO.File]::Exists("$BASE\operation.json")){ try{$activity=[IO.File]::ReadAllText("$BASE\operation.json") | ConvertFrom-Json -ErrorAction Stop}catch{} }
+        $residue=@("$DATA.new","$DATA.previous","$DATA.claude-switch-staging","$BASE\accounts\A.new","$BASE\accounts\A.previous","$BASE\accounts\B.new","$BASE\accounts\B.previous")
+        $pending=$invalid -or [IO.File]::Exists("$BASE\transaction.json") -or @($residue | Where-Object{Test-Path -LiteralPath $_}).Count -gt 0
+        if($busy -or $pending){
+            $state.phase=if($busy){'running'}else{'recoveryRequired'}; $state.recoveryRequired=-not $busy
+            $state.activeOperationId=[guid]::Empty.ToString('D'); $state.transactionPhase='unverified'
+            foreach($record in @($journal,$activity)){
+                $guid=[guid]::Empty
+                if($null -ne $record -and $record.schemaVersion -eq 1 -and [guid]::TryParseExact([string]$record.operationId,'D',[ref]$guid) -and $guid -ne [guid]::Empty -and $record.operationId -ceq $guid.ToString('D')){
+                    $state.activeOperationId=$guid.ToString('D')
+                    if($record.phase -cin @('started','archived','prepared','replacing','activeReplaced','committed','checking','repairing')){$state.transactionPhase=$record.phase}
+                    break
+                }
+            }
+        }
+        return [pscustomobject]$state
+    } finally { if($null -ne $handle){$handle.Dispose()} }
+}
+
+function Invoke-CoreRequest([string]$Command, [string]$Target, [string]$OperationId) {
+    $script:ProtocolExitCode=0; $id=[guid]::Empty
+    $result=[ordered]@{ schemaVersion=1; operationId=$OperationId; command=$Command; success=$false; code='invalid-arguments'; message='请求参数无效' }
+    if(-not [guid]::TryParseExact($OperationId,'D',[ref]$id) -or $id -eq [guid]::Empty -or $OperationId -cne $id.ToString('D') -or $Command -cnotin @('checkdetail','status','fix','switch') -or ($Command -eq 'switch' -and $Target -cnotin @('A','B')) -or ($Command -ne 'switch' -and $Target)){
+        $script:ProtocolExitCode=64; return [pscustomobject]$result
+    }
+    $result.code='ok'; $result.message='操作完成'
+    try {
+        if($Command -eq 'status'){
+            $state=Get-CoreOperationStatus
+            foreach($property in $state.PSObject.Properties){$result[$property.Name]=$property.Value}
+            $result.success=-not $state.recoveryRequired
+            if($state.recoveryRequired){$script:ProtocolExitCode=3; $result.code='recovery-required'; $result.message='请保留账号及 .new/.previous 恢复材料，核实事务后再操作'}
+        } elseif($Command -eq 'checkdetail'){
+            New-Item -ItemType Directory -Force -Path "$BASE\accounts" -ErrorAction Stop | Out-Null
+            $handle=Enter-OperationLock
+            if($null -eq $handle){$script:ProtocolExitCode=2; $assessment=ConvertTo-CoreChecks @(); $result.code='busy'; $result.message='另一个操作正在处理'}
+            else {
+                try {
+                    Write-CoreActivity $id $Command 'checking'
+                    $assessment=ConvertTo-CoreChecks @(Invoke-CheckDetail *>&1)
+                    $cache=@($assessment.checks | ForEach-Object{"$($_.name)=$($_.status):$($_.detail)"}) -join "`n"
+                    Write-AtomicState "$BASE\last-check.txt" ($cache -replace '=unknown:', '=fail:')
+                    $result.success=$assessment.canLaunch
+                    if(-not $assessment.valid){$script:ProtocolExitCode=1; $result.code='invalid-checks'; $result.message='检查输出不完整或格式无效，禁止启动'}
+                    elseif(-not $assessment.canLaunch){$script:ProtocolExitCode=1; $result.code='blocked'; $result.message='安全检查存在阻断项'}
+                } finally { Remove-CoreActivity; Exit-OperationLock -Handle $handle }
+            }
+            $result.checks=@($assessment.checks); $result.canLaunch=[bool]($result.success -and $assessment.canLaunch)
+        } elseif($Command -eq 'switch'){
+            New-Item -ItemType Directory -Force -Path "$BASE\accounts" -ErrorAction Stop | Out-Null
+            $null=@(Invoke-Switch -Target $Target -OperationId $id *>&1)
+            $script:ProtocolExitCode=$script:SwitchExitCode
+            $state=Get-CoreOperationStatus
+            foreach($property in $state.PSObject.Properties){$result[$property.Name]=$property.Value}
+            $result.success=$script:ProtocolExitCode -eq 0
+            if($result.success){$result.phase='completed'; $result.message='账号已切换并通过当次启动检查'}
+            elseif($state.recoveryRequired){$result.code='recovery-required'; $result.message='切换未完成；保留所有恢复材料，核实后重试'}
+            elseif($script:ProtocolExitCode -eq 2){$result.code='busy'; $result.message='另一个操作正在处理'}
+            else{$result.code='blocked'; $result.message='Claude 未启动；请重新检查，当前账号以返回状态为准'}
+        } else {
+            New-Item -ItemType Directory -Force -Path "$BASE\accounts" -ErrorAction Stop | Out-Null
+            $null=@(Invoke-FixCommand -OperationId $id *>&1); $script:ProtocolExitCode=$script:CoreExitCode; $result.success=$script:ProtocolExitCode -eq 0
+            if(-not $result.success){
+                if($script:ProtocolExitCode -eq 4){$result.code='cancelled'; $result.message='修复未完成或授权取消；请重新检查实际状态'}
+                elseif($script:ProtocolExitCode -eq 5){$result.code='migration-required'; $result.message='检测到旧版 ClaudeBodyguard；当前构建不支持自动迁移，也不会停止或删除旧任务。请先按兼容迁移指引处理旧任务/进程，再配置受保护任务。'}
+                elseif($script:ProtocolExitCode -eq 2){$result.code='busy'; $result.message='修复未完成或授权取消；请重新检查实际状态'}
+                else{$result.code='fix-failed'; $result.message='修复未完成或授权取消；请重新检查实际状态'}
+            }
+        }
+    } catch {
+        $script:ProtocolExitCode=1; $result.success=$false; $result.code='operation-failed'; $result.message='操作未完成；未验证的状态不能用于启动'
+        if($Command -eq 'checkdetail'){$assessment=ConvertTo-CoreChecks @(); $result.checks=@($assessment.checks); $result.canLaunch=$false}
+        if($Command -in @('status','switch')){$state=Get-CoreOperationStatus; foreach($property in $state.PSObject.Properties){$result[$property.Name]=$property.Value}}
+    }
+    return [pscustomobject]$result
+}
+
+if($MyInvocation.InvocationName -ne '.') {
+    if($Json){$response=Invoke-CoreRequest -Command $Command -Target $Target -OperationId $OperationId; ConvertTo-Json -InputObject $response -Depth 8 -Compress; exit $script:ProtocolExitCode}
+    if($Command -cin @('checkdetail','fix','switch')){New-Item -ItemType Directory -Force -Path "$BASE\accounts" | Out-Null}
+    switch -CaseSensitive ($Command) {
+        'checkdetail' { Invoke-CheckCommand; exit $script:CoreExitCode }
+        'status' { Invoke-Status; $state=Get-CoreOperationStatus; if($state.recoveryRequired){exit 3} }
+        'fix' { Invoke-FixCommand | ForEach-Object{Protect-CoreText ([string]$_)}; exit $script:CoreExitCode }
+        'switch' { Invoke-Switch -Target $Target | ForEach-Object{Protect-CoreText ([string]$_)}; exit $script:SwitchExitCode }
+        default { '用法: claude-switch.ps1 checkdetail|status|fix|switch A|B [-Json -OperationId <guid>]' }
+    }
 }

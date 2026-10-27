@@ -31,6 +31,9 @@ jobs:
         with:
           node-version: "20"
 
+      - name: Install workflow test dependency
+        run: python3 -m pip install --disable-pip-version-check "PyYAML==6.0.2"
+
       - name: Shell syntax
         run: |
           set -euo pipefail
@@ -59,3 +62,123 @@ jobs:
 
       - name: JavaScript syntax
         run: node --check docs/app.js
+
+  windows:
+    name: Windows x64 tests and package
+    runs-on: windows-2022
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up .NET SDK 10.0.403
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.403
+          dotnet-quality: ga
+
+      - name: Set up Inno Setup 6.7.3
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installer = Join-Path $env:RUNNER_TEMP 'innosetup-6.7.3.exe'
+          Invoke-WebRequest -Uri 'https://files.jrsoftware.org/is/6/innosetup-6.7.3.exe' -OutFile $installer
+          $signature = Get-AuthenticodeSignature -LiteralPath $installer
+          if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'Jordan Russell') {
+            throw "Inno Setup installer signature validation failed: $($signature.Status) $($signature.SignerCertificate.Subject)"
+          }
+          $process = Start-Process -FilePath $installer -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-' -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "Inno Setup installer exited $($process.ExitCode)" }
+          $iscc = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'
+          if (-not (Test-Path -LiteralPath $iscc -PathType Leaf)) { throw 'ISCC.exe was not installed.' }
+          $reported = (& $iscc /? 2>&1 | Out-String)
+          if ($reported -notmatch '6\.7\.3') { throw 'Inno Setup 6.7.3 was not installed.' }
+
+      - name: PowerShell syntax
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $files = @(
+            Get-ChildItem -LiteralPath windows -Filter '*.ps1' -File -Recurse
+            Get-Item -LiteralPath scripts/package-windows.ps1
+          )
+          foreach ($file in $files) {
+            $tokens = $null
+            $errors = $null
+            [void][Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$tokens, [ref]$errors)
+            if ($errors.Count -gt 0) {
+              $errors | ForEach-Object { Write-Error "$($file.FullName): $($_.Message)" }
+              throw "PowerShell parse failed: $($file.FullName)"
+            }
+          }
+
+      - name: Windows PowerShell 5.1 core tests
+        shell: powershell
+        run: powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File windows/tests/Invoke-CoreTests.ps1
+
+      - name: PowerShell 7 core tests
+        shell: pwsh
+        run: pwsh -NoProfile -NonInteractive -File windows/tests/Invoke-CoreTests.ps1
+
+      - name: WPF xUnit tests
+        shell: pwsh
+        run: dotnet test windows/ClaudeSwitcher.App.Tests/ClaudeSwitcher.App.Tests.csproj -c Release
+
+      - name: Admin xUnit tests
+        shell: pwsh
+        run: dotnet test windows/ClaudeSwitcher.Admin.Tests/ClaudeSwitcher.Admin.Tests.csproj -c Release
+
+      - name: Package Windows x64
+        shell: powershell
+        env:
+          CI_VERSION: 0.0.0-ci.${{ github.run_id }}.${{ github.run_attempt }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $output = Join-Path $env:RUNNER_TEMP 'windows-package'
+          powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/package-windows.ps1 -Version $env:CI_VERSION -OutputDirectory $output
+          if ($LASTEXITCODE -ne 0) { throw "Windows packaging failed with exit code $LASTEXITCODE" }
+          $versionRoot = Join-Path $output $env:CI_VERSION
+          $setup = Join-Path $versionRoot "ClaudeSwitcher-$env:CI_VERSION-windows-setup.exe"
+          $zip = Join-Path $versionRoot "ClaudeSwitcher-$env:CI_VERSION-windows.zip"
+          $manifestPath = Join-Path $versionRoot 'manifest.json'
+          foreach ($path in @($setup, $zip, $manifestPath)) {
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Missing package artifact: $path" }
+          }
+          $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+          if ($manifest.product -ne 'ClaudeSwitcher' -or $manifest.version -ne $env:CI_VERSION -or $manifest.runtime -ne 'win-x64') {
+            throw 'Package manifest product/version/runtime mismatch.'
+          }
+          if ($manifest.sourceCommit -ne '${{ github.sha }}') { throw 'Package manifest commit mismatch.' }
+          foreach ($entry in @($manifest.artifacts.setup, $manifest.artifacts.zip)) {
+            $artifact = Join-Path $versionRoot $entry.name
+            $actual = (Get-FileHash -LiteralPath $artifact -Algorithm SHA256).Hash
+            if ($actual -ne $entry.sha256) { throw "Package hash mismatch: $($entry.name)" }
+          }
+          if ($manifest.artifacts.setup.name -ne "ClaudeSwitcher-$env:CI_VERSION-windows-setup.exe") { throw 'Unexpected setup filename.' }
+          if ($manifest.artifacts.zip.name -ne "ClaudeSwitcher-$env:CI_VERSION-windows.zip") { throw 'Unexpected ZIP filename.' }
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $archive = [IO.Compression.ZipFile]::OpenRead($zip)
+          try {
+            $names = @($archive.Entries | ForEach-Object { $_.FullName })
+            if ($names.Count -eq 0) { throw 'Fallback ZIP is empty.' }
+            foreach ($name in $names) {
+              if ($name -match '(^|/)(bin|obj|accounts|tests)(/|$)|(^|/)(last-check\.txt|lastip)(/|$)') {
+                throw "Fallback ZIP contains forbidden path: $name"
+              }
+            }
+            foreach ($required in @('windows/claude-switch.ps1', 'windows/SwitcherUI.ps1', 'windows/install.ps1', 'windows/claude-bodyguard.ps1', 'windows/README.md', 'README.md', 'LICENSE', 'SECURITY.md')) {
+              if ($names -notcontains $required) { throw "Fallback ZIP is missing $required" }
+            }
+          } finally { $archive.Dispose() }
+          New-Item -ItemType Directory -Path build/artifacts -Force | Out-Null
+          Copy-Item -LiteralPath $setup, $zip, $manifestPath -Destination build/artifacts -Force
+
+      - name: Upload Windows x64 package
+        uses: actions/upload-artifact@v4
+        with:
+          name: checks-windows-x64-${{ github.run_id }}-${{ github.run_attempt }}
+          path: build/artifacts/
+          if-no-files-found: error
+          retention-days: 14

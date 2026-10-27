@@ -1,16 +1,84 @@
 ﻿# Claude 保镖 (Windows) —— 代理离线时自动关闭 Claude
 # 由安装器注册为计划任务,登录时启动,隐藏窗口常驻
-$ErrorActionPreference = 'SilentlyContinue'
-$BASE = Join-Path $env:USERPROFILE ".claude-switcher"
-$LOG = Join-Path $BASE "bodyguard.log"
-New-Item -ItemType Directory -Force -Path $BASE | Out-Null
+$ErrorActionPreference = 'Stop'
+$script:BodyguardBase = Join-Path $env:USERPROFILE '.claude-switcher'
 
-# 代理模式:优先读脚本同目录,其次读安装器写入的 proxy-mode.txt;缺失时按旧版 Clash Verge 行为
-$modeFile = if ($PSScriptRoot) { Join-Path $PSScriptRoot "proxy-mode.txt" } else { '' }
-if (-not $modeFile -or -not (Test-Path $modeFile)) { $modeFile = Join-Path $BASE "proxy-mode.txt" }
-$PROXY_MODE = if (Test-Path $modeFile) { Get-Content $modeFile -Raw } else { '' }
-if ($PROXY_MODE) { $PROXY_MODE = $PROXY_MODE.Trim() }
-if (-not $PROXY_MODE) { $PROXY_MODE = 'clash-verge' }
+function Test-BodyguardUserSid([string]$Sid) {
+    return $Sid -cmatch '^S-1-(?:5-21|12-1)(?:-[0-9]+){4}$'
+}
+
+# 版本化用户配置优先；旧脚本安装可读取 proxy-mode.txt。
+function Get-BodyguardIdentity {
+    $identity=[Security.Principal.WindowsIdentity]::GetCurrent()
+    try {
+        $sid=$identity.User.Value
+        $session=[Diagnostics.Process]::GetCurrentProcess().SessionId
+        if (-not (Test-BodyguardUserSid $sid) -or $session -le 0) { throw 'Monitor requires an ordinary interactive user.' }
+        return [pscustomobject]@{Sid=$sid;SessionId=$session}
+    } finally { $identity.Dispose() }
+}
+
+function Get-BodyguardProcessId { return $PID }
+
+function Read-BodyguardOwnedFile([string]$Path, [long]$MaxBytes) {
+    $caller=Get-BodyguardIdentity
+    $item=Get-Item -LiteralPath $Path -ErrorAction Stop
+    if ($null -eq $item -or $item.PSIsContainer -or
+        $item.Length -gt $MaxBytes -or
+        ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        throw 'Invalid monitor configuration.'
+    }
+    $acl=Get-Acl -LiteralPath $Path -ErrorAction Stop
+    if ($null -eq $acl -or
+        $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -cne $caller.Sid) {
+        throw 'Invalid monitor configuration.'
+    }
+    return [IO.File]::ReadAllText($Path)
+}
+
+function Get-BodyguardProxyMode {
+    $path=Join-Path $script:BodyguardBase 'config.json'
+    if (Test-Path -LiteralPath $path) {
+        $config=(Read-BodyguardOwnedFile $path 65536) | ConvertFrom-Json -ErrorAction Stop
+        if ($null -eq $config -or $config -is [array] -or
+            $config.schemaVersion -ne 1 -or
+            $config.proxyMode -isnot [string] -or
+            $config.proxyMode -cnotin @('clash-verge','sing-box','clashx','surge','wireguard','auto','other')) {
+            throw 'Invalid monitor configuration.'
+        }
+        return $config.proxyMode
+    }
+    $legacy=Join-Path $script:BodyguardBase 'proxy-mode.txt'
+    if (Test-Path -LiteralPath $legacy) {
+        $mode=(Read-BodyguardOwnedFile $legacy 64).Trim()
+        if ($mode -cnotin @('clash-verge','sing-box','clashx','surge','wireguard','auto','other')) { throw 'Invalid legacy monitor mode.' }
+        return $mode
+    }
+    return 'clash-verge'
+}
+function Get-OwnedClaudeProcesses {
+    $caller=Get-BodyguardIdentity
+    foreach($process in @(Get-CimInstance -ClassName Win32_Process -Filter "Name='Claude.exe'" -ErrorAction Stop)) {
+        if ($process.SessionId -ne $caller.SessionId) { continue }
+        $owner=Invoke-CimMethod -InputObject $process -MethodName GetOwnerSid -ErrorAction Stop
+        if ($owner.ReturnValue -ne 0 -or [string]::IsNullOrEmpty($owner.Sid)) { throw 'Process owner could not be verified.' }
+        if ($owner.Sid -ne $caller.Sid) { continue }
+        $live=Get-Process -Id $process.ProcessId -ErrorAction SilentlyContinue
+        if ($live -and $live.SessionId -eq $caller.SessionId -and $live.ProcessName -ieq 'Claude') { $live }
+    }
+}
+
+function Write-BodyguardHeartbeat {
+    $caller=Get-BodyguardIdentity
+    $record=[ordered]@{schemaVersion=1;userSid=$caller.Sid;sessionId=$caller.SessionId;processId=(Get-BodyguardProcessId);updatedAt=[DateTimeOffset]::UtcNow.ToString('o')}
+    $path=Join-Path $script:BodyguardBase 'bodyguard-heartbeat.json'
+    $temporary=$path+'.'+[guid]::NewGuid().ToString('N')+'.tmp'
+    try {
+        [IO.File]::WriteAllText($temporary,($record|ConvertTo-Json -Compress),(New-Object Text.UTF8Encoding($false)))
+        if ([IO.File]::Exists($path)) { [IO.File]::Replace($temporary,$path,[NullString]::Value) }
+        else { [IO.File]::Move($temporary,$path) }
+    } finally { if([IO.File]::Exists($temporary)){[IO.File]::Delete($temporary)} }
+}
 
 # TUN 在线判定:198.18 假IP段优先,否则回退到任意 Up 状态的虚拟网卡(兼容 Astrill/WireGuard/OpenVPN 等)
 function Get-TunStatus {
@@ -36,25 +104,27 @@ function Test-ClientAlive {
     }
 }
 
-$offline = $false
-while ($true) {
-    $tun = Get-TunStatus
-    $clientUp = Test-ClientAlive
-    $alive = $tun.up -and $clientUp
-
-    if (-not $alive) {
-        if (-not $offline) {
-            $clientState = if ($PROXY_MODE -eq 'auto' -or $PROXY_MODE -eq 'other') { '跳过(仅TUN)' } elseif ($clientUp) { '在线' } else { '离线' }
-            "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') 代理离线(模式=$PROXY_MODE, TUN=$($tun.detail), 客户端=$clientState)" | Out-File -Append -Encoding utf8 $LOG
-            $offline = $true
+function Start-Bodyguard {
+    $null=Get-BodyguardIdentity
+    [void][IO.Directory]::CreateDirectory($script:BodyguardBase)
+    while ($true) {
+        $alive=$false
+        try {
+            $script:PROXY_MODE=Get-BodyguardProxyMode
+            $alive=(Get-TunStatus).up -and (Test-ClientAlive)
+        } catch { $alive=$false }
+        try {
+            if (-not $alive) {
+                $owned=@(Get-OwnedClaudeProcesses)
+                if ($owned.Count) { $owned | Stop-Process -Force -ErrorAction Stop }
+            }
+            Write-BodyguardHeartbeat
+        } catch {
+            # No fresh heartbeat on uncertain ownership or unsuccessful protection.
+            # Core checks will block launching once the previous evidence expires.
         }
-        $p = Get-Process -Name 'Claude' -ErrorAction SilentlyContinue
-        if ($p) {
-            $p | Stop-Process -Force
-            "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') 代理离线(内核或TUN丢失),已自动关闭 Claude" | Out-File -Append -Encoding utf8 $LOG
-        }
-    } else {
-        $offline = $false
+        Start-Sleep -Seconds 10
     }
-    Start-Sleep -Seconds 10
 }
+
+if ($MyInvocation.InvocationName -ne '.') { Start-Bodyguard }

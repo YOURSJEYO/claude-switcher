@@ -38,7 +38,8 @@ closing the window in which traffic could leave outside the proxy.
 - **Diagnostics** — a standalone proxy check reports transport results for the Claude web and API endpoints without reading account data.
 - **Native menu bar UI** — a single-file SwiftUI app with no Xcode project and no third-party dependencies.
 - **Web check page** — a static browser-side check for exit IP, time zone, language, WebRTC, IPv6, and common fingerprint signals.
-- **Windows and Linux ports (beta)** — PowerShell and bash implementations with the same audit and switching model.
+- **Windows x64 native app (development beta)** — a self-contained .NET 10 WPF app backed by the PowerShell core, plus a scripts-only compatibility ZIP. Native setup source, helper, Inno template, and Windows packaging CI definitions exist, but no Setup EXE has been compiled successfully on this host and no Windows release is ready.
+- **Linux port (beta)** — a bash implementation with the same audit and switching model.
 
 ## Install
 
@@ -50,12 +51,25 @@ Open the [latest release](https://github.com/YOURSJEYO/claude-switcher/releases/
 |---|---|
 | `ClaudeSwitcher-<version>-installer-kit.zip` | Full first-time install. Unzip and double-click `installer/安装.command`; it installs the core script, daemons, and desktop app. |
 | `ClaudeSwitcher-<version>-macos-arm64.dmg` / `.zip` | The macOS app bundle only, for machines where the core scripts are already installed. |
-| `ClaudeSwitcher-<version>-windows.zip` | Windows scripts (beta). See `windows/README.md`. |
+| `ClaudeSwitcher-<version>-windows-setup.exe` | **Planned** native Windows x64 Inno Setup installer (development beta, unsigned, .NET 10 self-contained App/Admin). The source now includes `windows/ClaudeSwitcher.iss`, `windows/helpers/`, and a controlled install flow, but this host has no ISCC and no Setup EXE has been compiled successfully. See `windows/README.md`. |
+| `ClaudeSwitcher-<version>-windows.zip` | **Planned** PowerShell scripts compatibility package, not a portable native executable or native installer. It is a compatibility UI/CLI package only: it does not contain the protected Admin helper executable and does not install the protected helper; it provides no full install or system-repair parity. Protected system changes require native setup or a separately documented, auditable administrator procedure; never run user-writable scripts elevated. No successful Setup EXE compile or Windows 10/11 VM acceptance is claimed, so the ZIP is not a complete installation path. |
 | `ClaudeSwitcher-<version>-linux.tar.gz` | Linux scripts (beta). See `linux/README.md`. |
 
 macOS builds are ad-hoc signed and not notarized. If Gatekeeper blocks the first
 launch, open the app from the context menu or allow it under **System Settings →
-Privacy & Security**. Each release includes `SHA256SUMS-release.txt`.
+Privacy & Security**. The planned Windows packages are unsigned, so SmartScreen
+may warn once they are producible; verify the download source and
+`SHA256SUMS-release.txt` before running them. Each release includes
+`SHA256SUMS-release.txt`.
+
+**Windows acceptance boundary:** hosted CI only builds, tests, and exercises the
+packaging contracts; it is not Windows 10/11 installation acceptance, and no
+successful hosted run is claimed here. The release workflow is designed to
+publish native Windows assets only after a protected environment verifies a
+signed VM acceptance report bound to the exact commit, version, and Setup EXE
+SHA256. This host has no ISCC, so no Setup EXE has been compiled successfully;
+installer execution, UAC, upgrade/uninstall, and VM acceptance are outstanding,
+and no Windows release is ready.
 
 Requirements: macOS 13 or later, a proxy client with TUN support, the Claude
 desktop app, and Python 3.
@@ -112,7 +126,7 @@ responsible for how you use it.
 - [Security policy](SECURITY.md)
 - [Agent handoff guide](AGENTS.md)
 - [Web environment check](https://yoursjeyo.github.io/claude-switcher/)
-- [Windows beta](windows/README.md) · [Linux beta](linux/README.md)
+- [Windows development beta](windows/README.md) · [Linux beta](linux/README.md)
 
 ## License
 

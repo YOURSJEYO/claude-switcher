@@ -1,5 +1,6 @@
 using System.IO;
 using System.Windows;
+using System.Windows.Controls;
 using ClaudeSwitcher.App.Models;
 using ClaudeSwitcher.App.Services;
 using ClaudeSwitcher.App.ViewModels;
@@ -9,17 +10,36 @@ namespace ClaudeSwitcher.App;
 public partial class MainWindow : Window
 {
     private readonly MainWindowState _initialState = MainWindowState.Initial;
-    private readonly CoreClient _client;
+    private CoreClient _client;
     private MainWindowState _state;
     private bool _busy;
+    private bool _setupOpen;
+    private bool _setupMutationPending;
 
-    public MainWindow()
+    public MainWindow() : this(null)
+    {
+    }
+
+    internal MainWindow(Task<SetupApplyRunResult>? pendingSetup)
     {
         InitializeComponent();
-        _state = _initialState;
+        _setupMutationPending = pendingSetup is not null;
+        _state = pendingSetup is null
+            ? _initialState
+            : _initialState.Running("配置变更可能仍在运行；正在等待原配置进程的明确结果，暂时禁止其他操作。");
         _client = CreateClient();
         RenderState();
-        Loaded += async (_, _) => await RefreshFromCoreAsync();
+        Loaded += async (_, _) =>
+        {
+            if (pendingSetup is not null)
+            {
+                await KeepSetupMutationGuardAsync(pendingSetup);
+            }
+            else
+            {
+                await RefreshFromCoreAsync();
+            }
+        };
     }
 
     private static CoreClient CreateClient()
@@ -35,9 +55,70 @@ public partial class MainWindow : Window
     private async void SwitchA_Click(object sender, RoutedEventArgs e) => await SwitchAsync("A");
     private async void SwitchB_Click(object sender, RoutedEventArgs e) => await SwitchAsync("B");
 
+    private void Configure_Click(object sender, RoutedEventArgs e)
+    {
+        if (_busy || _setupOpen || _setupMutationPending || !_state.CanConfigure)
+        {
+            return;
+        }
+
+        _setupOpen = true;
+        RenderState();
+        var wizard = new SetupWizardWindow();
+        wizard.Owner = this;
+        wizard.Closed += async (_, _) =>
+        {
+            var completed = wizard.SetupCompleted;
+            var detached = wizard.SetupMayStillBeRunning;
+            _setupOpen = false;
+            if (completed)
+            {
+                _client = CreateClient();
+                _state = MainWindowState.Initial;
+                await RefreshFromCoreAsync();
+                return;
+            }
+
+            if (detached)
+            {
+                _setupMutationPending = true;
+                _state = _state.Running(
+                    "配置变更可能仍在运行，且未被终止。主窗口会继续等待该变更给出明确结果；在此期间禁止修复、切换和启动，也不会重复提交配置。");
+                RenderState();
+                await KeepSetupMutationGuardAsync(wizard.WaitForPendingApplyAsync());
+                return;
+            }
+
+            RenderState();
+        };
+        wizard.Show();
+    }
+
+    internal async Task KeepSetupMutationGuardAsync(Task<SetupApplyRunResult> pendingApply)
+    {
+        _setupMutationPending = true;
+        _state = _state.Running(
+            "配置变更可能仍在运行，且未确认退出。主窗口正在等待该变更给出明确结果；在此期间禁止配置、修复、切换和启动，也不会重复提交配置。");
+        RenderState();
+        try
+        {
+            await pendingApply;
+            _setupMutationPending = false;
+            _client = CreateClient();
+            _state = MainWindowState.Initial;
+            await RefreshFromCoreAsync();
+        }
+        catch (Exception)
+        {
+            _setupMutationPending = true;
+            _state = _state.Running(
+                "配置变更的观察任务异常结束，进程是否退出仍未确认。为避免并发变更，配置、修复、切换和启动将保持阻断。");
+            RenderState();
+        }
+    }
     private async Task RefreshFromCoreAsync()
     {
-        if (_busy)
+        if (_busy || _setupOpen || _setupMutationPending)
         {
             return;
         }
@@ -48,6 +129,7 @@ public partial class MainWindow : Window
 
     private async Task RefreshCoreAsync()
     {
+        CoreResult? statusResult = null;
         _state = _state.Running("正在向核心读取事务状态…");
         RenderState();
         try
@@ -55,11 +137,12 @@ public partial class MainWindow : Window
             var statusRun = await _client.RunAsync(CoreCommand.Status, null, Guid.NewGuid(), CancellationToken.None);
             if (!statusRun.IsCompleted || statusRun.Result is null)
             {
-                _state = _state.Fail("状态查询仍在运行，请稍后刷新。");
+                _state = _state.StatusQueryTimedOut();
                 return;
             }
 
-            _state = _initialState.Apply(statusResult: null, statusRun.Result);
+            statusResult = statusRun.Result;
+            _state = _initialState.Apply(statusResult: null, statusResult);
             if (_state.Status is UiStatus.RecoveryRequired or UiStatus.Running)
             {
                 return;
@@ -70,15 +153,23 @@ public partial class MainWindow : Window
             var checkRun = await _client.RunAsync(CoreCommand.CheckDetail, null, Guid.NewGuid(), CancellationToken.None);
             _state = checkRun.Result is null
                 ? _state.Fail("检查未返回可验证的结果，请重新检查。")
-                : _state.ApplyCheck(checkRun.Result).ApplyStatus(statusRun.Result);
+                : _state.ApplyCheck(checkRun.Result).ApplyStatus(statusResult);
         }
         catch (CoreClientException exception) when (exception.Error == CoreClientError.SetupRequired)
         {
             _state = _state.SetupRequired();
         }
+        catch (CoreClientException exception) when (exception.Error == CoreClientError.QueryTimedOut && statusResult is null)
+        {
+            _state = _state.StatusQueryTimedOut();
+        }
         catch (CoreProtocolException exception) when (exception.PartialResult?.Command == CoreCommand.Status)
         {
             _state = _state.ApplyStatus(exception.PartialResult!);
+        }
+        catch (CoreProtocolException exception) when (exception.PartialResult?.Command == CoreCommand.CheckDetail)
+        {
+            ApplyRefreshFailure(statusResult!, exception);
         }
         catch (Exception exception) when (exception is CoreProtocolException or CoreClientException)
         {
@@ -91,9 +182,16 @@ public partial class MainWindow : Window
         }
     }
 
+    private void ApplyRefreshFailure(CoreResult statusResult, CoreProtocolException exception)
+    {
+        _state = _state
+            .ApplyCheck(exception.PartialResult!)
+            .ApplyStatus(statusResult);
+    }
+
     private async Task RunFixAsync()
     {
-        if (_busy || !_state.CanFix)
+        if (_busy || _setupOpen || _setupMutationPending || !_state.CanFix)
         {
             return;
         }
@@ -122,7 +220,7 @@ public partial class MainWindow : Window
 
     private async Task SwitchAsync(string target)
     {
-        if (_busy || !_state.CanSwitch || target is not ("A" or "B"))
+        if (_busy || _setupOpen || _setupMutationPending || !_state.CanSwitch || target is not ("A" or "B"))
         {
             return;
         }
@@ -154,7 +252,26 @@ public partial class MainWindow : Window
                 return;
             }
 
-            var fresh = await _client.RunAsync(CoreCommand.CheckDetail, null, Guid.NewGuid(), CancellationToken.None);
+            CoreClientRunResult fresh;
+            try
+            {
+                fresh = await _client.RunAsync(CoreCommand.CheckDetail, null, Guid.NewGuid(), CancellationToken.None);
+            }
+            catch (CoreProtocolException exception) when (exception.PartialResult?.Command == CoreCommand.CheckDetail)
+            {
+                _state = _state.ApplySwitch(result.Result, target, exception.PartialResult);
+                return;
+            }
+            catch (CoreProtocolException)
+            {
+                _state = _state.ApplySwitch(result.Result, target, freshCheck: null);
+                return;
+            }
+            catch (CoreClientException exception) when (exception.Error != CoreClientError.SetupRequired)
+            {
+                _state = _state.ApplySwitch(result.Result, target, freshCheck: null);
+                return;
+            }
             _state = _state.ApplySwitch(result.Result, target, fresh.Result);
         });
     }
@@ -170,6 +287,10 @@ public partial class MainWindow : Window
         catch (CoreClientException exception) when (exception.Error == CoreClientError.SetupRequired)
         {
             _state = _state.SetupRequired();
+        }
+        catch (CoreProtocolException exception) when (exception.PartialResult?.Command == CoreCommand.Fix)
+        {
+            _state = _state.Fail(exception.PartialResult.Message);
         }
         catch (Exception exception) when (exception is CoreProtocolException or CoreClientException)
         {
@@ -191,9 +312,11 @@ public partial class MainWindow : Window
         OperationText.Text = _state.ActiveOperationId == "—"
             ? string.Empty
             : $"操作 {_state.ActiveOperationId} · 阶段 {_state.TransactionPhase}";
-        RefreshButton.IsEnabled = !_busy && _state.CanRefresh;
-        FixButton.IsEnabled = !_busy && _state.CanFix;
-        SwitchAButton.IsEnabled = !_busy && _state.CanSwitch;
-        SwitchBButton.IsEnabled = !_busy && _state.CanSwitch;
+        ConfigureButton.Visibility = _state.CanConfigure ? Visibility.Visible : Visibility.Collapsed;
+        ConfigureButton.IsEnabled = !_busy && !_setupOpen && !_setupMutationPending && _state.CanConfigure;
+        RefreshButton.IsEnabled = !_busy && !_setupOpen && !_setupMutationPending && _state.CanRefresh;
+        FixButton.IsEnabled = !_busy && !_setupOpen && !_setupMutationPending && _state.CanFix;
+        SwitchAButton.IsEnabled = !_busy && !_setupOpen && !_setupMutationPending && _state.CanSwitch;
+        SwitchBButton.IsEnabled = !_busy && !_setupOpen && !_setupMutationPending && _state.CanSwitch;
     }
 }

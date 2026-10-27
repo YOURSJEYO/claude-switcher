@@ -6,18 +6,23 @@ on:
       - "v*"
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  release:
-    name: Build and publish
+  build-macos-linux:
+    name: Build macOS and Linux artifacts
     runs-on: macos-15
-    env:
-      GH_TOKEN: ${{ github.token }}
-      GH_REPO: ${{ github.repository }}
+    outputs:
+      macos_arch: ${{ steps.macos-arch.outputs.arch }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Resolve version from tag
         id: version
@@ -32,6 +37,19 @@ jobs:
           esac
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve macOS architecture
+        id: macos-arch
+        run: |
+          set -euo pipefail
+          case "$(uname -m)" in
+            arm64|x86_64) ARCH="$(uname -m)" ;;
+            *)
+              echo "::error::unsupported macOS build architecture: $(uname -m)"
+              exit 1
+              ;;
+          esac
+          echo "arch=$ARCH" >> "$GITHUB_OUTPUT"
 
       - name: Verify source checksums
         run: shasum -a 256 -c SHA256SUMS
@@ -48,57 +66,315 @@ jobs:
           test "$(plutil -extract CFBundleShortVersionString raw "$PLIST")" = "$VERSION"
           test "$(plutil -extract CFBundleVersion raw "$PLIST")" = "$VERSION"
 
-      - name: Package Windows and Linux scripts
+      - name: Package Linux scripts
         run: |
           set -euo pipefail
           WORK="$(mktemp -d)"
           trap 'rm -rf "$WORK"' EXIT
-
-          WIN_ROOT="$WORK/ClaudeSwitcher-${VERSION}-windows"
-          mkdir -p "$WIN_ROOT"
-          ditto windows "$WIN_ROOT/windows"
-          cp README.md AGENTS.md SECURITY.md LICENSE "$WIN_ROOT/"
-          (cd "$WORK" && ditto -c -k --keepParent --norsrc --noextattr \
-            "ClaudeSwitcher-${VERSION}-windows" \
-            "$GITHUB_WORKSPACE/build/ClaudeSwitcher-${VERSION}-windows.zip")
-
           LINUX_ROOT="$WORK/ClaudeSwitcher-${VERSION}-linux"
           mkdir -p "$LINUX_ROOT"
           ditto linux "$LINUX_ROOT/linux"
-          cp README.md AGENTS.md SECURITY.md LICENSE "$LINUX_ROOT/"
+          cp README.md README.en.md AGENTS.md SECURITY.md LICENSE "$LINUX_ROOT/"
           tar -C "$WORK" -czf \
             "$GITHUB_WORKSPACE/build/ClaudeSwitcher-${VERSION}-linux.tar.gz" \
             "ClaudeSwitcher-${VERSION}-linux"
 
-      - name: Generate release checksums
+      - name: Assemble macOS and Linux artifact
         run: |
           set -euo pipefail
-          cd build
-          shasum -a 256 \
-            "ClaudeSwitcher-${VERSION}-macos-arm64.zip" \
-            "ClaudeSwitcher-${VERSION}-macos-arm64.dmg" \
+          mkdir -p build/release-macos-linux
+          ARCH_LABEL="${{ steps.macos-arch.outputs.arch }}"
+          for path in \
+            "build/ClaudeSwitcher-${VERSION}-macos-${ARCH_LABEL}.zip" \
+            "build/ClaudeSwitcher-${VERSION}-macos-${ARCH_LABEL}.dmg" \
+            "build/ClaudeSwitcher-${VERSION}-installer-kit.zip" \
+            "build/ClaudeSwitcher-${VERSION}-linux.tar.gz"; do
+            test -f "$path"
+            cp "$path" build/release-macos-linux/
+          done
+
+      - name: Upload macOS and Linux artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-macos-linux-${{ github.run_id }}-${{ github.run_attempt }}
+          path: build/release-macos-linux/
+          if-no-files-found: error
+          retention-days: 14
+
+  build-windows:
+    name: Build Windows x64 native artifacts
+    runs-on: windows-2022
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve version from tag
+        id: version
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = $env:GITHUB_REF_NAME -replace '^v', ''
+          if ($version -notmatch '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z]+(?:\.[0-9A-Za-z]+)*)?$') {
+            throw "tag must look like v1.2.3: $env:GITHUB_REF_NAME"
+          }
+          "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Set up .NET SDK 10.0.403
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.403
+          dotnet-quality: ga
+
+      - name: Set up Inno Setup 6.7.3
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installer = Join-Path $env:RUNNER_TEMP 'innosetup-6.7.3.exe'
+          Invoke-WebRequest -Uri 'https://files.jrsoftware.org/is/6/innosetup-6.7.3.exe' -OutFile $installer
+          $signature = Get-AuthenticodeSignature -LiteralPath $installer
+          if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'Jordan Russell') {
+            throw "Inno Setup installer signature validation failed: $($signature.Status) $($signature.SignerCertificate.Subject)"
+          }
+          $process = Start-Process -FilePath $installer -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-' -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "Inno Setup installer exited $($process.ExitCode)" }
+          $iscc = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'
+          if (-not (Test-Path -LiteralPath $iscc -PathType Leaf)) { throw 'ISCC.exe was not installed.' }
+          $reported = (& $iscc /? 2>&1 | Out-String)
+          if ($reported -notmatch '6\.7\.3') { throw 'Inno Setup 6.7.3 was not installed.' }
+
+      - name: Package Windows x64
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $output = Join-Path $env:RUNNER_TEMP 'windows-package'
+          powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/package-windows.ps1 -Version $env:VERSION -OutputDirectory $output
+          if ($LASTEXITCODE -ne 0) { throw "Windows packaging failed with exit code $LASTEXITCODE" }
+          $versionRoot = Join-Path $output $env:VERSION
+          $setup = Join-Path $versionRoot "ClaudeSwitcher-$env:VERSION-windows-setup.exe"
+          $zip = Join-Path $versionRoot "ClaudeSwitcher-$env:VERSION-windows.zip"
+          $manifestPath = Join-Path $versionRoot 'manifest.json'
+          foreach ($path in @($setup, $zip, $manifestPath)) {
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Missing package artifact: $path" }
+          }
+          $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+          if ($manifest.product -ne 'ClaudeSwitcher' -or $manifest.version -ne $env:VERSION -or $manifest.runtime -ne 'win-x64') {
+            throw 'Package manifest product/version/runtime mismatch.'
+          }
+          if ($manifest.sourceCommit -ne '${{ github.sha }}') { throw 'Package manifest commit mismatch.' }
+          foreach ($entry in @($manifest.artifacts.setup, $manifest.artifacts.zip)) {
+            $artifact = Join-Path $versionRoot $entry.name
+            $actual = (Get-FileHash -LiteralPath $artifact -Algorithm SHA256).Hash
+            if ($actual -ne $entry.sha256) { throw "Package hash mismatch: $($entry.name)" }
+          }
+          if ($manifest.artifacts.setup.name -ne "ClaudeSwitcher-$env:VERSION-windows-setup.exe") { throw 'Unexpected setup filename.' }
+          if ($manifest.artifacts.zip.name -ne "ClaudeSwitcher-$env:VERSION-windows.zip") { throw 'Unexpected ZIP filename.' }
+          New-Item -ItemType Directory -Path build/release-windows -Force | Out-Null
+          Copy-Item -LiteralPath $setup, $zip, $manifestPath -Destination build/release-windows -Force
+
+      - name: Upload Windows x64 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-windows-x64-${{ github.run_id }}-${{ github.run_attempt }}
+          path: build/release-windows/
+          if-no-files-found: error
+          retention-days: 14
+
+  verify-windows-vm:
+    name: Verify trusted Windows VM acceptance
+    needs: [build-windows]
+    runs-on: ubuntu-24.04
+    environment: windows-vm-release
+    timeout-minutes: 15
+    steps:
+      - name: Checkout verifier
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download exact Windows artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: release-windows-x64-${{ github.run_id }}-${{ github.run_attempt }}
+          path: build/release-windows
+
+      - name: Download trusted signed acceptance evidence
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-vm-acceptance-${{ github.sha }}
+          path: build/vm-acceptance
+          repository: ${{ vars.WINDOWS_VM_ACCEPTANCE_REPOSITORY }}
+          run-id: ${{ vars.WINDOWS_VM_ACCEPTANCE_RUN_ID }}
+          github-token: ${{ secrets.WINDOWS_VM_ACCEPTANCE_READ_TOKEN }}
+
+      - name: Verify exact commit, version, installer hash, and trusted signature
+        env:
+          VERSION: ${{ github.ref_name }}
+          WINDOWS_VM_REPORT_HMAC_KEY: ${{ secrets.WINDOWS_VM_REPORT_HMAC_KEY }}
+        run: |
+          set -euo pipefail
+          VERSION="${VERSION#v}"
+          INSTALLER="build/release-windows/ClaudeSwitcher-${VERSION}-windows-setup.exe"
+          REPORT="build/vm-acceptance/report.json"
+          SIGNATURE="build/vm-acceptance/report.json.sig"
+          test -n "${WINDOWS_VM_REPORT_HMAC_KEY:-}" || { echo "::error::trusted VM report key is unavailable"; exit 1; }
+          test -f "$INSTALLER"
+          test -f "$REPORT"
+          test -f "$SIGNATURE"
+          python scripts/verify-windows-vm-report.py \
+            --report "$REPORT" \
+            --signature "$SIGNATURE" \
+            --expected-commit "$GITHUB_SHA" \
+            --expected-version "$VERSION" \
+            --installer "$INSTALLER"
+
+      - name: Upload verified VM gate result
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-vm-gate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: build/vm-acceptance/report.json
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Publish verified cross-platform release
+    needs: [build-macos-linux, build-windows, verify-windows-vm]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download macOS and Linux artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: release-macos-linux-${{ github.run_id }}-${{ github.run_attempt }}
+          path: build/release-assets
+
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: release-windows-x64-${{ github.run_id }}-${{ github.run_attempt }}
+          path: build/release-assets
+
+      - name: Validate complete asset inventory and Windows manifest
+        env:
+          VERSION: ${{ github.ref_name }}
+          MACOS_ARCH: ${{ needs.build-macos-linux.outputs.macos_arch }}
+        run: |
+          set -euo pipefail
+          VERSION="${VERSION#v}"
+          export VERSION
+          cd build/release-assets
+          python - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          version = os.environ["VERSION"]
+          windows = {
+              "setup": f"ClaudeSwitcher-{version}-windows-setup.exe",
+              "zip": f"ClaudeSwitcher-{version}-windows.zip",
+          }
+          expected = {
+              f"ClaudeSwitcher-{version}-macos-{os.environ['MACOS_ARCH']}.zip",
+              f"ClaudeSwitcher-{version}-macos-{os.environ['MACOS_ARCH']}.dmg",
+              f"ClaudeSwitcher-{version}-installer-kit.zip",
+              f"ClaudeSwitcher-{version}-linux.tar.gz",
+              *windows.values(),
+              "manifest.json",
+          }
+          entries = list(Path(".").iterdir())
+          actual = {entry.name for entry in entries}
+          if actual != expected:
+              raise SystemExit(
+                  f"unexpected release asset inventory: missing={sorted(expected - actual)} "
+                  f"extra={sorted(actual - expected)}"
+              )
+          for entry in entries:
+              if not entry.is_file() or entry.is_symlink():
+                  raise SystemExit(f"release asset is not a regular file: {entry.name}")
+
+          manifest = json.loads(Path("manifest.json").read_text(encoding="utf-8"))
+          assert manifest["product"] == "ClaudeSwitcher"
+          assert manifest["version"] == version
+          assert manifest["runtime"] == "win-x64"
+          assert manifest["sourceCommit"] == os.environ["GITHUB_SHA"]
+          for key, filename in windows.items():
+              artifact = Path(filename)
+              digest = hashlib.sha256(artifact.read_bytes()).hexdigest().upper()
+              assert manifest["artifacts"][key]["name"] == filename
+              assert manifest["artifacts"][key]["sha256"].upper() == digest
+          PY
+          rm manifest.json
+
+      - name: Generate release checksums
+        env:
+          VERSION: ${{ github.ref_name }}
+          MACOS_ARCH: ${{ needs.build-macos-linux.outputs.macos_arch }}
+        run: |
+          set -euo pipefail
+          VERSION="${VERSION#v}"
+          ARCH_LABEL="${MACOS_ARCH}"
+          cd build/release-assets
+          sha256sum \
+            "ClaudeSwitcher-${VERSION}-macos-${ARCH_LABEL}.zip" \
+            "ClaudeSwitcher-${VERSION}-macos-${ARCH_LABEL}.dmg" \
             "ClaudeSwitcher-${VERSION}-installer-kit.zip" \
+            "ClaudeSwitcher-${VERSION}-windows-setup.exe" \
             "ClaudeSwitcher-${VERSION}-windows.zip" \
             "ClaudeSwitcher-${VERSION}-linux.tar.gz" \
             > SHA256SUMS-release.txt
           cat SHA256SUMS-release.txt
 
-      - name: Publish release
+      - name: Create draft release
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          VERSION="${VERSION#v}"
+          TAG="${GITHUB_REF_NAME}"
+          ASSETS=(build/release-assets/*)
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "::error::release $TAG already exists; refusing to overwrite assets"
+            exit 1
+          fi
+          gh release create "$TAG" "${ASSETS[@]}" \
+            --draft \
+            --verify-tag \
+            --generate-notes \
+            --title "Claude 切换器 ${VERSION}"
+
+      - name: Verify draft assets and checksums
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          VERSION="${VERSION#v}"
+          TAG="${GITHUB_REF_NAME}"
+          DRAFT_ROOT="build/draft-verification"
+          mkdir -p "$DRAFT_ROOT"
+          gh release download "$TAG" --dir "$DRAFT_ROOT"
+          cd "$DRAFT_ROOT"
+          sha256sum -c SHA256SUMS-release.txt
+          test "$(find . -maxdepth 1 -type f | wc -l)" -eq 7
+          cd "$GITHUB_WORKSPACE"
+          gh release view "$TAG" --json isDraft,assets --jq '.isDraft' | grep -qx true
+
+      - name: Publish verified draft release
+        env:
+          VERSION: ${{ github.ref_name }}
         run: |
           set -euo pipefail
           TAG="${GITHUB_REF_NAME}"
-          ASSETS=(
-            "build/ClaudeSwitcher-${VERSION}-macos-arm64.zip"
-            "build/ClaudeSwitcher-${VERSION}-macos-arm64.dmg"
-            "build/ClaudeSwitcher-${VERSION}-installer-kit.zip"
-            "build/ClaudeSwitcher-${VERSION}-windows.zip"
-            "build/ClaudeSwitcher-${VERSION}-linux.tar.gz"
-            "build/SHA256SUMS-release.txt"
-          )
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" "${ASSETS[@]}" --clobber
-          else
-            gh release create "$TAG" "${ASSETS[@]}" \
-              --generate-notes \
-              --title "Claude 切换器 ${VERSION}"
-          fi
+          gh release edit "$TAG" --draft=false

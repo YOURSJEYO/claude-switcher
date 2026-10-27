@@ -6,7 +6,9 @@
 
 **Architecture:** First repair and test every core path that can launch Claude or mutate account snapshots. Then add a versioned JSON contract and a .NET 10 WPF client, separate per-user setup from fixed administrator operations, and package both through Inno Setup. Windows and macOS/Linux CI jobs build artifacts independently; one final job verifies all artifacts and publishes only after isolated Windows VM acceptance.
 
-**Tech Stack:** Windows PowerShell 5.1, Pester 5, .NET 10 LTS, WPF, xUnit, Inno Setup, GitHub Actions, Windows 11 x64 acceptance VM, Windows 10 22H2 compatibility VM.
+**Tech Stack:** Windows PowerShell 5.1, dependency-free isolated PowerShell tests, .NET 10 LTS, WPF, xUnit, Inno Setup, GitHub Actions, Windows 11 x64 acceptance VM, Windows 10 22H2 compatibility VM.
+
+**Test-runner adaptation:** The developer environment has only Pester 3.4.0, not Pester 5. `windows/tests/Invoke-CoreTests.ps1` is the dependency-free isolated runner used on both PowerShell 7 and Windows PowerShell 5.1. All subsequent core/protocol/transaction suites use that same runner; add tag filtering before the first tagged suite. The behavioral assertions and isolation requirements below are unchanged.
 
 ## Global Constraints
 
@@ -28,7 +30,7 @@
 
 ## File Map
 
-- `windows/tests/ClaudeSwitch.Core.Tests.ps1`: isolated Pester tests for launch gates, STUN unknown states, copy exit codes, locks, and recovery.
+- `windows/tests/ClaudeSwitch.Core.Tests.ps1`: isolated core tests for launch gates, STUN unknown states, copy exit codes, locks, and recovery.
 - `windows/claude-switch.ps1`: authoritative launch gate, operation lock, recoverable snapshot transaction, JSON protocol and legacy text output.
 - `windows/SwitcherUI.ps1`: compatibility UI; consume strict core results and never present partial output or warnings as success.
 - `windows/ClaudeSwitcher.App/`: WPF views, process client, protocol models, state presentation, and setup wizard.
@@ -55,7 +57,7 @@
 - `Get-StunAssessment` returns `ok` only if at least one valid STUN response matches the freshly observed proxy egress; no response, malformed response, and probe errors return blocking `unknown`/`fail`.
 - Existing text `checkdetail`, `status`, `fix`, and `switch A|B` remain supported.
 
-- [ ] **Step 1: Add failing isolated Pester tests** for: same-account launch with a failed egress check; normal A-to-B launch with failed country check; empty, malformed and mismatched STUN results; rejection of invalid account targets; output that omits a required check. Inject/mock network, process launch, time-zone, task and file APIs. Use a temporary home and synthetic test addresses only.
+- [ ] **Step 1: Add failing isolated core tests** for: same-account launch with a failed egress check; normal A-to-B launch with failed country check; empty, malformed and mismatched STUN results; rejection of invalid account targets; output that omits a required check. Inject/mock network, process launch, time-zone, task and file APIs. Use a temporary home and synthetic test addresses only.
 - [ ] **Step 2: Run the new tests and verify the expected failures.**
 
 Run: `pwsh -NoLogo -NoProfile -File windows/tests/Invoke-CoreTests.ps1`
@@ -64,7 +66,7 @@ Expected: failing assertions demonstrate current bypasses; no test contacts live
 
 - [ ] **Step 3: Implement the smallest core-owned launch gate.** Both the same-account branch and the account-change branch must invoke the same fresh gate immediately before `Start-ClaudeApp`; return nonzero and never call the launcher on a blocking/unknown result. Do not trust cached check files. Reject invalid targets before stopping Claude or touching files.
 - [ ] **Step 4: Correct STUN truth states.** Separate `no response` from verified `no leak`; validate response structure and only pass on an observed public address that matches the current egress. Keep internal addresses and test fixtures out of user-facing details.
-- [ ] **Step 5: Run the focused Pester suite and the PowerShell parser.**
+- [ ] **Step 5: Run the focused core suite and the PowerShell parser.**
 
 Run: `pwsh -NoLogo -NoProfile -File windows/tests/Invoke-CoreTests.ps1`
 
@@ -123,7 +125,7 @@ Expected: protocol contract assertions fail; text commands remain unaffected.
 
 - [ ] **Step 3: Emit one JSON object on stdout** for native mode. Put diagnostic output on stderr or a protected redacted log. Propagate native exit codes; normalize robocopy codes inside transaction code only.
 - [ ] **Step 4: Update `SwitcherUI.ps1`** so it treats missing/duplicate/unknown output and warnings as non-green, checks `switch` results rather than merely absence of `FAIL:`, and refuses launch unless the core confirms the gate. Keep UTF-8 BOM.
-- [ ] **Step 5: Run Pester protocol plus legacy behavior tests.**
+- [ ] **Step 5: Run protocol plus legacy behavior tests.**
 
 Run: `pwsh -NoLogo -NoProfile -File windows/tests/Invoke-CoreTests.ps1`
 
@@ -204,7 +206,7 @@ Expected: tests pass; publish output contains the WPF apphost and runtime files 
 - [ ] **Step 1: Add packaging contract tests** using a temporary output root: unsafe version rejected, missing tool fails, missing expected file fails, no `bin/obj` or user data enters archives, setup/zip names and manifest agree.
 - [ ] **Step 2: Run tests to verify missing packaging script and manifest fail.**
 - [ ] **Step 3: Implement the Windows packager** using fixed tool discovery, `dotnet test`, `dotnet publish` and Inno Setup compile. Produce `ClaudeSwitcher-<version>-windows-setup.exe` and `ClaudeSwitcher-<version>-windows.zip`.
-- [ ] **Step 4: Add Windows CI checks** for Pester, xUnit, PowerShell parse checks, packaging and archive manifest. Keep separate build permissions read-only.
+- [ ] **Step 4: Add Windows CI checks** for PowerShell core tests, xUnit, PowerShell parse checks, packaging and archive manifest. Keep separate build permissions read-only.
 - [ ] **Step 5: Refactor release workflow** into macOS/Linux build and Windows build artifact jobs; one downstream job downloads all assets, validates versions/manifests, computes release SHA256, creates a draft, verifies assets, then publishes. Any missing artifact blocks publication.
 - [ ] **Step 6: Document Windows x64 runtime, installation/UAC behavior, unsigned SmartScreen status, fallback ZIP distinction, build/test commands, support matrix and upgrade/uninstall data retention.**
 - [ ] **Step 7: Run workflow syntax checks and local package tests; inspect each archive manifest.**
@@ -230,7 +232,7 @@ Expected: tests pass; publish output contains the WPF apphost and runtime files 
 
 ## Task Dependencies
 
-`Task 1 → Task 2 → Task 3 → Task 4 → Task 5 → Task 6 → Task 7`. Do not start a dependent task while its prerequisite review has an open Critical/Important issue. Independent research may run in parallel, but implementation agents work one task at a time to prevent shared-core conflicts.
+Integration order is `Task 1 → Task 2 → Task 3 → Task 4 → Task 5 → Task 6 → Task 7`. Shared PowerShell-core changes remain sequential and require review before the next core task. Task 4's new C# files may be implemented against isolated protocol fixtures in parallel, with a disjoint write scope; they cannot be declared integrated or releasable until Tasks 1–3 pass. Only one agent at a time may edit a given file, and commits are coordinated by the controller.
 
 ## Plan Self-Review
 

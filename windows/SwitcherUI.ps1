@@ -1,4 +1,512 @@
-﻿# Claude 账号切换器 - Windows 界面 (WPF, Beta)
+﻿function Get-LegacySystemPowerShellPath {
+    return (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe')
+}
+
+function New-LegacyCoreInvocation {
+    param(
+        [Parameter(Mandatory = $true)][string]$Command,
+        [string]$Target = '',
+        [Parameter(Mandatory = $true)][string]$CorePath,
+        [Parameter(Mandatory = $true)][string]$OperationId
+    )
+    if (@('checkdetail', 'status', 'fix', 'switch') -notcontains $Command) {
+        throw "Unsupported core command: $Command"
+    }
+    if (-not $CorePath -or [string]::IsNullOrWhiteSpace($CorePath)) {
+        throw 'Core path must not be empty.'
+    }
+    $parsedId = [guid]::Empty
+    if (-not [guid]::TryParseExact($OperationId, 'D', [ref]$parsedId) -or
+        $parsedId -eq [guid]::Empty -or
+        $OperationId -cne $parsedId.ToString('D')) {
+        throw 'Operation ID must be a canonical nonempty D-form GUID.'
+    }
+    if ($Command -eq 'switch') {
+        if ($Target -cnotin @('A', 'B')) { throw 'Switch target must be A or B.' }
+    }
+    elseif ($Target) {
+        throw 'Only switch accepts a target.'
+    }
+
+    $arguments = New-Object System.Collections.Generic.List[string]
+    foreach ($argument in @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $CorePath, $Command)) {
+        [void]$arguments.Add($argument)
+    }
+    if ($Target) { [void]$arguments.Add($Target) }
+    foreach ($argument in @('-Json', '-OperationId', $OperationId)) {
+        [void]$arguments.Add($argument)
+    }
+    return [pscustomobject]@{
+        FilePath = Get-LegacySystemPowerShellPath
+        Arguments = $arguments.ToArray()
+        Command = $Command
+        Target = $Target
+        OperationId = $OperationId
+    }
+}
+
+function Get-LegacyUiTimeoutPolicy {
+    param([Parameter(Mandatory = $true)][string]$Command)
+    switch ($Command) {
+        'status' { return [pscustomobject]@{ Kind = 'Hard'; TimeoutSeconds = 10; KillOnTimeout = $true } }
+        'checkdetail' { return [pscustomobject]@{ Kind = 'Hard'; TimeoutSeconds = 90; KillOnTimeout = $true } }
+        'switch' { return [pscustomobject]@{ Kind = 'Soft'; TimeoutSeconds = 120; KillOnTimeout = $false } }
+        'fix' { return [pscustomobject]@{ Kind = 'Soft'; TimeoutSeconds = 180; KillOnTimeout = $false } }
+        default { throw "Unsupported core command: $Command" }
+    }
+}
+
+function Remove-LegacyCompletedProcessObservers {
+    $retained = Get-Variable -Name LegacyProcessObservers -Scope Script -ErrorAction SilentlyContinue
+    if ($null -eq $retained) { return }
+    foreach ($entry in @($script:LegacyProcessObservers.ToArray())) {
+        if ($entry.Invocation.IsCompleted) {
+            try { [void]$entry.Pipeline.EndInvoke($entry.Invocation) } catch {}
+            $entry.Pipeline.Dispose()
+            [void]$script:LegacyProcessObservers.Remove($entry)
+        }
+    }
+}
+
+function Start-LegacyProcessObserver {
+    param($Process, $StdoutTask, $StderrTask)
+    Remove-LegacyCompletedProcessObservers
+    if ($null -eq (Get-Variable -Name LegacyProcessObservers -Scope Script -ErrorAction SilentlyContinue)) {
+        $script:LegacyProcessObservers = New-Object 'System.Collections.Generic.List[object]'
+    }
+    $completion = New-Object 'System.Threading.Tasks.TaskCompletionSource[object]'
+    $pipeline = [powershell]::Create()
+    [void]$pipeline.AddScript({
+        param($child, $stdout, $stderr, $completionSource)
+        try {
+            [void]$child.WaitForExit()
+            $result = [pscustomobject]@{
+                ExitCode = [int]$child.ExitCode
+                StandardOutput = [string]$stdout.GetAwaiter().GetResult()
+                StandardError = [string]$stderr.GetAwaiter().GetResult()
+            }
+            try { $child.Dispose() } catch {}
+            $completionSource.SetResult($result)
+        }
+        catch {
+            try { $child.Dispose() } catch {}
+            $completionSource.SetException($_.Exception)
+        }
+    }.ToString()).AddArgument($Process).AddArgument($StdoutTask).AddArgument($StderrTask).AddArgument($completion)
+    $invocation = $pipeline.BeginInvoke()
+    [void]$script:LegacyProcessObservers.Add([pscustomobject]@{ Pipeline = $pipeline; Invocation = $invocation })
+    return $completion.Task
+}
+
+function Invoke-LegacyUiProcess {
+    param(
+        [Parameter(Mandatory = $true)]$Invocation,
+        [Parameter(Mandatory = $true)]$TimeoutPolicy,
+        [scriptblock]$ProcessFactory = $null
+    )
+    Remove-LegacyCompletedProcessObservers
+    if (-not $ProcessFactory) {
+        $ProcessFactory = {
+            param($item)
+            $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+            $startInfo.FileName = $item.FilePath
+            $startInfo.Arguments = (@($item.Arguments) | ForEach-Object {
+                '"' + ([string]$_).Replace('"', '\"') + '"'
+            }) -join ' '
+            $startInfo.UseShellExecute = $false
+            $startInfo.CreateNoWindow = $true
+            $startInfo.RedirectStandardOutput = $true
+            $startInfo.RedirectStandardError = $true
+            $startInfo.RedirectStandardInput = $true
+            try { $startInfo.StandardOutputEncoding = New-Object System.Text.UTF8Encoding($false) } catch {}
+            try { $startInfo.StandardErrorEncoding = New-Object System.Text.UTF8Encoding($false) } catch {}
+            $process = New-Object System.Diagnostics.Process
+            $process.StartInfo = $startInfo
+            [void]$process.Start()
+            return $process
+        }
+    }
+
+    try { $process = & $ProcessFactory $Invocation } catch {
+        return [pscustomobject]@{
+            ExitCode = $null
+            StandardOutput = ''
+            StandardError = $_.Exception.Message
+            TimedOut = $false
+            StillRunning = $false
+            Killed = $false
+            Observer = $null
+            StartFailed = $true
+        }
+    }
+    $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+    $stderrTask = $process.StandardError.ReadToEndAsync()
+    $streamTasks = [System.Threading.Tasks.Task[]]@($stdoutTask, $stderrTask)
+    $milliseconds = [int]($TimeoutPolicy.TimeoutSeconds * 1000)
+    $exited = $process.WaitForExit($milliseconds)
+    if (-not $exited) {
+        if ($TimeoutPolicy.KillOnTimeout) {
+            try { $process.Kill() } catch {}
+            try { [void]$process.WaitForExit(1000) } catch {}
+            $observer = Start-LegacyProcessObserver -Process $process -StdoutTask $stdoutTask -StderrTask $stderrTask
+            return [pscustomobject]@{
+                ExitCode = $null
+                StandardOutput = ''
+                StandardError = ''
+                TimedOut = $true
+                StillRunning = $false
+                Killed = $true
+                Observer = $observer
+                StartFailed = $false
+            }
+        }
+        $observer = Start-LegacyProcessObserver -Process $process -StdoutTask $stdoutTask -StderrTask $stderrTask
+        return [pscustomobject]@{
+            ExitCode = $null
+            StandardOutput = ''
+            StandardError = ''
+            TimedOut = $true
+            StillRunning = $true
+            Killed = $false
+            Observer = $observer
+            StartFailed = $false
+        }
+    }
+
+    [System.Threading.Tasks.Task]::WaitAll($streamTasks)
+    $result = [pscustomobject]@{
+        ExitCode = [int]$process.ExitCode
+        StandardOutput = [string]$stdoutTask.Result
+        StandardError = [string]$stderrTask.Result
+        TimedOut = $false
+        StillRunning = $false
+        Killed = $false
+        Observer = $null
+        StartFailed = $false
+    }
+    try { $process.Dispose() } catch {}
+    return $result
+}
+
+function Get-LegacyRequiredProperty {
+    param($Object, [string]$Name)
+    if ($null -eq $Object) { throw "Core result is not an object (missing $Name)." }
+    $property = $Object.PSObject.Properties[$Name]
+    if ($null -eq $property) { throw "Core result is missing required field: $Name" }
+    return $property.Value
+}
+
+function ConvertFrom-LegacyStrictBoolean {
+    param($Value, [string]$Name)
+    if ($Value -isnot [bool]) { throw "Core field $Name must be a Boolean." }
+    return [bool]$Value
+}
+
+function ConvertFrom-LegacyStrictString {
+    param($Value, [string]$Name)
+    if ($Value -isnot [string]) { throw "Core field $Name must be a string." }
+    return [string]$Value
+}
+
+function Test-LegacyCanonicalGuid {
+    param([string]$Value)
+    if ($Value -isnot [string] -or [string]::IsNullOrWhiteSpace($Value)) { return $false }
+    $parsed = [guid]::Empty
+    return [guid]::TryParseExact($Value, 'D', [ref]$parsed) -and $Value -ceq $parsed.ToString('D')
+}
+
+function ConvertFrom-LegacyCoreJson {
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Stdout,
+        [Parameter(Mandatory = $true)][int]$ExitCode,
+        [Parameter(Mandatory = $true)][string]$ExpectedCommand,
+        [Parameter(Mandatory = $true)][string]$ExpectedOperationId,
+        [string]$Target = ''
+    )
+    if ([string]::IsNullOrWhiteSpace($Stdout)) { throw 'Core returned empty protocol output.' }
+    $trimmed = $Stdout.Trim()
+    if (-not $trimmed.StartsWith('{') -or -not $trimmed.EndsWith('}')) {
+        throw 'Core output is not one JSON object.'
+    }
+    try { $root = $trimmed | ConvertFrom-Json -ErrorAction Stop } catch { throw 'Core output is malformed JSON.' }
+    if ($null -eq $root -or $root -is [array]) { throw 'Core result must be a JSON object.' }
+
+    $schema = Get-LegacyRequiredProperty $root 'schemaVersion'
+    $integerSchemaTypes = @([sbyte], [byte], [int16], [uint16], [int32], [uint32], [int64], [uint64])
+    $isIntegerSchema = $false
+    foreach ($integerSchemaType in $integerSchemaTypes) {
+        if ($schema -is $integerSchemaType) { $isIntegerSchema = $true; break }
+    }
+    if (-not $isIntegerSchema -or [decimal]$schema -ne [decimal]1) {
+        throw 'Core protocol schemaVersion must be integer 1.'
+    }
+
+    $operationId = ConvertFrom-LegacyStrictString (Get-LegacyRequiredProperty $root 'operationId') 'operationId'
+    if (-not (Test-LegacyCanonicalGuid $operationId) -or $operationId -cne $ExpectedOperationId) {
+        throw 'Core operationId does not match the request.'
+    }
+    $command = ConvertFrom-LegacyStrictString (Get-LegacyRequiredProperty $root 'command') 'command'
+    if ($command -cne $ExpectedCommand) { throw 'Core command does not match the request.' }
+    $success = ConvertFrom-LegacyStrictBoolean (Get-LegacyRequiredProperty $root 'success') 'success'
+    $code = ConvertFrom-LegacyStrictString (Get-LegacyRequiredProperty $root 'code') 'code'
+    if (-not $code) { throw 'Core code must not be empty.' }
+    $message = ConvertFrom-LegacyStrictString (Get-LegacyRequiredProperty $root 'message') 'message'
+
+    $checks = @()
+    $canLaunch = $false
+    if ($command -eq 'checkdetail') {
+        $checkIds = @(
+            'proxy_engine', 'tun_interface', 'egress_country', 'ip_consistency',
+            'timezone', 'locale', 'ipv6', 'dns', 'webrtc', 'bodyguard',
+            'routing_rules', 'client_language', 'asn', 'ecosystem'
+        )
+        $rawChecks = @(Get-LegacyRequiredProperty $root 'checks')
+        if ($rawChecks.Count -ne 14) { throw 'Core checks must contain exactly 14 items.' }
+        for ($i = 0; $i -lt $checkIds.Count; $i++) {
+            $item = $rawChecks[$i]
+            if ($null -eq $item -or $item -is [array]) { throw 'Each core check must be an object.' }
+            $id = ConvertFrom-LegacyStrictString (Get-LegacyRequiredProperty $item 'id') 'id'
+            if ($id -cne $checkIds[$i]) { throw 'Core check IDs are missing, duplicate, unknown, or out of order.' }
+            $name = ConvertFrom-LegacyStrictString (Get-LegacyRequiredProperty $item 'name') 'name'
+            if (-not $name) { throw 'Core check name must not be empty.' }
+            $status = ConvertFrom-LegacyStrictString (Get-LegacyRequiredProperty $item 'status') 'status'
+            if (@('ok', 'warn', 'fail', 'unknown') -notcontains $status) { throw 'Core check status is unknown.' }
+            $blocking = ConvertFrom-LegacyStrictBoolean (Get-LegacyRequiredProperty $item 'blocking') 'blocking'
+            $expectedBlocking = switch ($status) {
+                'ok' { $false }
+                'warn' { $id -notin @('ip_consistency', 'asn') }
+                default { $true }
+            }
+            if ($blocking -ne $expectedBlocking) { throw 'Core check blocking contradicts status.' }
+            $detail = ConvertFrom-LegacyStrictString (Get-LegacyRequiredProperty $item 'detail') 'detail'
+            $checks += [pscustomobject]@{
+                Id = $id; Name = $name; Status = $status; Blocking = $blocking; Detail = $detail
+            }
+        }
+        $canLaunch = ConvertFrom-LegacyStrictBoolean (Get-LegacyRequiredProperty $root 'canLaunch') 'canLaunch'
+        $hasBlocking = @($checks | Where-Object { $_.Blocking }).Count -gt 0
+        if ($canLaunch -ne ($success -and -not $hasBlocking)) {
+            throw 'Core canLaunch contradicts success and blocking checks.'
+        }
+    }
+
+    $current = $null; $phase = $null; $recoveryRequired = $null
+    $activeOperationId = $null; $transactionPhase = $null
+    if ($command -in @('status', 'switch')) {
+        $current = ConvertFrom-LegacyStrictString (Get-LegacyRequiredProperty $root 'current') 'current'
+        if (@('A', 'B', 'none') -notcontains $current) { throw 'Core current must be A, B, or none.' }
+        $phase = ConvertFrom-LegacyStrictString (Get-LegacyRequiredProperty $root 'phase') 'phase'
+        if (@('idle', 'running', 'recoveryRequired', 'completed') -notcontains $phase) { throw 'Core phase is invalid.' }
+        $recoveryRequired = ConvertFrom-LegacyStrictBoolean (Get-LegacyRequiredProperty $root 'recoveryRequired') 'recoveryRequired'
+        if ($recoveryRequired -ne ($phase -eq 'recoveryRequired')) { throw 'Core recoveryRequired contradicts phase.' }
+
+        $activeValue = Get-LegacyRequiredProperty $root 'activeOperationId'
+        $transactionValue = Get-LegacyRequiredProperty $root 'transactionPhase'
+        if ($null -ne $activeValue) {
+            $activeOperationId = ConvertFrom-LegacyStrictString $activeValue 'activeOperationId'
+            if (-not (Test-LegacyCanonicalGuid $activeOperationId)) { throw 'Core activeOperationId must be canonical.' }
+        }
+        if ($null -ne $transactionValue) {
+            $transactionPhase = ConvertFrom-LegacyStrictString $transactionValue 'transactionPhase'
+            if (-not $transactionPhase) { throw 'Core transactionPhase must not be empty.' }
+        }
+        $ongoing = $phase -in @('running', 'recoveryRequired')
+        if ($ongoing -and ($null -eq $activeOperationId -or $null -eq $transactionPhase)) {
+            throw 'Running or recovery status requires activeOperationId and transactionPhase.'
+        }
+        if ($phase -eq 'idle' -and ($null -ne $activeOperationId -or $null -ne $transactionPhase)) {
+            throw 'Idle status must not contain active operation metadata.'
+        }
+
+        if ($command -eq 'switch' -and $success -and $phase -eq 'completed' -and $current -cne $Target) {
+            throw 'Completed switch current does not match target.'
+        }
+    }
+
+    if ($ExitCode -ne 0 -and $success) { throw "Core exited nonzero ($ExitCode) while claiming success." }
+    return [pscustomobject]@{
+        SchemaVersion = 1
+        OperationId = $operationId
+        Command = $command
+        Success = $success
+        TrustedSuccess = ($ExitCode -eq 0 -and $success)
+        Code = $code
+        Message = $message
+        Checks = $checks
+        CanLaunch = $canLaunch
+        Current = $current
+        Phase = $phase
+        RecoveryRequired = $recoveryRequired
+        ActiveOperationId = $activeOperationId
+        TransactionPhase = $transactionPhase
+        ExitCode = $ExitCode
+    }
+}
+
+function Get-LegacyCheckPresentation {
+    param([Parameter(Mandatory = $true)]$Result)
+    $rows = @()
+    $hasWarning = $false
+    foreach ($check in @($Result.Checks)) {
+        switch ($check.Status) {
+            'ok' { $icon = '✓'; $color = '#FF22C55E' }
+            'warn' { $icon = '⚠'; $color = '#FFFACC15'; $hasWarning = $true }
+            'fail' { $icon = '✗'; $color = '#FFF87171' }
+            default { $icon = '?'; $color = '#FFF87171' }
+        }
+        $safeDetail = [string]$check.Detail
+        $safeDetail = [regex]::Replace($safeDetail, '(?i)\b(?:\d{1,3}\.){3}\d{1,3}\b', '[redacted]')
+        $safeDetail = [regex]::Replace($safeDetail, '(?i)(?:[0-9a-f]{0,4}:){2,}[0-9a-f:.]*', '[redacted]')
+        $rows += [pscustomobject]@{
+            Id = $check.Id; Name = $check.Name; Detail = $safeDetail
+            Icon = $icon; Color = $color; Blocking = $check.Blocking
+        }
+    }
+    $ready = [bool]($Result.TrustedSuccess -and $Result.CanLaunch -and -not @($rows | Where-Object { $_.Blocking }).Count)
+    return [pscustomobject]@{
+        Checks = $rows
+        CanLaunch = $ready
+        AllGreen = [bool]($ready -and -not $hasWarning)
+        StatusText = if ($ready -and $hasWarning) { '环境可用（有警告）' } elseif ($ready) { '环境就绪' } else { '检查未通过' }
+    }
+}
+
+function Get-LegacyRecoveryGuidance {
+    return @(
+        '检测到未完成事务，请勿删除任何未核实的恢复材料。',
+        '可能包含恢复数据的位置：%APPDATA%\Claude.new、%APPDATA%\Claude.previous，',
+        '%USERPROFILE%\.claude-switcher\accounts\A.new、accounts\A.previous、accounts\B.new、accounts\B.previous。',
+        '请先核对并恢复有效快照；在恢复完成并重新检查前，账号切换、修复和启动均不可用。'
+    ) -join "`n"
+}
+
+function Get-LegacyStatusPresentation {
+    param([Parameter(Mandatory = $true)]$Result)
+    $active = if ($Result.ActiveOperationId) { $Result.ActiveOperationId } else { '—' }
+    $phase = if ($Result.TransactionPhase) { $Result.TransactionPhase } else { '—' }
+    $current = if ($Result.Current -eq 'none') { '未初始化' } else { $Result.Current }
+    if ($Result.Phase -eq 'recoveryRequired') {
+        return [pscustomobject]@{
+            IsRecovery = $true; IsRunning = $false
+            StatusText = '需要恢复'
+            Banner = (Get-LegacyRecoveryGuidance)
+            CurrentAccount = $current; ActiveOperationId = $active; TransactionPhase = $phase
+            CanRefresh = $true; CanFix = $false; CanSwitch = $false; CanLaunch = $false
+        }
+    }
+    if ($Result.Phase -eq 'running') {
+        return [pscustomobject]@{
+            IsRecovery = $false; IsRunning = $true
+            StatusText = '处理中'
+            Banner = "核心事务仍在运行（阶段：$phase），完成状态尚未确认。请稍后刷新状态。"
+            CurrentAccount = $current; ActiveOperationId = $active; TransactionPhase = $phase
+            CanRefresh = $true; CanFix = $false; CanSwitch = $false; CanLaunch = $false
+        }
+    }
+    return [pscustomobject]@{
+        IsRecovery = $false; IsRunning = $false
+        StatusText = '状态已读取'
+        Banner = ''
+        CurrentAccount = $current; ActiveOperationId = $active; TransactionPhase = $phase
+        CanRefresh = $true; CanFix = $false; CanSwitch = $false; CanLaunch = $false
+    }
+}
+
+function ConvertTo-LegacyStatusOutcome {
+    param([Parameter(Mandatory = $true)]$Outcome)
+    if ($Outcome.TimedOut) {
+        $message = '状态查询已超时，事务状态未知。请稍后刷新状态；确认状态前不能修复、切换或启动。'
+        return [pscustomobject]@{
+            State = [pscustomobject]@{
+                IsUnavailable = $true; IsRecovery = $false; IsRunning = $false
+                StatusText = '状态不可用'; Banner = $message
+                CurrentAccount = '?'; ActiveOperationId = '—'; TransactionPhase = '—'
+                CanRefresh = $true; CanFix = $false; CanSwitch = $false; CanLaunch = $false
+            }
+            Error = $message
+        }
+    }
+    return [pscustomobject]@{ State = (Get-LegacyStatusPresentation -Result $Outcome.Result); Error = $null }
+}
+
+function Get-LegacySwitchPhasePresentation {
+    param([Parameter(Mandatory = $true)]$Result)
+    if ($Result.Phase -in @('running', 'recoveryRequired')) {
+        return Get-LegacyStatusPresentation -Result $Result
+    }
+    return $null
+}
+
+function Set-LegacyPendingCheckRows {
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()]$Rows,
+        [Parameter(Mandatory = $true)][string[]]$Names
+    )
+    $ids = @(
+        'proxy_engine', 'tun_interface', 'egress_country', 'ip_consistency',
+        'timezone', 'locale', 'ipv6', 'dns', 'webrtc', 'bodyguard',
+        'routing_rules', 'client_language', 'asn', 'ecosystem'
+    )
+    $Rows.Clear()
+    for ($index = 0; $index -lt $ids.Count; $index++) {
+        [void]$Rows.Add([pscustomobject]@{
+            Id = $ids[$index]; Name = $Names[$index]; Detail = ''
+            Icon = '…'; Color = '#FF6B7280'; Blocking = $true
+        })
+    }
+}
+
+function Test-LegacySwitchCompletion {
+    param([Parameter(Mandatory = $true)]$Result, [Parameter(Mandatory = $true)][string]$Target)
+    return [bool](
+        $Target -in @('A', 'B') -and
+        $Result.Command -eq 'switch' -and
+        $Result.ExitCode -eq 0 -and
+        $Result.Success -eq $true -and
+        $Result.Phase -eq 'completed' -and
+        $Result.RecoveryRequired -eq $false -and
+        $Result.Current -ceq $Target
+    )
+}
+
+function Test-LegacySwitchReady {
+    param([Parameter(Mandatory = $true)]$SwitchResult, [Parameter(Mandatory = $true)][string]$Target, $FreshCheckResult = $null)
+    if (-not (Test-LegacySwitchCompletion -Result $SwitchResult -Target $Target)) { return $false }
+    if ($null -eq $FreshCheckResult -or $FreshCheckResult.Command -ne 'checkdetail') { return $false }
+    return [bool](Get-LegacyCheckPresentation -Result $FreshCheckResult).CanLaunch
+}
+
+function Invoke-LegacyCoreOperation {
+    param(
+        [Parameter(Mandatory = $true)][string]$Command,
+        [string]$Target = '',
+        [string]$CorePath = $CORE,
+        [string]$OperationId = ([guid]::NewGuid().ToString('D')),
+        [scriptblock]$ProcessRunner = $null
+    )
+    $invocation = New-LegacyCoreInvocation -Command $Command -Target $Target -CorePath $CorePath -OperationId $OperationId
+    $policy = Get-LegacyUiTimeoutPolicy -Command $Command
+    if (-not $ProcessRunner) { $ProcessRunner = { param($item, $timeoutPolicy) Invoke-LegacyUiProcess -Invocation $item -TimeoutPolicy $timeoutPolicy } }
+    try { $processResult = & $ProcessRunner $invocation $policy } catch {
+        throw "Core process could not be started or read: $($_.Exception.Message)"
+    }
+    if ($processResult.StartFailed) {
+        throw "Core process could not be started: $($processResult.StandardError)"
+    }
+    if ($processResult.TimedOut) {
+        return [pscustomobject]@{
+            Invocation = $invocation; TimeoutPolicy = $policy; ProcessResult = $processResult
+            Result = $null; TimedOut = $true; StillRunning = [bool]$processResult.StillRunning
+        }
+    }
+    $result = ConvertFrom-LegacyCoreJson -Stdout $processResult.StandardOutput -ExitCode $processResult.ExitCode -ExpectedCommand $Command -ExpectedOperationId $OperationId -Target $Target
+    return [pscustomobject]@{
+        Invocation = $invocation; TimeoutPolicy = $policy; ProcessResult = $processResult
+        Result = $result; TimedOut = $false; StillRunning = $false
+    }
+}
+
+# Claude 账号切换器 - Windows 界面 (WPF, Beta)
 Add-Type -AssemblyName PresentationFramework
 Add-Type -AssemblyName PresentationCore
 Add-Type -AssemblyName WindowsBase
@@ -97,78 +605,219 @@ function Set-Status($text, $color) {
     $win.FindName('StatusText').Foreground = (New-Object System.Windows.Media.SolidColorBrush $color)
 }
 
-function Invoke-Core([string[]]$coreArgs) {
-    # checkdetail 改从落盘的 last-check.txt(UTF-8)读取:子进程 stdout 经控制台代码页(如 GBK/936)转码会把中文键名弄乱,导致 14 项只匹配 3 项
-    if ($coreArgs[0] -eq 'checkdetail') {
-        & powershell -NoProfile -ExecutionPolicy Bypass -File $CORE @coreArgs 2>$null | Out-Null
-        return ((Get-Content "$BASE\last-check.txt" -Encoding UTF8) -join "`n").Trim()
+function Set-Banner($text, $color = '#FFF87171') {
+    $banner = $win.FindName('Banner')
+    $banner.Text = $text
+    $banner.Foreground = (New-Object System.Windows.Media.SolidColorBrush $color)
+}
+
+function Set-ActionAvailability($state) {
+    $win.FindName('BtnA').IsEnabled = [bool]$state.CanSwitch
+    $win.FindName('BtnB').IsEnabled = [bool]$state.CanSwitch
+    $win.FindName('BtnFix').IsEnabled = [bool]$state.CanFix
+    $win.FindName('BtnRefresh').IsEnabled = [bool]$state.CanRefresh
+    $win.FindName('CurrentAccount').Text = if ($state.CurrentAccount) { $state.CurrentAccount } else { '?' }
+    $hint = if ($state.IsRecovery -or $state.IsRunning) {
+        "操作 ID：$($state.ActiveOperationId)  阶段：$($state.TransactionPhase)"
+    } else { '' }
+    $win.FindName('ActionHint').Text = $hint
+}
+
+function Show-RecoveryState($state) {
+    $color = if ($state.IsRunning) { [System.Windows.Media.Color]::FromRgb(0xFA,0xCC,0x15) } else { [System.Windows.Media.Color]::FromRgb(0xF8,0x71,0x71) }
+    Set-Status $state.StatusText $color
+    Set-Banner $state.Banner '#FFFACC15'
+    Set-ActionAvailability $state
+}
+
+function Show-StatusFailure($message) {
+    Set-Status '状态不可用' ([System.Windows.Media.Color]::FromRgb(0xF8,0x71,0x71))
+    Set-Banner $message
+    Set-ActionAvailability ([pscustomobject]@{
+        CanRefresh = $true; CanFix = $false; CanSwitch = $false; CanLaunch = $false
+        CurrentAccount = '?'; ActiveOperationId = '—'; TransactionPhase = '—'
+        IsRecovery = $false; IsRunning = $false
+    })
+}
+
+function Get-CurrentStatus {
+    try {
+        $outcome = Invoke-LegacyCoreOperation -Command 'status' -CorePath $CORE
+        return ConvertTo-LegacyStatusOutcome -Outcome $outcome
     }
-    $out = & powershell -NoProfile -ExecutionPolicy Bypass -File $CORE @coreArgs 2>$null
-    return ($out | Out-String).Trim()
+    catch {
+        return [pscustomobject]@{ State = $null; Error = $_.Exception.Message }
+    }
 }
 
 function Refresh-Checks {
-    $rows.Clear()
-    foreach ($n in $checkNames) { $rows.Add([pscustomobject]@{ Name = $n; Detail = ''; Icon = '…'; Color = '#FF6B7280' }) }
+    Set-LegacyPendingCheckRows -Rows $rows -Names $checkNames
     Set-Status '检查中' ([System.Windows.Media.Color]::FromRgb(0xFB,0x92,0x3C))
-    $win.FindName('Banner').Text = ''
+    Set-Banner ''
+    $win.FindName('BtnA').IsEnabled = $false
+    $win.FindName('BtnB').IsEnabled = $false
+    $win.FindName('BtnFix').IsEnabled = $false
+    $win.FindName('BtnRefresh').IsEnabled = $false
+    $win.FindName('ActionHint').Text = ''
 
-    $out = Invoke-Core @('checkdetail')
-    $allOk = $true; $matched = 0
-    foreach ($line in ($out -split "`n")) {
-        $kv = $line -split '=', 2
-        if ($kv.Count -ne 2) { continue }
-        $st = $kv[1] -split ':', 2
-        for ($i = 0; $i -lt $rows.Count; $i++) {
-            if ($rows[$i].Name -eq $kv[0] -or ($kv[0] -eq 'TUN网卡' -and $rows[$i].Name -eq 'TUN网卡')) {
-                $matched++
-                $d = if ($st.Count -gt 1) { $st[1] } else { '' }
-                switch ($st[0]) {
-                    'ok'   { $rows[$i] = [pscustomobject]@{ Name = $rows[$i].Name; Detail = $d; Icon = '✓'; Color = '#FF22C55E' } }
-                    'warn' { $rows[$i] = [pscustomobject]@{ Name = $rows[$i].Name; Detail = $d; Icon = '⚠'; Color = '#FFFACC15' } }
-                    default { $rows[$i] = [pscustomobject]@{ Name = $rows[$i].Name; Detail = $d; Icon = '✗'; Color = '#FFF87171' }; $allOk = $false }
-                }
-                break
-            }
+    $status = Get-CurrentStatus
+    if ($status.Error) {
+        Show-StatusFailure "无法读取事务状态：$($status.Error)"
+        return
+    }
+    if ($status.State.IsRecovery -or $status.State.IsRunning) {
+        Show-RecoveryState $status.State
+        return
+    }
+    $win.FindName('CurrentAccount').Text = $status.State.CurrentAccount
+
+    try {
+        $outcome = Invoke-LegacyCoreOperation -Command 'checkdetail' -CorePath $CORE
+        if ($outcome.TimedOut) {
+            Set-Status '检查超时' ([System.Windows.Media.Color]::FromRgb(0xF8,0x71,0x71))
+            Set-Banner '安全检查未在 90 秒内完成，未获得可信结果。请稍后重新检查。'
+            Set-ActionAvailability ([pscustomobject]@{
+                CanRefresh = $true; CanFix = $false; CanSwitch = $false; CanLaunch = $false
+                CurrentAccount = $status.State.CurrentAccount; ActiveOperationId = '—'; TransactionPhase = '—'
+                IsRecovery = $false; IsRunning = $false
+            })
+            return
+        }
+        $presentation = Get-LegacyCheckPresentation -Result $outcome.Result
+        $rows.Clear()
+        foreach ($row in $presentation.Checks) { $rows.Add($row) }
+        if ($presentation.CanLaunch) {
+            $color = if ($presentation.AllGreen) { '#FF22C55E' } else { '#FFFACC15' }
+            $statusColor = if ($presentation.AllGreen) { [System.Windows.Media.Color]::FromRgb(0x22,0xC5,0x5E) } else { [System.Windows.Media.Color]::FromRgb(0xFA,0xCC,0x15) }
+            Set-Status $presentation.StatusText $statusColor
+            Set-Banner $(if ($presentation.AllGreen) { '14 项安全检查已通过。' } else { '14 项检查已完成；黄色警告不阻断启动，但不会显示为全绿。' }) $color
+            Set-ActionAvailability ([pscustomobject]@{
+                CanRefresh = $true; CanFix = $true; CanSwitch = $true; CanLaunch = $true
+                CurrentAccount = $status.State.CurrentAccount; ActiveOperationId = '—'; TransactionPhase = '—'
+                IsRecovery = $false; IsRunning = $false
+            })
+        }
+        else {
+            Set-Status $presentation.StatusText ([System.Windows.Media.Color]::FromRgb(0xF8,0x71,0x71))
+            Set-Banner $outcome.Result.Message
+            Set-ActionAvailability ([pscustomobject]@{
+                CanRefresh = $true; CanFix = $true; CanSwitch = $false; CanLaunch = $false
+                CurrentAccount = $status.State.CurrentAccount; ActiveOperationId = '—'; TransactionPhase = '—'
+                IsRecovery = $false; IsRunning = $false
+            })
         }
     }
-    $st = Invoke-Core @('status')
-    $win.FindName('CurrentAccount').Text = if ($st -match 'current=B') { 'B' } elseif ($st -match 'current=A') { 'A' } else { '未初始化' }
-    if ($matched -lt $checkNames.Count) {
-        Set-Status '检查未过' ([System.Windows.Media.Color]::FromRgb(0xF8,0x71,0x71))
-        $win.FindName('Banner').Text = "检测输出不完整($matched/$($checkNames.Count))，请点重新检查"
-    } elseif ($allOk) {
-        Set-Status '环境安全' ([System.Windows.Media.Color]::FromRgb(0x22,0xC5,0x5E))
-    } else {
-        Set-Status '检查未过' ([System.Windows.Media.Color]::FromRgb(0xF8,0x71,0x71))
-        $win.FindName('Banner').Text = '存在未通过项，可一键修复或手动处理后重试'
+    catch {
+        Set-Status '检查不可用' ([System.Windows.Media.Color]::FromRgb(0xF8,0x71,0x71))
+        Set-Banner "未获得可信的检查结果：$($_.Exception.Message)"
+        Set-ActionAvailability ([pscustomobject]@{
+            CanRefresh = $true; CanFix = $false; CanSwitch = $false; CanLaunch = $false
+            CurrentAccount = $status.State.CurrentAccount; ActiveOperationId = '—'; TransactionPhase = '—'
+            IsRecovery = $false; IsRunning = $false
+        })
     }
 }
 
 function Switch-To($t) {
+    if ($t -notin @('A', 'B')) { return }
+    Set-LegacyPendingCheckRows -Rows $rows -Names $checkNames
     Set-Status '切换中' ([System.Windows.Media.Color]::FromRgb(0x60,0xA5,0xFA))
-    $win.FindName('Banner').Text = "正在切换到账号 $t…（归档约需几十秒）"
+    Set-Banner "正在切换到账号 $t…（归档约需几十秒）" '#FF60A5FA'
+    $win.FindName('BtnA').IsEnabled = $false
+    $win.FindName('BtnB').IsEnabled = $false
+    $win.FindName('BtnFix').IsEnabled = $false
+    $win.FindName('BtnRefresh').IsEnabled = $false
+    $win.FindName('ActionHint').Text = ''
     $win.Dispatcher.Invoke([action]{}, 'Render')
-    $r = Invoke-Core @('switch', $t)
-    if ($r -match '^FAIL:') {
-        Set-Status '检查未过' ([System.Windows.Media.Color]::FromRgb(0xF8,0x71,0x71))
-        $win.FindName('Banner').Text = $r
-    } else {
+    try {
+        $switchOutcome = Invoke-LegacyCoreOperation -Command 'switch' -Target $t -CorePath $CORE
+        if ($switchOutcome.TimedOut) {
+            Set-Status '切换仍在运行' ([System.Windows.Media.Color]::FromRgb(0xFB,0x92,0x3C))
+            Set-Banner "切换尚未确认完成（后台事务可能仍在运行）。请刷新状态观察；在状态确认完成并重新检查前不会启动 Claude。" '#FFFACC15'
+            $win.FindName('BtnRefresh').IsEnabled = $true
+            return
+        }
+        $phasePresentation = Get-LegacySwitchPhasePresentation -Result $switchOutcome.Result
+        if ($null -ne $phasePresentation) {
+            Show-RecoveryState $phasePresentation
+            return
+        }
+        if (-not (Test-LegacySwitchCompletion -Result $switchOutcome.Result -Target $t)) {
+            Set-Status '切换未完成' ([System.Windows.Media.Color]::FromRgb(0xF8,0x71,0x71))
+            Set-Banner $switchOutcome.Result.Message
+            $win.FindName('BtnRefresh').IsEnabled = $true
+            return
+        }
+
         $win.FindName('CurrentAccount').Text = $t
-        Set-Status '完成' ([System.Windows.Media.Color]::FromRgb(0x22,0xC5,0x5E))
-        $win.FindName('Banner').Foreground = (New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.Color]::FromRgb(0x22,0xC5,0x5E)))
-        $win.FindName('Banner').Text = "已切换到账号 $t，Claude 启动中。"
+        $freshOutcome = Invoke-LegacyCoreOperation -Command 'checkdetail' -CorePath $CORE
+        if ($freshOutcome.TimedOut) {
+            Set-Status '切换后检查未完成' ([System.Windows.Media.Color]::FromRgb(0xF8,0x71,0x71))
+            Set-Banner '切换已完成，但新的安全检查未在 90 秒内完成；不会启动 Claude。请稍后重新检查。'
+            $win.FindName('BtnRefresh').IsEnabled = $true
+            return
+        }
+        if (-not (Test-LegacySwitchReady -SwitchResult $switchOutcome.Result -Target $t -FreshCheckResult $freshOutcome.Result)) {
+            $presentation = Get-LegacyCheckPresentation -Result $freshOutcome.Result
+            $rows.Clear()
+            foreach ($row in $presentation.Checks) { $rows.Add($row) }
+            Set-Status '切换后检查未通过' ([System.Windows.Media.Color]::FromRgb(0xF8,0x71,0x71))
+            Set-Banner $freshOutcome.Result.Message
+            Set-ActionAvailability ([pscustomobject]@{
+                CanRefresh = $true; CanFix = $true; CanSwitch = $false; CanLaunch = $false
+                CurrentAccount = $t; ActiveOperationId = '—'; TransactionPhase = 'completed'
+                IsRecovery = $false; IsRunning = $false
+            })
+            return
+        }
+        Refresh-Checks
+    }
+    catch {
+        Set-LegacyPendingCheckRows -Rows $rows -Names $checkNames
+        Set-Status '切换状态不可用' ([System.Windows.Media.Color]::FromRgb(0xF8,0x71,0x71))
+        Set-Banner "切换结果不可信，不会启动 Claude：$($_.Exception.Message)"
+        $win.FindName('BtnRefresh').IsEnabled = $true
     }
 }
 
 $win.FindName('BtnRefresh').Add_Click({ Refresh-Checks })
-$win.FindName('BtnFix').Add_Click({
+function Invoke-LegacyFixAction {
+    Set-LegacyPendingCheckRows -Rows $rows -Names $checkNames
     Set-Status '修复中' ([System.Windows.Media.Color]::FromRgb(0xFB,0x92,0x3C))
-    $win.FindName('Banner').Text = '正在修复…（会弹出管理员授权框）'
+    Set-Banner '正在修复…（会弹出管理员授权框）' '#FFFB923C'
+    $win.FindName('BtnA').IsEnabled = $false
+    $win.FindName('BtnB').IsEnabled = $false
+    $win.FindName('BtnFix').IsEnabled = $false
+    $win.FindName('BtnRefresh').IsEnabled = $false
     $win.Dispatcher.Invoke([action]{}, 'Render')
-    Invoke-Core @('fix') | Out-Null
-    Refresh-Checks
-})
+    try {
+        $outcome = Invoke-LegacyCoreOperation -Command 'fix' -CorePath $CORE
+        if ($outcome.TimedOut) {
+            Set-Status '修复仍在运行' ([System.Windows.Media.Color]::FromRgb(0xFB,0x92,0x3C))
+            Set-Banner '修复尚未确认完成（后台操作可能仍在运行）。请稍后刷新状态。' '#FFFACC15'
+            $win.FindName('BtnRefresh').IsEnabled = $true
+            return
+        }
+        if ($outcome.Result.Phase -eq 'recoveryRequired') {
+            Show-RecoveryState (Get-LegacyStatusPresentation -Result $outcome.Result)
+            return
+        }
+        if (-not $outcome.Result.TrustedSuccess) {
+            Set-Status '修复未完成' ([System.Windows.Media.Color]::FromRgb(0xF8,0x71,0x71))
+            Set-Banner $outcome.Result.Message
+            $win.FindName('BtnRefresh').IsEnabled = $true
+            return
+        }
+        Refresh-Checks
+    }
+    catch {
+        Set-Status '修复状态不可用' ([System.Windows.Media.Color]::FromRgb(0xF8,0x71,0x71))
+        Set-Banner "未获得可信的修复结果：$($_.Exception.Message)"
+        $win.FindName('BtnRefresh').IsEnabled = $true
+    }
+}
+
+$win.FindName('BtnFix').Add_Click({ Invoke-LegacyFixAction })
 $win.FindName('BtnA').Add_Click({ Switch-To 'A' })
 $win.FindName('BtnB').Add_Click({ Switch-To 'B' })
 

@@ -1,0 +1,202 @@
+{
+  "schemaVersion": 1,
+  "product": "ClaudeSwitcher",
+  "reportType": "windows-vm-acceptance",
+  "installerNameTemplate": "ClaudeSwitcher-{version}-windows-setup.exe",
+  "requiredEnvironments": [
+    {
+      "id": "windows-11-x64-clean",
+      "osFamily": "windows-11",
+      "osVersion": "any",
+      "architecture": "x64",
+      "dotnetRuntimeInstalled": false,
+      "buildPattern": "^(?:2[2-9][0-9]{3}|[3-9][0-9]{4})(?:\\.[0-9]{1,6})?$",
+      "scenarioIds": [
+        "win11-clean-no-dotnet-install",
+        "standard-user-install",
+        "alternate-admin-uac-credentials",
+        "elevated-terminal-identity",
+        "setup-upgrade-uninstall",
+        "uac-cancellation",
+        "partial-system-helper-failure",
+        "interrupted-copy-recovery",
+        "concurrent-entry-points"
+      ]
+    },
+    {
+      "id": "windows-10-22h2-x64",
+      "osFamily": "windows-10",
+      "osVersion": "22H2",
+      "architecture": "x64",
+      "dotnetRuntimeInstalled": null,
+      "scenarioIds": [
+        "win10-22h2-compatibility"
+      ],
+      "buildPattern": "^19045\\.[0-9]{1,6}$"
+    }
+  ],
+  "scenarios": [
+    {
+      "id": "win11-clean-no-dotnet-install",
+      "title": "No-.NET Windows 11 clean install",
+      "requiredEnvironment": "windows-11-x64-clean",
+      "requiredAssertions": [
+        "setup exits successfully",
+        "native executable launches without downloading .NET",
+        "first-run configuration state is correct"
+      ],
+      "requiredDiagnosticKinds": [
+        "setup-exit",
+        "app-launch",
+        "first-run-state"
+      ]
+    },
+    {
+      "id": "win10-22h2-compatibility",
+      "title": "Windows 10 22H2 compatibility",
+      "requiredEnvironment": "windows-10-22h2-x64",
+      "requiredAssertions": [
+        "record Windows build",
+        "native executable launch result recorded",
+        "compatibility conclusion is recorded without implying support before this scenario passes"
+      ],
+      "requiredDiagnosticKinds": [
+        "os-build",
+        "app-launch",
+        "result"
+      ]
+    },
+    {
+      "id": "standard-user-install",
+      "title": "Standard-user install",
+      "requiredEnvironment": "windows-11-x64-clean",
+      "requiredAssertions": [
+        "configuration and snapshots belong to the initiating user",
+        "scheduled task binds the initiating user",
+        "Claude runs without elevation"
+      ],
+      "requiredDiagnosticKinds": [
+        "identity",
+        "task",
+        "app-launch"
+      ]
+    },
+    {
+      "id": "alternate-admin-uac-credentials",
+      "title": "Alternate administrator UAC credentials",
+      "requiredEnvironment": "windows-11-x64-clean",
+      "requiredAssertions": [
+        "alternate administrator approval does not retarget user data",
+        "scheduled task remains bound to the initiating user",
+        "Claude remains non-elevated"
+      ],
+      "requiredDiagnosticKinds": [
+        "identity",
+        "task",
+        "app-launch"
+      ]
+    },
+    {
+      "id": "elevated-terminal-identity",
+      "title": "Elevated-terminal identity handling",
+      "requiredEnvironment": "windows-11-x64-clean",
+      "requiredAssertions": [
+        "setup does not guess the original user",
+        "setup only installs programs when identity is ambiguous",
+        "user is instructed to relaunch from a normal desktop session"
+      ],
+      "requiredDiagnosticKinds": [
+        "identity",
+        "setup-exit",
+        "result"
+      ]
+    },
+    {
+      "id": "setup-upgrade-uninstall",
+      "title": "Setup, upgrade, uninstall, retention, and packaged-file verification",
+      "requiredEnvironment": "windows-11-x64-clean",
+      "requiredAssertions": [
+        "setup succeeds",
+        "upgrade from prior script release preserves A/B archives and region/proxy configuration",
+        "uninstall removes owned task and shortcut",
+        "uninstall preserves account data by default",
+        "packaged files and task ACL/identity are verified",
+        "normal-user Claude launch is verified"
+      ],
+      "requiredDiagnosticKinds": [
+        "setup-exit",
+        "account-data",
+        "task",
+        "acl",
+        "packaged-files",
+        "app-launch"
+      ]
+    },
+    {
+      "id": "uac-cancellation",
+      "title": "UAC cancellation",
+      "requiredEnvironment": "windows-11-x64-clean",
+      "requiredAssertions": [
+        "actual incomplete stage is shown",
+        "success is not reported",
+        "retry remains possible"
+      ],
+      "requiredDiagnosticKinds": [
+        "cancellation",
+        "result"
+      ]
+    },
+    {
+      "id": "partial-system-helper-failure",
+      "title": "Partial system-helper failure",
+      "requiredEnvironment": "windows-11-x64-clean",
+      "requiredAssertions": [
+        "failed stage is identified",
+        "success is not reported",
+        "recoverable state is preserved",
+        "retry remains possible"
+      ],
+      "requiredDiagnosticKinds": [
+        "helper-stage",
+        "recovery",
+        "result"
+      ]
+    },
+    {
+      "id": "interrupted-copy-recovery",
+      "title": "Interrupted copy recovery",
+      "requiredEnvironment": "windows-11-x64-clean",
+      "requiredAssertions": [
+        "synthetic account remains recoverable after copy failure or crash",
+        "current-account marker remains consistent"
+      ],
+      "requiredDiagnosticKinds": [
+        "recovery",
+        "account-data",
+        "result"
+      ]
+    },
+    {
+      "id": "concurrent-entry-points",
+      "title": "Concurrent entry points",
+      "requiredEnvironment": "windows-11-x64-clean",
+      "requiredAssertions": [
+        "CLI, legacy UI, and native UI attempts serialize",
+        "only one mutation enters the write path",
+        "no snapshot is lost"
+      ],
+      "requiredDiagnosticKinds": [
+        "concurrency",
+        "account-data",
+        "result"
+      ]
+    }
+  ],
+  "safety": {
+    "syntheticDataOnly": true,
+    "fakeProxyServicesOnly": true,
+    "claudeSignInForbidden": true,
+    "residentialEgressForbidden": true,
+    "rawSecretsAndAddressesForbidden": true
+  }
+}

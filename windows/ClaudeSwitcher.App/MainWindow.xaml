@@ -45,7 +45,8 @@
             </StackPanel>
             <StackPanel Orientation="Horizontal" DockPanel.Dock="Right" HorizontalAlignment="Right">
                 <Button x:Name="RefreshButton" Content="重新检查" Padding="14,8" Margin="0,0,8,0" Click="Refresh_Click" />
-                <Button x:Name="FixButton" Content="一键修复" Padding="14,8" Click="Fix_Click" />
+                <Button x:Name="FixButton" Content="一键修复" Padding="14,8" Margin="0,0,8,0" Click="Fix_Click" />
+                <Button x:Name="ConfigureButton" Content="配置安装" Padding="14,8" Click="Configure_Click" Visibility="Collapsed" />
             </StackPanel>
         </DockPanel>
         <TextBlock Grid.Row="4" x:Name="OperationText" Foreground="#586574" Margin="0,12,0,0" Text="" TextWrapping="Wrap" />

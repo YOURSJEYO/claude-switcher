@@ -9,5 +9,7 @@ build/
 _trash/
 **/bin/
 **/obj/
+__pycache__/
+*.py[cod]
 
 .superpowers/

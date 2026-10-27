@@ -1,5 +1,5 @@
 ﻿[CmdletBinding()]
-param()
+param([string]$Tag = '')
 
 $ErrorActionPreference = 'Continue'
 try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false } catch {}
@@ -19,9 +19,10 @@ $script:SavedEnvironment = @{
 function Add-CoreTest {
     param(
         [Parameter(Mandatory = $true)][string]$Name,
-        [Parameter(Mandatory = $true)][scriptblock]$Body
+        [Parameter(Mandatory = $true)][scriptblock]$Body,
+        [string]$Tag = 'Core'
     )
-    $script:CoreTests += [pscustomobject]@{ Name = $Name; Body = $Body }
+    $script:CoreTests += [pscustomobject]@{ Name = $Name; Body = $Body; Tag = $Tag }
 }
 
 function Assert-True {
@@ -86,6 +87,11 @@ New-Item -ItemType Directory -Force -Path $env:USERPROFILE, $env:APPDATA, $env:L
 try {
     . $script:CorePath *> $null
     . (Join-Path $PSScriptRoot 'ClaudeSwitch.Core.Tests.ps1')
+    foreach ($suite in @(Get-ChildItem -LiteralPath $PSScriptRoot -Filter 'ClaudeSwitch.*.Tests.ps1' | Where-Object { $_.Name -match '^ClaudeSwitch\.(Transaction|Protocol|LegacyUi|Packaging|Configuration|AdminIntegration|Bodyguard)(\..+)?\.Tests\.ps1$' })) {
+        . $suite.FullName
+    }
+    if ($Tag) { $script:CoreTests = @($script:CoreTests | Where-Object { $_.Tag -eq $Tag }) }
+    if ($script:CoreTests.Count -eq 0) { throw 'No tests selected.' }
 
     $script:CoreFunctions = @{}
     foreach ($name in @(
@@ -105,12 +111,13 @@ try {
         }
         $script:SwitchExitCode = 0
         try {
-            . $test.Body
+            & $test.Body
             Write-Host ("PASS {0}" -f $test.Name)
         } catch {
             $script:TestFailures++
             Write-Host ("FAIL {0}" -f $test.Name)
             Write-Host ("     {0}" -f $_.Exception.Message)
+            if ($script:TransactionFailure) { Write-Host ("     Transaction: {0}" -f $script:TransactionFailure) }
         }
     }
 

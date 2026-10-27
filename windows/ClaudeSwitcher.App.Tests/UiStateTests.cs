@@ -209,4 +209,52 @@ public sealed class UiStateTests
         Assert.Equal("#F59E0B", row.Accent);
         Assert.Contains("警告", state.Banner, StringComparison.Ordinal);
     }
+
+    [Fact]
+    public void ApplySwitch_RunningHasExplicitStateAndOperationMetadata()
+    {
+        var running = CoreResultParser.Parse(
+            CoreResultParserTests.SwitchJson(success: false, phase: "running", current: "A"),
+            0, CoreCommand.Switch, OperationId, "B");
+
+        var state = MainWindowState.Initial.ApplySwitch(running, "B", freshCheck: null);
+
+        Assert.Equal(UiStatus.Running, state.Status);
+        Assert.Equal("处理中", state.StatusText);
+        Assert.Contains("正在执行", state.Banner, StringComparison.Ordinal);
+        Assert.Equal(running.ActiveOperationId?.ToString("D"), state.ActiveOperationId);
+        Assert.Equal(running.TransactionPhase, state.TransactionPhase);
+        Assert.Equal("A", state.CurrentAccount);
+        Assert.True(state.CanRefresh);
+        Assert.False(state.CanFix);
+        Assert.False(state.CanSwitch);
+        Assert.False(state.CanLaunch);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void RecoveryPreservesMaterialsWithActionableLocations(bool fromSwitch)
+    {
+        var state = fromSwitch
+            ? MainWindowState.Initial.ApplySwitch(CoreResultParser.Parse(
+                CoreResultParserTests.SwitchJson(success: false, phase: "recoveryRequired", recoveryRequired: true),
+                0, CoreCommand.Switch, OperationId, "B"), "B", freshCheck: null)
+            : MainWindowState.Initial.ApplyStatus(CoreResultParser.Parse(
+                CoreResultParserTests.StatusJson("B", "recoveryRequired", true, OperationId, "restoreNeeded"),
+                0, CoreCommand.Status, OperationId));
+
+        Assert.Equal(UiStatus.RecoveryRequired, state.Status);
+        Assert.Contains("请勿删除", state.Banner, StringComparison.Ordinal);
+        Assert.Contains(@"%APPDATA%\Claude.new", state.Banner, StringComparison.Ordinal);
+        Assert.Contains(@"%APPDATA%\Claude.previous", state.Banner, StringComparison.Ordinal);
+        Assert.Contains(@"%USERPROFILE%\.claude-switcher\accounts", state.Banner, StringComparison.Ordinal);
+        Assert.Contains("A.new", state.Banner, StringComparison.Ordinal);
+        Assert.Contains("B.previous", state.Banner, StringComparison.Ordinal);
+        Assert.Contains("核对", state.Banner, StringComparison.Ordinal);
+        Assert.True(state.CanRefresh);
+        Assert.False(state.CanFix);
+        Assert.False(state.CanSwitch);
+        Assert.False(state.CanLaunch);
+    }
 }

@@ -140,7 +140,7 @@ Add-CoreTest 'successful A-to-B switch runs pre-gate, then final gate, then laun
     New-Item -ItemType Directory -Force -Path (Join-Path $script:BASE 'accounts\B') | Out-Null
     $script:Events = @()
     function Stop-ClaudeApp { $script:Events += 'stop'; return $true }
-    function Save-Account { param($name) $script:Events += 'save'; return $true }
+    function Invoke-AccountTransactionCore { param($Target,$OperationId) $script:Events += 'transaction'; return (New-TransactionResult $OperationId $Target $true $false 'ok') }
     function Invoke-CheckDetail {
         $script:Events += 'gate'
         New-CheckLines
@@ -150,13 +150,13 @@ Add-CoreTest 'successful A-to-B switch runs pre-gate, then final gate, then laun
 
     Invoke-Switch 'B' | Out-Null
 
-    Assert-Equal 6 $script:Events.Count 'the switch must pre-gate, stop, save, stage target, final-gate, then launch'
+    Assert-Equal 5 $script:Events.Count 'the switch must pre-gate, stop, transact, final-gate, then launch'
     Assert-Equal 'gate' $script:Events[0] 'the first gate must run before any account mutation'
     Assert-Equal 'stop' $script:Events[1] 'Claude must stop only after the pre-gate passes'
-    Assert-Equal 'save' $script:Events[2] 'the source account must be archived after stopping Claude'
-    Assert-Equal 'target-copy' $script:Events[3] 'target restore must finish before the final gate'
-    Assert-Equal 'gate' $script:Events[4] 'the final fresh gate must run after account mutation'
-    Assert-Equal 'launch' $script:Events[5] 'the launcher must run only after the final gate'
+    Assert-Equal 'transaction' $script:Events[2] 'the transaction must run after stopping Claude'
+
+    Assert-Equal 'gate' $script:Events[3] 'the final fresh gate must run after account mutation'
+    Assert-Equal 'launch' $script:Events[4] 'the launcher must run only after the final gate'
     Assert-Equal 0 $script:SwitchExitCode 'a permitted launch must return success'
 }
 
@@ -206,7 +206,7 @@ Add-CoreTest 'first-run collection to same account requires a fresh gate before 
     'initial' | Out-File -Encoding ascii -NoNewline (Join-Path $script:DATA 'sentinel.txt')
     $script:Events = @()
     function Stop-ClaudeApp { $script:Events += 'stop'; return $true }
-    function Save-Account { param($name) $script:Events += "save:$name"; return $true }
+    function Invoke-AccountTransactionCore { param($Target,$OperationId) $script:Events += "transaction:$Target"; return (New-TransactionResult $OperationId $Target $true $false "ok") }
     function Invoke-CheckDetail {
         $script:Events += 'gate'
         if (@($script:Events | Where-Object { $_ -eq 'gate' }).Count -eq 1) { New-CheckLines }
@@ -219,7 +219,7 @@ Add-CoreTest 'first-run collection to same account requires a fresh gate before 
     Assert-Equal 4 $script:Events.Count 'first-run collection must pre-gate, stop, save, then final-gate'
     Assert-Equal 'gate' $script:Events[0] 'the initial gate must run before collection'
     Assert-Equal 'stop' $script:Events[1] 'Claude must stop after the initial gate'
-    Assert-Equal 'save:A' $script:Events[2] 'the current login must be archived as A'
+    Assert-Equal 'transaction:A' $script:Events[2] 'the current login must be archived as A through a transaction'
     Assert-Equal 'gate' $script:Events[3] 'a fresh gate must run after collection changes state'
     Assert-Equal 0 @($script:Events | Where-Object { $_ -eq 'launch' }).Count 'the launcher must not run after the final gate fails'
     Assert-Equal 1 $script:SwitchExitCode 'the blocked first-run launch must return nonzero'
@@ -301,11 +301,12 @@ Add-CoreTest 'source archive robocopy failure blocks all later switch steps' {
     function Stop-ClaudeApp { $script:Events += 'stop'; return $true }
     function Invoke-CheckDetail { $script:GateCalls++; $script:Events += 'gate'; New-CheckLines }
     function Start-ClaudeApp { $script:LaunchCalls++; $script:Events += 'launch' }
-    function robocopy {
-        $script:RoboCalls += ,@($args)
+    function Invoke-AccountCopy {
+        param($Source, $Destination)
+        $script:RoboCalls += ,@($Source, $Destination)
         $script:Events += 'source-archive'
         $global:LASTEXITCODE = 8
-        'synthetic robocopy output'
+        return 8
     }
 
     $output = @(Invoke-Switch 'B')
@@ -316,7 +317,7 @@ Add-CoreTest 'source archive robocopy failure blocks all later switch steps' {
     Assert-Equal 'gate,stop,source-archive' ($script:Events -join ',') 'source archive failure must stop the switch immediately'
     Assert-Equal 'A' ((Get-Content (Join-Path $script:BASE 'current.txt') -Raw).Trim()) 'source archive failure must preserve current.txt'
     Assert-Equal 'active-data' ((Get-Content $sentinel -Raw).Trim()) 'source archive failure must preserve active DATA'
-    Assert-Equal 1 $script:SwitchExitCode 'source archive failure must return nonzero'
+    Assert-True ($script:SwitchExitCode -ne 0) 'source archive failure must return nonzero'
     Assert-Match '^FAIL:' ($output -join "`n") 'source archive failure must report a failure'
 }
 
@@ -326,7 +327,7 @@ Add-CoreTest 'target archive robocopy failure preserves active data and staging'
     New-Item -ItemType Directory -Force -Path (Join-Path $script:BASE 'accounts\B') | Out-Null
     $sentinel = Join-Path $script:DATA 'sentinel.txt'
     'active-data' | Out-File -Encoding ascii -NoNewline $sentinel
-    $staging = "$script:DATA.claude-switch-staging"
+    $staging = "$script:DATA.new"
     $script:Events = @()
     $script:RoboCalls = @()
     $script:GateCalls = 0
@@ -334,18 +335,21 @@ Add-CoreTest 'target archive robocopy failure preserves active data and staging'
     function Stop-ClaudeApp { $script:Events += 'stop'; return $true }
     function Invoke-CheckDetail { $script:GateCalls++; $script:Events += 'gate'; New-CheckLines }
     function Start-ClaudeApp { $script:LaunchCalls++; $script:Events += 'launch' }
-    function robocopy {
-        $script:RoboCalls += ,@($args)
+    function Invoke-AccountCopy {
+        param($Source, $Destination)
+        $script:RoboCalls += ,@($Source, $Destination)
         if ($script:RoboCalls.Count -eq 1) {
             $script:Events += 'source-archive'
+            New-Item -ItemType Directory -Force -Path $Destination | Out-Null
+            Get-ChildItem -LiteralPath $Source -Force | Copy-Item -Destination $Destination -Recurse -Force
             $global:LASTEXITCODE = 7
         } else {
             $script:Events += 'target-restore'
-            New-Item -ItemType Directory -Force -Path $args[1] | Out-Null
-            'partial-target-copy' | Out-File -Encoding ascii -NoNewline (Join-Path $args[1] 'partial.txt')
+            New-Item -ItemType Directory -Force -Path $Destination | Out-Null
+            'partial-target-copy' | Out-File -Encoding ascii -NoNewline (Join-Path $Destination 'partial.txt')
             $global:LASTEXITCODE = 8
         }
-        'synthetic robocopy output'
+        return $global:LASTEXITCODE
     }
 
     $output = @(Invoke-Switch 'B')
@@ -357,7 +361,7 @@ Add-CoreTest 'target archive robocopy failure preserves active data and staging'
     Assert-Equal 'A' ((Get-Content (Join-Path $script:BASE 'current.txt') -Raw).Trim()) 'target restore failure must preserve current.txt'
     Assert-Equal 'active-data' ((Get-Content $sentinel -Raw).Trim()) 'target restore failure must preserve active DATA'
     Assert-True (Test-Path (Join-Path $staging 'partial.txt')) 'failed staging must remain for explicit recovery'
-    Assert-Equal 1 $script:SwitchExitCode 'target restore failure must return nonzero'
+    Assert-True ($script:SwitchExitCode -ne 0) 'target restore failure must return nonzero'
     Assert-Match '^FAIL:' ($output -join "`n") 'target restore failure must report a failure'
 }
 
@@ -367,7 +371,7 @@ Add-CoreTest 'switch refuses to overwrite a prior restore staging residue' {
     New-Item -ItemType Directory -Force -Path (Join-Path $script:BASE 'accounts\B') | Out-Null
     $sentinel = Join-Path $script:DATA 'sentinel.txt'
     'active-data' | Out-File -Encoding ascii -NoNewline $sentinel
-    $staging = "$script:DATA.claude-switch-staging"
+    $staging = "$script:DATA.new"
     New-Item -ItemType Directory -Force -Path $staging | Out-Null
     'recovery-data' | Out-File -Encoding ascii -NoNewline (Join-Path $staging 'recovery.txt')
     $script:GateCalls = 0
@@ -381,14 +385,14 @@ Add-CoreTest 'switch refuses to overwrite a prior restore staging residue' {
 
     $output = @(Invoke-Switch 'B')
 
-    Assert-Equal 1 $script:GateCalls 'the pre-mutation gate may run once'
+    Assert-Equal 0 $script:GateCalls 'unowned recovery residue must block before checking'
     Assert-Equal 0 $script:StopCalls 'a prior staging residue must be detected before stopping Claude'
     Assert-Equal 0 $script:RoboCalls 'a prior staging residue must not be overwritten by robocopy'
     Assert-Equal 0 $script:LaunchCalls 'a prior staging residue must block launch'
     Assert-Equal 'A' ((Get-Content (Join-Path $script:BASE 'current.txt') -Raw).Trim()) 'a prior staging residue must preserve current.txt'
     Assert-Equal 'active-data' ((Get-Content $sentinel -Raw).Trim()) 'a prior staging residue must preserve active DATA'
     Assert-Equal 'recovery-data' ((Get-Content (Join-Path $staging 'recovery.txt') -Raw).Trim()) 'the prior staging contents must remain unchanged'
-    Assert-Equal 1 $script:SwitchExitCode 'a prior staging residue must return nonzero'
+    Assert-True ($script:SwitchExitCode -ne 0) 'a prior staging residue must return nonzero'
     Assert-Match '^FAIL:' ($output -join "`n") 'a prior staging residue must report a failure'
 }
 

@@ -81,25 +81,30 @@ public sealed record MainWindowState(
             Status = UiStatus.Running,
             StatusText = "处理中",
             Banner = message,
+            Checks = CreatePendingRows(),
             CanRefresh = false,
             CanFix = false,
             CanSwitch = false,
             CanLaunch = false
         };
+
+    public bool CanConfigure => Status == UiStatus.SetupRequired || (CanFix && Status is not (UiStatus.Running or UiStatus.RecoveryRequired));
 
     public MainWindowState SetupRequired() =>
         this with
         {
             Status = UiStatus.SetupRequired,
             StatusText = "尚未配置",
-            Banner = "本机尚未配置 Claude 切换器核心。配置向导将在安装与初始化功能接入后提供；当前版本不会自动下载脚本或启动 Claude。",
+            Banner = "本机尚未配置 Claude 切换器核心。请点击“配置安装”打开向导；本应用不会自动下载脚本或启动 Claude。",
             CurrentAccount = "—",
+            ActiveOperationId = "—",
+            TransactionPhase = "—",
+            Checks = CreatePendingRows(),
             CanRefresh = false,
             CanFix = false,
             CanSwitch = false,
             CanLaunch = false
         };
-
     public MainWindowState Apply(CoreResult? statusResult, CoreResult? status)
     {
         var state = statusResult is null ? this : ApplyCheck(statusResult);
@@ -158,10 +163,11 @@ public sealed record MainWindowState(
             {
                 Status = UiStatus.RecoveryRequired,
                 StatusText = "需要恢复",
-                Banner = $"检测到未完成事务（{phase}），请使用恢复流程处理后再操作。",
+                Banner = RecoveryGuidance(current, phase),
                 CurrentAccount = current == "none" ? "未初始化" : current,
                 ActiveOperationId = active,
                 TransactionPhase = phase,
+                Checks = CreatePendingRows(),
                 CanRefresh = true,
                 CanFix = false,
                 CanSwitch = false,
@@ -179,6 +185,7 @@ public sealed record MainWindowState(
                 CurrentAccount = current == "none" ? "未初始化" : current,
                 ActiveOperationId = active,
                 TransactionPhase = phase,
+                Checks = CreatePendingRows(),
                 CanRefresh = true,
                 CanFix = false,
                 CanSwitch = false,
@@ -198,21 +205,74 @@ public sealed record MainWindowState(
         };
     }
 
+    public MainWindowState StatusQueryTimedOut() =>
+        this with
+        {
+            Status = UiStatus.Blocked,
+            StatusText = "状态不可用",
+            Banner = "状态查询已超时，事务状态未知。请刷新状态后再操作。",
+            CurrentAccount = "未知",
+            ActiveOperationId = "—",
+            TransactionPhase = "—",
+            CanRefresh = true,
+            CanFix = false,
+            Checks = CreatePendingRows(),
+            CanLaunch = false
+        };
+
     public MainWindowState ApplySwitch(CoreResult result, string target, CoreResult? freshCheck)
     {
         if (!result.IsCompletedSwitch)
         {
             var recovery = result.Phase == OperationPhase.RecoveryRequired || result.RecoveryRequired == true;
+            var observedCurrent = result.Current ?? CurrentAccount;
+            var activeOperationId = result.ActiveOperationId?.ToString("D") ?? "—";
+            var transactionPhase = result.TransactionPhase ?? result.Phase?.ToWire() ?? "—";
+            if (recovery)
+            {
+                return this with
+                {
+                    Status = UiStatus.RecoveryRequired,
+                    StatusText = "需要恢复",
+                    Banner = RecoveryGuidance(observedCurrent, transactionPhase),
+                    CurrentAccount = observedCurrent,
+                    ActiveOperationId = activeOperationId,
+                    TransactionPhase = transactionPhase,
+                    Checks = CreatePendingRows(),
+                    CanRefresh = true,
+                    CanFix = false,
+                    CanSwitch = false,
+                    CanLaunch = false
+                };
+            }
+
+            if (result.Phase == OperationPhase.Running)
+            {
+                return this with
+                {
+                    Status = UiStatus.Running,
+                    StatusText = "处理中",
+                    Banner = $"账号切换事务正在执行（阶段 {transactionPhase}），完成状态尚未确认。请刷新状态观察。",
+                    CurrentAccount = observedCurrent,
+                    Checks = CreatePendingRows(),
+                    ActiveOperationId = activeOperationId,
+                    TransactionPhase = transactionPhase,
+                    CanRefresh = true,
+                    CanFix = false,
+                    CanSwitch = false,
+                    CanLaunch = false
+                };
+            }
+
             return this with
             {
-                Status = recovery ? UiStatus.RecoveryRequired : UiStatus.Blocked,
-                StatusText = recovery ? "需要恢复" : "切换未完成",
-                Banner = recovery
-                    ? "账号切换事务未完成，必须恢复后才能继续。"
-                    : result.Message,
-                CurrentAccount = result.Current ?? CurrentAccount,
-                ActiveOperationId = result.ActiveOperationId?.ToString("D") ?? "—",
-                TransactionPhase = result.TransactionPhase ?? result.Phase?.ToWire() ?? "—",
+                Status = UiStatus.Blocked,
+                StatusText = "切换未完成",
+                Banner = result.Message,
+                CurrentAccount = observedCurrent,
+                ActiveOperationId = activeOperationId,
+                TransactionPhase = transactionPhase,
+                Checks = CreatePendingRows(),
                 CanRefresh = true,
                 CanFix = false,
                 CanSwitch = false,
@@ -254,7 +314,6 @@ public sealed record MainWindowState(
             CanLaunch = ready
         };
     }
-
     public MainWindowState Fail(string message) =>
         this with
         {
@@ -278,6 +337,9 @@ public sealed record MainWindowState(
             CanSwitch = false,
             CanLaunch = false
         };
+
+    private static string RecoveryGuidance(string current, string phase) =>
+        $"检测到未完成事务（账号 {current}，阶段 {phase}）。请勿删除任何未核实的 .new/.previous 恢复材料。先核对并保留 %APPDATA%\\Claude.new、%APPDATA%\\Claude.previous，以及 %USERPROFILE%\\.claude-switcher\\accounts\\A.new、A.previous、B.new、B.previous；确认有效快照后再执行恢复。恢复完成并重新检查前，修复、切换和启动均不可用。";
 
     private static IReadOnlyList<CheckRow> CreatePendingRows() =>
         CheckDefinitions

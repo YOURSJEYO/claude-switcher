@@ -214,6 +214,27 @@ public sealed class CoreClientTests
         Assert.True(File.Exists(fixture.Marker("core-finished")));
     }
 
+    [Theory]
+    [InlineData(CoreCommand.Switch, "B")]
+    [InlineData(CoreCommand.Fix, null)]
+    public async Task RunAsync_SoftTimeoutKeepsDrainingBothStreamsUntilMutationExits(CoreCommand command, string? target)
+    {
+        using var fixture = new CoreFixture();
+        fixture.WritePipeFillingScript(delayMilliseconds: 1000);
+        var client = fixture.CreateClient(
+            maxOutputBytes: 1024,
+            switchSoftTimeout: TimeSpan.FromMilliseconds(150),
+            fixSoftTimeout: TimeSpan.FromMilliseconds(150));
+
+        var result = await client.RunAsync(command, target, OperationId, CancellationToken.None);
+
+        Assert.Equal(CoreClientOutcome.StillRunning, result.Outcome);
+        Assert.False(fixture.LastProcessKilled);
+        await fixture.WaitForMarkerAsync("core-finished");
+        Assert.True(File.Exists(fixture.Marker("core-finished")),
+            "Returning StillRunning must not dispose the process pipes or interrupt a committing producer.");
+    }
+
     [Fact]
     public async Task RunAsync_SwitchCancellationDoesNotKillOrAwaitCompletion()
     {
@@ -322,13 +343,14 @@ public sealed class CoreClientTests
 
         public string Marker(string name) => Path.Combine(Root, name + ".marker");
 
-        public void WritePipeFillingScript()
+        public void WritePipeFillingScript(int delayMilliseconds = 0)
         {
             // This synthetic producer exits itself on a stalled pipe so the RED run
             // cannot strand a child process. Only a fully drained producer writes the marker.
             File.WriteAllText(CorePath, $$"""
                 $ErrorActionPreference = 'Stop'
                 [Console]::OutputEncoding = [Text.Encoding]::UTF8
+                Start-Sleep -Milliseconds {{delayMilliseconds}}
                 Add-Type -TypeDefinition @'
                 using System;
                 using System.IO;
