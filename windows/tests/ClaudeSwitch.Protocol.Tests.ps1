@@ -170,6 +170,17 @@ Add-CoreTest -Name 'protocol treats an orphaned setup lease as recovery material
     Assert-Equal 3 $script:ProtocolExitCode 'orphaned setup lease exits three'
 }
 
+Add-CoreTest -Name 'protocol blocks an orphaned lease directory before mutation' -Tag Protocol -Body {
+    New-TestWorkspace | Out-Null
+    $leasePath = Join-Path $script:BASE 'operation.lease.json'
+    New-Item -ItemType Directory -Force -Path $leasePath | Out-Null
+    $handle = Enter-OperationLock -WaitMilliseconds 0
+    Assert-True ($null -eq $handle) 'any orphan lease filesystem entry must block mutation'
+    $result = Invoke-CoreRequest -Command status -OperationId '3f6f37b4-7f19-4ca7-9eb1-7b99fbc7982f'
+    Assert-False $result.success 'lease directory must still fail status closed'
+    Assert-True $result.recoveryRequired 'lease directory requires recovery review'
+}
+
 Add-CoreTest -Name 'protocol JSON mode emits exactly one parseable object and text mode remains fourteen rows' -Tag Protocol -Body {
     New-TestWorkspace | Out-Null
     function Invoke-CheckDetail { New-CheckLines }

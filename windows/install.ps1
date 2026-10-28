@@ -252,7 +252,7 @@ function Invoke-NativeUserSetupFlow {
         $stage='system'
         $renewed=Renew-UserSetupOperation -Operation $locked -Phase 'system' -TtlSeconds 300
         if (-not $renewed.Success) { return New-InstallerFlowResult 2 'system' 'operation_lease_renewal_failed' 'The operation lease could not be renewed before system configuration; the elevated stage was not started.' }
-        $system=Invoke-ElevatedSystemSetup -HelperPath $payload.Helper -Operation 'repair-system' -UserSid $identity.Sid -SessionId $identity.SessionId -TimeZoneId $validated.TimeZoneId
+        $system=Invoke-ElevatedSystemSetup -HelperPath $payload.Helper -Operation 'repair-system' -UserSid $identity.Sid -SessionId $identity.SessionId -TimeZoneId $validated.TimeZoneId -LeaseRenewal { Renew-UserSetupOperation -Operation $locked -Phase 'system-wait' -TtlSeconds 300 }
         $renewed=Renew-UserSetupOperation -Operation $locked -Phase 'system-returned' -TtlSeconds 300
         if (-not $renewed.Success) { return New-InstallerFlowResult 2 'system' 'operation_lease_renewal_failed' 'The operation lease could not be renewed after system configuration; review recovery material before retrying.' }
         if (-not $system.Success) {

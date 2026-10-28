@@ -503,7 +503,8 @@ function Invoke-ElevatedSystemSetup {
         [string]$UserSid,
         [int]$SessionId = 0,
         [AllowNull()][string]$TimeZoneId,
-        [scriptblock]$Invoker
+        [scriptblock]$Invoker,
+        [scriptblock]$LeaseRenewal
     )
     if (-not (Test-UserSidForSetup $UserSid)) {
         return New-UserSetupResult $false 'A supported non-service user SID is required.'
@@ -525,7 +526,17 @@ function Invoke-ElevatedSystemSetup {
         if ($null -ne $Invoker) {
             $outcome = & $Invoker $startInfo
         } else {
-            $process = Start-Process -FilePath $HelperPath -ArgumentList $arguments -Verb RunAs -WindowStyle Hidden -Wait -PassThru -ErrorAction Stop
+            $process = Start-Process -FilePath $HelperPath -ArgumentList $arguments -Verb RunAs -WindowStyle Hidden -PassThru -ErrorAction Stop
+            while (-not $process.HasExited) {
+                Start-Sleep -Seconds 15
+                $process.Refresh()
+                if (-not $process.HasExited -and $null -ne $LeaseRenewal) {
+                    $renewed = & $LeaseRenewal
+                    if ($null -eq $renewed -or -not [bool](Get-UserSetupProperty $renewed 'Success')) {
+                        return New-UserSetupResult $false 'The setup operation lease could not be renewed while waiting for the elevated stage.' @{ Retryable = $true; LeaseRenewalFailed = $true }
+                    }
+                }
+            }
             $outcome = [pscustomobject]@{ Started = $true; Cancelled = $false; ExitCode = $process.ExitCode; Message = '' }
         }
     } catch {
