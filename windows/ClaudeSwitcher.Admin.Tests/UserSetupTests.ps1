@@ -4,6 +4,9 @@ $script:Tests = New-Object System.Collections.ArrayList
 $script:Failures = 0
 $script:TestRoot = Join-Path ([IO.Path]::GetTempPath()) ('claude-switcher-user-setup-tests-' + [guid]::NewGuid().Guid)
 $script:HelperPath = Join-Path (Split-Path $PSScriptRoot -Parent) 'helpers\UserSetup.ps1'
+$script:LeasePath = Join-Path (Split-Path $PSScriptRoot -Parent) 'helpers\OperationLease.ps1'
+. $script:HelperPath
+if (Test-Path -LiteralPath $script:LeasePath -PathType Leaf) { . $script:LeasePath }
 
 function Add-Test([string]$Name, [scriptblock]$Body) { [void]$script:Tests.Add([pscustomobject]@{ Name = $Name; Body = $Body }) }
 function Assert-True([bool]$Condition, [string]$Message) { if (-not $Condition) { throw "ASSERT: $Message" } }
@@ -179,11 +182,151 @@ Add-Test 'core recovery residue blocks operation acquisition' {
     Assert-Equal 'core-recovery-required' $result.Code 'residue must be a recovery gate'
 }
 
-Add-Test 'operation lease remains unavailable until its identity lifecycle is safe' {
-    $leasePath = Join-Path (Split-Path $script:HelperPath -Parent) 'OperationLease.ps1'
-    Assert-False (Test-Path -LiteralPath $leasePath) 'do not ship an unverified operation lease helper'
+Add-Test 'operation lease protocol records owner identity and expires fail closed' {
+    Assert-True (Test-Path -LiteralPath $script:LeasePath -PathType Leaf) 'operation lease helper must be present'
+    Assert-True ($null -ne (Get-Command New-OperationLease -ErrorAction SilentlyContinue)) 'lease creation function must be exported'
+    $root = New-Workspace
+    $base = Join-Path $root '.claude-switcher'
+    $id = '3f6f37b4-7f19-4ca7-9eb1-7b99fbc7982f'
+    $created = New-OperationLease -BasePath $base -OperationId $id -OwnerSid 'S-1-5-21-1-2-3-1001' -SessionId 7 -OwnerPid 4321 -Phase 'setup' -TtlSeconds 30
+    Assert-True $created.Success $created.Error
+    Assert-Equal 'active' $created.Code 'new lease is active'
+    $leasePath = Join-Path $base 'operation.lease.json'
+    Assert-True (Test-Path -LiteralPath $leasePath -PathType Leaf) 'lease file must be written beside the core lock'
+    $record = Get-Content -LiteralPath $leasePath -Raw | ConvertFrom-Json
+    foreach ($field in @('schemaVersion','operationId','ownerSid','sessionId','ownerPid','phase','acquiredAt','heartbeatAt','expiresAt')) {
+        Assert-True ($null -ne $record.PSObject.Properties[$field]) "lease must include $field"
+    }
+    Assert-Equal 1 $record.schemaVersion 'lease schema is versioned'
+    Assert-Equal $id $record.operationId 'lease keeps canonical operation identity'
+    Assert-Equal 'S-1-5-21-1-2-3-1001' $record.ownerSid 'lease is bound to the owner SID'
+    Assert-Equal 7 $record.sessionId 'lease is bound to the interactive session'
+    Assert-Equal 4321 $record.ownerPid 'lease records the owner process'
+
+    $second = New-OperationLease -BasePath $base -OperationId '4f6f37b4-7f19-4ca7-9eb1-7b99fbc7982f' -OwnerSid 'S-1-5-21-1-2-3-1002' -SessionId 8 -OwnerPid 4322 -Phase 'other' -TtlSeconds 30
+    Assert-False $second.Success 'a live lease cannot be replaced'
+    Assert-Equal 'lease-busy' $second.Code 'live lease contention is stable'
+
+    $renewed = Renew-OperationLease -Lease $created.Lease -Phase 'system'
+    Assert-True $renewed.Success $renewed.Error
+    Assert-Equal 'active' $renewed.Code 'owner can renew a live lease'
+    Assert-Equal 'system' $renewed.Lease.phase 'renewal updates the phase'
+
+    $wrongRenew = Renew-OperationLease -Lease ([pscustomobject]@{ BasePath=$base; OperationId=$id; OwnerSid='S-1-5-21-1-2-3-1002'; SessionId=8; OwnerPid=4322 }) -Phase 'hijack'
+    Assert-False $wrongRenew.Success 'another identity cannot renew the lease'
+    Assert-Equal 'lease-owner-mismatch' $wrongRenew.Code 'wrong owner renewal is rejected'
+
+    $closed = Close-OperationLease -Lease $created.Lease
+    Assert-True $closed.Success $closed.Error
+    Assert-Equal 'closed' $closed.Code 'owner can close its lease'
+    Assert-False (Test-Path -LiteralPath $leasePath) 'closed lease must be removed'
 }
 
+Add-Test 'expired and malformed leases block setup without destructive replacement' {
+    Assert-True (Test-Path -LiteralPath $script:LeasePath -PathType Leaf) 'operation lease helper must be present'
+    $root = New-Workspace
+    $base = Join-Path $root '.claude-switcher'
+    New-Item -ItemType Directory -Force -Path $base | Out-Null
+    $expired = [ordered]@{
+        schemaVersion=1; operationId='3f6f37b4-7f19-4ca7-9eb1-7b99fbc7982f'; ownerSid='S-1-5-21-1-2-3-1001'; sessionId=7; ownerPid=4321; phase='setup';
+        acquiredAt='2026-01-01T00:00:00.0000000Z'; heartbeatAt='2026-01-01T00:00:00.0000000Z'; expiresAt='2026-01-01T00:00:01.0000000Z'
+    }
+    [IO.File]::WriteAllText((Join-Path $base 'operation.lease.json'), ($expired | ConvertTo-Json -Compress), (New-Object Text.UTF8Encoding($false)))
+    $stale = Get-OperationLeaseStatus -BasePath $base
+    Assert-Equal 'stale' $stale.Status 'expired lease is observable as stale'
+    $blocked = Enter-UserSetupOperation -BasePath $base
+    Assert-False $blocked.Success 'setup must fail closed on a stale lease'
+    Assert-Equal 'core-recovery-required' $blocked.Code 'stale lease requires recovery review'
+    Assert-True (Test-Path -LiteralPath (Join-Path $base 'operation.lease.json')) 'stale lease must not be deleted automatically'
+
+    [IO.File]::WriteAllText((Join-Path $base 'operation.lease.json'), '{"schemaVersion":1,"operationId":"bad"}', (New-Object Text.UTF8Encoding($false)))
+    $malformed = Get-OperationLeaseStatus -BasePath $base
+    Assert-Equal 'invalid' $malformed.Status 'malformed lease is observable as invalid'
+    $blockedAgain = Enter-UserSetupOperation -BasePath $base
+    Assert-False $blockedAgain.Success 'malformed lease must block setup'
+    Assert-Equal 'core-recovery-required' $blockedAgain.Code 'malformed lease requires recovery review'
+}
+
+Add-Test 'setup operation renews its lease across phase boundaries' {
+    Assert-True ($null -ne (Get-Command Renew-UserSetupOperation -ErrorAction SilentlyContinue)) 'setup must expose a lease renewal boundary'
+    $root = New-Workspace
+    $base = Join-Path $root '.claude-switcher'
+    $operation = Enter-UserSetupOperation -BasePath $base
+    Assert-True $operation.Success $operation.Error
+    try {
+        $renewed = Renew-UserSetupOperation -Operation $operation -Phase 'system' -TtlSeconds 300
+        Assert-True $renewed.Success $renewed.Error
+        Assert-Equal 'active' $renewed.Code 'phase renewal must keep the lease active'
+        Assert-Equal 'system' $renewed.Lease.Phase 'renewal must publish the current setup phase'
+        $status = Get-OperationLeaseStatus -BasePath $base
+        Assert-Equal 'active' $status.Status 'renewed lease remains active'
+        Assert-Equal 'system' $status.Lease.Phase 'status must observe the renewed phase'
+        $renewedFromHandle = Renew-UserSetupOperation -Operation $operation.Handle -Phase 'system-returned' -TtlSeconds 300
+        Assert-True $renewedFromHandle.Success $renewedFromHandle.Error
+        Assert-Equal 'system-returned' $renewedFromHandle.Lease.Phase 'legacy raw handle renewal must remain compatible'
+    } finally {
+        Exit-UserSetupOperation -Handle $operation.Handle -Lease $operation.Lease
+    }
+}
+
+Add-Test 'stale lease cannot be closed by the ordinary exit path' {
+    Assert-True ($null -ne (Get-Command Close-OperationLease -ErrorAction SilentlyContinue)) 'lease close function must be exported'
+    $root = New-Workspace
+    $base = Join-Path $root '.claude-switcher'
+    New-Item -ItemType Directory -Force -Path $base | Out-Null
+    $stale = [ordered]@{
+        schemaVersion=1; operationId='3f6f37b4-7f19-4ca7-9eb1-7b99fbc7982f'; ownerSid='S-1-5-21-1-2-3-1001'; sessionId=7; ownerPid=4321; phase='setup';
+        acquiredAt='2026-01-01T00:00:00.0000000Z'; heartbeatAt='2026-01-01T00:00:00.0000000Z'; expiresAt='2026-01-01T00:00:01.0000000Z'
+    }
+    $leasePath = Join-Path $base 'operation.lease.json'
+    [IO.File]::WriteAllText($leasePath, ($stale | ConvertTo-Json -Compress), (New-Object Text.UTF8Encoding($false)))
+    $lease = [pscustomobject]@{ BasePath=$base; OperationId=$stale.operationId; OwnerSid=$stale.ownerSid; SessionId=7; OwnerPid=4321 }
+    $closed = Close-OperationLease -Lease $lease
+    Assert-False $closed.Success 'ordinary close must not delete stale recovery material'
+    Assert-Equal 'lease-stale' $closed.Code 'stale close must require explicit recovery'
+    Assert-True (Test-Path -LiteralPath $leasePath) 'stale lease must remain for recovery review'
+}
+
+Add-Test 'lease mutations fail closed under mutation lock contention' {
+    $root = New-Workspace
+    $base = Join-Path $root '.claude-switcher'
+    $id = '3f6f37b4-7f19-4ca7-9eb1-7b99fbc7982f'
+    $created = New-OperationLease -BasePath $base -OperationId $id -OwnerSid 'S-1-5-21-1-2-3-1001' -SessionId 7 -OwnerPid 4321 -Phase 'setup' -TtlSeconds 30
+    Assert-True $created.Success $created.Error
+    $leasePath = Join-Path $base 'operation.lease.json'
+    $mutexPath = Join-Path $base 'operation.lease.mutex'
+    $mutex = [IO.File]::Open($mutexPath, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+    try {
+        $renewed = Renew-OperationLease -Lease $created.Lease -Phase 'blocked' -TtlSeconds 300
+        Assert-False $renewed.Success 'renew must fail closed while the mutation lock is held'
+        Assert-Equal 'lease-lock-busy' $renewed.Code 'renew contention must be observable'
+        Assert-Equal 'setup' ((Get-OperationLeaseStatus -BasePath $base).Lease.Phase) 'renew contention must not change the lease'
+
+        $closed = Close-OperationLease -Lease $created.Lease
+        Assert-False $closed.Success 'close must fail closed while the mutation lock is held'
+        Assert-Equal 'lease-lock-busy' $closed.Code 'close contention must be observable'
+        Assert-True (Test-Path -LiteralPath $leasePath -PathType Leaf) 'close contention must preserve the lease'
+    } finally {
+        $mutex.Dispose()
+    }
+
+    Remove-Item -LiteralPath $mutexPath -Force
+    $status = Get-OperationLeaseStatus -BasePath $base
+    Assert-Equal 'active' $status.Status 'status remains read-only'
+    Assert-False (Test-Path -LiteralPath $mutexPath) 'status must not create the mutation lock'
+
+    $closed = Close-OperationLease -Lease $created.Lease
+    Assert-True $closed.Success $closed.Error
+    $mutex = [IO.File]::Open($mutexPath, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+    try {
+        $new = New-OperationLease -BasePath $base -OperationId '4f6f37b4-7f19-4ca7-9eb1-7b99fbc7982f' -OwnerSid 'S-1-5-21-1-2-3-1002' -SessionId 8 -OwnerPid 4322 -Phase 'other' -TtlSeconds 30
+        Assert-False $new.Success 'creation must fail closed while the mutation lock is held'
+        Assert-Equal 'lease-lock-busy' $new.Code 'creation contention must be observable'
+        Assert-False (Test-Path -LiteralPath $leasePath) 'creation contention must not write a lease'
+    } finally {
+        $mutex.Dispose()
+    }
+}
 Add-Test 'busy operation lock prevents setup writes' {
     $root = New-Workspace
     $base = Join-Path $root '.claude-switcher'

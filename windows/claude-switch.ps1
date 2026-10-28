@@ -1334,6 +1334,7 @@ function Stop-ClaudeApp {
 }
 
 function Enter-OperationLock([int]$WaitMilliseconds = 2000) {
+    if (Test-Path -LiteralPath (Join-Path $BASE 'operation.lease.json') -PathType Leaf) { return $null }
     $timer = [Diagnostics.Stopwatch]::StartNew()
     do {
         try { return [IO.File]::Open((Join-Path $BASE 'operation.lock'), [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None) }
@@ -1725,7 +1726,7 @@ function Get-CoreOperationStatus {
         $journal=$null; $activity=$null
         if([IO.File]::Exists("$BASE\transaction.json")){ try{$journal=[IO.File]::ReadAllText("$BASE\transaction.json") | ConvertFrom-Json -ErrorAction Stop}catch{$invalid=$true} }
         if($busy -and [IO.File]::Exists("$BASE\operation.json")){ try{$activity=[IO.File]::ReadAllText("$BASE\operation.json") | ConvertFrom-Json -ErrorAction Stop}catch{} }
-        $residue=@("$DATA.new","$DATA.previous","$DATA.claude-switch-staging","$BASE\accounts\A.new","$BASE\accounts\A.previous","$BASE\accounts\B.new","$BASE\accounts\B.previous")
+        $residue=@("$BASE\operation.lease.json","$DATA.new","$DATA.previous","$DATA.claude-switch-staging","$BASE\accounts\A.new","$BASE\accounts\A.previous","$BASE\accounts\B.new","$BASE\accounts\B.previous")
         $pending=$invalid -or [IO.File]::Exists("$BASE\transaction.json") -or @($residue | Where-Object{Test-Path -LiteralPath $_}).Count -gt 0
         if($busy -or $pending){
             $state.phase=if($busy){'running'}else{'recoveryRequired'}; $state.recoveryRequired=-not $busy
@@ -1897,7 +1898,7 @@ function Invoke-UpdateNow {
         "MESSAGE=$($restriction.Message)"
         return
     }
-    $residue=@("$BASE\transaction.json","$DATA.new","$DATA.previous","$DATA.claude-switch-staging","$BASE\accounts\A.new","$BASE\accounts\A.previous","$BASE\accounts\B.new","$BASE\accounts\B.previous")
+    $residue=@("$BASE\operation.lease.json","$BASE\transaction.json","$DATA.new","$DATA.previous","$DATA.claude-switch-staging","$BASE\accounts\A.new","$BASE\accounts\A.previous","$BASE\accounts\B.new","$BASE\accounts\B.previous")
     if (@($residue | Where-Object { Test-Path -LiteralPath $_ }).Count -gt 0) {
         $script:UpdateExitCode=3
         'STATUS=recovery_required'

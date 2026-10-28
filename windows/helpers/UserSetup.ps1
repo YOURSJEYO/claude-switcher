@@ -2,7 +2,17 @@
 
 # This file is dot-sourced by install.ps1 and test harnesses. Keep it side-effect free at load time.
 
+if ([string]::IsNullOrWhiteSpace($PSScriptRoot)) {
+    throw 'UserSetup.ps1 must be dot-sourced from its installed location so OperationLease.ps1 can be loaded.'
+}
+$script:ClaudeSwitcherOperationLeaseHelperPath = Join-Path $PSScriptRoot 'OperationLease.ps1'
+if (-not [IO.File]::Exists($script:ClaudeSwitcherOperationLeaseHelperPath)) {
+    throw 'OperationLease.ps1 is required; user setup is disabled until the operation lease helper is present.'
+}
+. $script:ClaudeSwitcherOperationLeaseHelperPath
+
 $script:ClaudeSwitcherSetupSchemaVersion = 1
+$script:ClaudeSwitcherSetupLeaseTtlSeconds = 300
 $script:ClaudeSwitcherProxyModes = @('auto','clash-verge','sing-box','clashx','surge','wireguard','other')
 $script:ClaudeSwitcherCountryCultures = [ordered]@{
     US = 'en-US'
@@ -64,6 +74,16 @@ function Get-UserSetupProperty {
     $property = $InputObject.PSObject.Properties[$Name]
     if ($null -eq $property) { return $null }
     return $property.Value
+}
+
+function Set-UserSetupProperty {
+    param([object]$InputObject, [string]$Name, [object]$Value)
+    if ($null -eq $InputObject) { return }
+    if ($InputObject -is [System.Collections.IDictionary]) {
+        $InputObject[$Name] = $Value
+        return
+    }
+    Add-Member -InputObject $InputObject -NotePropertyName $Name -NotePropertyValue $Value -Force
 }
 
 function Test-SafeConfigurationText {
@@ -211,6 +231,7 @@ function Enter-UserSetupOperation {
     }
 
     $handle = $null
+    $lease = $null
     try {
         if (-not [IO.Directory]::Exists($resolvedBase)) {
             [void][IO.Directory]::CreateDirectory($resolvedBase)
@@ -235,15 +256,110 @@ function Enter-UserSetupOperation {
             $handle = $null
             return New-UserSetupResult $false 'A pending core transaction or recovery residue blocks user setup.' @{ Code = 'core-recovery-required'; RecoveryRequired = $true }
         }
-        return New-UserSetupResult $true '' @{ Handle = $handle }
+
+        try {
+            $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+            if ($null -eq $identity -or $null -eq $identity.User) {
+                throw 'The interactive user identity is unavailable.'
+            }
+            $process = [Diagnostics.Process]::GetCurrentProcess()
+            $ownerSid = [string]$identity.User.Value
+            $sessionId = [int]$process.SessionId
+            $ownerPid = [int]$process.Id
+            if (-not (Test-UserSidForSetup $ownerSid) -or $sessionId -le 0 -or $ownerPid -le 0) {
+                throw 'The interactive user identity is not eligible for a lease.'
+            }
+
+            $leaseResult = New-OperationLease -BasePath $resolvedBase -OperationId ([guid]::NewGuid().ToString('D')) -OwnerSid $ownerSid -SessionId $sessionId -OwnerPid $ownerPid -Phase 'setup' -TtlSeconds $script:ClaudeSwitcherSetupLeaseTtlSeconds
+            if (-not $leaseResult.Success) {
+                $handle.Dispose()
+                $handle = $null
+                if ($leaseResult.Code -eq 'lease-busy') {
+                    return New-UserSetupResult $false 'An active operation lease is busy; retry after the current operation completes.' @{ Code = 'core-busy'; Retryable = $true }
+                }
+                if ($leaseResult.Code -in @('lease-stale','lease-invalid')) {
+                    return New-UserSetupResult $false 'An operation lease requires recovery review.' @{ Code = 'core-recovery-required'; RecoveryRequired = $true }
+                }
+                return New-UserSetupResult $false 'The operation lease could not be acquired safely.' @{ Code = 'core-lease-failed' }
+            }
+
+            $lease = $leaseResult.Lease
+            Add-Member -InputObject $handle -NotePropertyName 'ClaudeSwitcherLease' -NotePropertyValue $lease -Force
+            return New-UserSetupResult $true '' @{ Handle = $handle; Lease = $lease }
+        } catch {
+            if ($null -ne $lease) { [void](Close-OperationLease -Lease $lease) }
+            if ($null -ne $handle) {
+                $handle.Dispose()
+                $handle = $null
+            }
+            return New-UserSetupResult $false 'The operation lease could not be acquired safely.' @{ Code = 'core-lease-failed' }
+        }
     } catch {
+        if ($null -ne $lease) { [void](Close-OperationLease -Lease $lease) }
         if ($null -ne $handle) { $handle.Dispose() }
         return New-UserSetupResult $false 'The core operation lock could not be acquired safely.' @{ Code = 'core-lock-failed' }
     }
 }
 
+function Renew-UserSetupOperation {
+    param(
+        [object]$Operation,
+        [object]$Phase,
+        [object]$TtlSeconds = $script:ClaudeSwitcherSetupLeaseTtlSeconds
+    )
+    if ($Operation -is [IO.FileStream]) {
+        $handle = $Operation
+    } else {
+        $handle = Get-UserSetupProperty $Operation 'Handle'
+    }
+    $lease = Get-UserSetupProperty $Operation 'Lease'
+    if ($null -eq $lease -and $null -ne $handle) {
+        $lease = Get-UserSetupProperty $handle 'ClaudeSwitcherLease'
+    }
+    if ($null -eq $lease) {
+        return New-UserSetupResult $false 'The setup operation lease is unavailable.' @{
+            Code = 'core-lease-missing'
+            Status = 'invalid'
+            Phase = [string]$Phase
+        }
+    }
+
+    $renewed = Renew-OperationLease -Lease $lease -Phase $Phase -TtlSeconds $TtlSeconds
+    if (-not $renewed.Success) {
+        $failureStatus = 'unchanged'
+        if ($renewed.Code -eq 'lease-stale') { $failureStatus = 'stale' }
+        elseif ($renewed.Code -in @('lease-invalid','lease-owner-mismatch','lease-missing')) { $failureStatus = 'invalid' }
+        return New-UserSetupResult $false $renewed.Error @{
+            Code = $renewed.Code
+            Status = $failureStatus
+            Phase = [string]$Phase
+        }
+    }
+
+    if ($null -ne $Operation -and $Operation -isnot [IO.FileStream]) {
+        Set-UserSetupProperty $Operation 'Lease' $renewed.Lease
+        Set-UserSetupProperty $Operation 'Status' 'active'
+        Set-UserSetupProperty $Operation 'Phase' ([string]$Phase)
+    }
+    if ($null -ne $handle) {
+        Set-UserSetupProperty $handle 'ClaudeSwitcherLease' $renewed.Lease
+    }
+    return New-UserSetupResult $true '' @{
+        Code = $renewed.Code
+        Status = 'active'
+        Phase = [string]$Phase
+        Lease = $renewed.Lease
+    }
+}
+
 function Exit-UserSetupOperation {
-    param($Handle)
+    param([object]$Handle, [object]$Lease = $null)
+    if ($null -eq $Lease -and $null -ne $Handle) {
+        $Lease = Get-UserSetupProperty $Handle 'ClaudeSwitcherLease'
+    }
+    if ($null -ne $Lease) {
+        try { [void](Close-OperationLease -Lease $Lease) } catch { }
+    }
     if ($null -ne $Handle -and $Handle -is [IO.FileStream]) {
         $Handle.Dispose()
     }
@@ -256,7 +372,7 @@ function Assert-NoCoreTransaction {
     try {
         return New-UserSetupResult $true
     } finally {
-        Exit-UserSetupOperation -Handle $operation.Handle
+        Exit-UserSetupOperation -Handle $operation.Handle -Lease $operation.Lease
     }
 }
 
@@ -375,7 +491,7 @@ function Invoke-OriginalUserSetup {
     try {
         return Write-UserConfiguration -ConfigPath $ConfigPath -InputObject $validated
     } finally {
-        Exit-UserSetupOperation -Handle $operation.Handle
+        Exit-UserSetupOperation -Handle $operation.Handle -Lease $operation.Lease
     }
 }
 

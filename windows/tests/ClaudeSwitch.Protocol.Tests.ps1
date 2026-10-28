@@ -158,6 +158,18 @@ Add-CoreTest -Name 'protocol reports status and switch failures with active oper
     Assert-Equal 1 $script:ProtocolExitCode 'switch failure exits nonzero'
 }
 
+Add-CoreTest -Name 'protocol treats an orphaned setup lease as recovery material' -Tag Protocol -Body {
+    New-TestWorkspace | Out-Null
+    $requestId = '3f6f37b4-7f19-4ca7-9eb1-7b99fbc7982f'
+    [IO.File]::WriteAllText((Join-Path $script:BASE 'operation.lease.json'), '{"schemaVersion":1,"operationId":"orphaned"}')
+    $result = Invoke-CoreRequest -Command status -OperationId $requestId
+    Assert-ProtocolEnvelope $result 'status' $requestId
+    Assert-False $result.success 'orphaned setup lease must fail status closed'
+    Assert-Equal 'recovery-required' $result.code 'orphaned setup lease uses the recovery code'
+    Assert-True $result.recoveryRequired 'orphaned setup lease requires explicit review'
+    Assert-Equal 3 $script:ProtocolExitCode 'orphaned setup lease exits three'
+}
+
 Add-CoreTest -Name 'protocol JSON mode emits exactly one parseable object and text mode remains fourteen rows' -Tag Protocol -Body {
     New-TestWorkspace | Out-Null
     function Invoke-CheckDetail { New-CheckLines }

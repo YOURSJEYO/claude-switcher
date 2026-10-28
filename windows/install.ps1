@@ -244,11 +244,17 @@ function Invoke-NativeUserSetupFlow {
         $locked=Enter-UserSetupOperation -BasePath $BasePath
         if (-not $locked.Success) { return New-InstallerFlowResult 2 'user' 'busy_or_recovery_required' 'A running operation or pending recovery blocks configuration.' }
         $handle=$locked.Handle
+        $renewed=Renew-UserSetupOperation -Operation $locked -Phase 'user' -TtlSeconds 300
+        if (-not $renewed.Success) { return New-InstallerFlowResult 2 'user' 'operation_lease_renewal_failed' 'The operation lease could not be renewed before user configuration; no configuration was written.' }
         Copy-SetupUserTemplates -Destination $BasePath
         $written=Write-UserConfiguration -ConfigPath (Join-Path $BasePath 'config.json') -InputObject $validated
         if (-not $written.Success) { return New-InstallerFlowResult 1 'user' 'configuration_write_failed' 'User configuration could not be saved; system configuration has not started.' }
         $stage='system'
+        $renewed=Renew-UserSetupOperation -Operation $locked -Phase 'system' -TtlSeconds 300
+        if (-not $renewed.Success) { return New-InstallerFlowResult 2 'system' 'operation_lease_renewal_failed' 'The operation lease could not be renewed before system configuration; the elevated stage was not started.' }
         $system=Invoke-ElevatedSystemSetup -HelperPath $payload.Helper -Operation 'repair-system' -UserSid $identity.Sid -SessionId $identity.SessionId -TimeZoneId $validated.TimeZoneId
+        $renewed=Renew-UserSetupOperation -Operation $locked -Phase 'system-returned' -TtlSeconds 300
+        if (-not $renewed.Success) { return New-InstallerFlowResult 2 'system' 'operation_lease_renewal_failed' 'The operation lease could not be renewed after system configuration; review recovery material before retrying.' }
         if (-not $system.Success) {
             if ([bool](Get-UserSetupProperty $system 'Cancelled')) { return New-InstallerFlowResult 4 'system' 'uac_cancelled' 'System configuration was cancelled; user configuration was saved and can be retried.' }
             return New-InstallerFlowResult 1 'system' 'system_configuration_failed' 'System configuration failed; earlier completed steps may remain applied. Retry configuration.'
