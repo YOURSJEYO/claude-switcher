@@ -1,6 +1,6 @@
 #!/bin/bash
 # Claude 账号切换器 - 核心脚本 (通用版)
-# 用法: claude-switch.sh check | status | switch A|B | checkdetail | fix | set-region | update [--check|--auto] | diagnose-proxy
+# 用法: claude-switch.sh check | status | switch A|B|C|D | checkdetail | fix | set-region | update [--check|--auto] | diagnose-proxy
 set -u
 export LC_ALL=en_US.UTF-8
 
@@ -541,6 +541,7 @@ BASE="$HOME/.claude-switcher"
 LOG="$HOME/Library/Logs/claude-switch.log"
 CLASH_DIR="$HOME/Library/Application Support/io.github.clash-verge-rev.clash-verge-rev"
 ROUTE_MISSED=""
+KEEP_STAGED=0
 mkdir -p "$BASE/accounts"
 
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $1" >>"$LOG"; }
@@ -625,6 +626,128 @@ route_ok() {
     [ -z "$ROUTE_MISSED" ]
 }
 
+# 国家代码 → 默认 IANA 时区(cloudflare trace 等来源不带时区时使用)
+default_tz_for() {
+    case "$1" in
+        US) echo America/New_York ;; JP) echo Asia/Tokyo ;; TW) echo Asia/Taipei ;;
+        HK) echo Asia/Hong_Kong ;; SG) echo Asia/Singapore ;; GB) echo Europe/London ;;
+        DE) echo Europe/Berlin ;; FR) echo Europe/Paris ;; KR) echo Asia/Seoul ;;
+        AU) echo Australia/Sydney ;; CA) echo America/Toronto ;;
+        *) echo America/New_York ;;
+    esac
+}
+
+# 出口探测辅助:严格校验两位大写国家码与 IANA 时区格式
+_geo_valid_country() {
+    case "$1" in [A-Z][A-Z]) return 0 ;; *) return 1 ;; esac
+}
+_geo_valid_tz() {
+    [[ "$1" =~ ^[A-Za-z_]+/[A-Za-z_]+(/[A-Za-z_]+)?$ ]]
+}
+_geo_json_field() {
+    printf '%s\n' "$1" | sed -n 's/.*"'"$2"'"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1
+}
+_geo_diag_add() {
+    GEO_DIAG="${GEO_DIAG:+$GEO_DIAG; }$1"
+    if [ -n "${GEO_DIAG_FILE:-}" ]; then
+        printf '%s\n' "$1" >>"$GEO_DIAG_FILE"
+    fi
+}
+# 取一个源;失败把简短原因(HTTP 码/超时)记进诊断,不打印
+_geo_fetch() {
+    local out rc code
+    _GEO_BODY=""
+    out=$(curl -s --max-time 8 -w '\n%{http_code}' "$1" 2>/dev/null); rc=$?
+    if [ "$rc" -ne 0 ]; then
+        _geo_diag_add "$2 超时/连接失败"
+        return 1
+    fi
+    if [ -z "$out" ]; then
+        _geo_diag_add "$2 无响应"
+        return 1
+    fi
+    code=$(printf '%s\n' "$out" | tail -n 1)
+    case "$code" in
+        200)
+            _GEO_BODY=$(printf '%s\n' "$out" | sed '$d')
+            return 0 ;;
+        [0-9][0-9][0-9])
+            _geo_diag_add "$2 HTTP $code"
+            return 1 ;;
+        *)
+            # 没有 -w 状态行时按成功处理(兼容 curl 替身/中间层)
+            _GEO_BODY="$out"
+            return 0 ;;
+    esac
+}
+# 记录一个成功源;首个成功源优先,后续来源国家不一致只告警
+_geo_consider() {
+    [ -z "$1" ] && return 0
+    if [ -z "$_GEO_CC" ]; then
+        _GEO_CC="$1"; _GEO_TZ="$2"; _GEO_SRC="$3"
+    elif [ "$1" != "$_GEO_CC" ]; then
+        printf 'WARN:出口国家不一致(%s=%s %s=%s),采用优先级更高的 %s\n' \
+            "$_GEO_SRC" "$_GEO_CC" "$3" "$1" "$_GEO_SRC" >&2
+    fi
+}
+
+# 多源出口探测:ipinfo → ipapi → ifconfig → cloudflare trace,成功源按此优先级取首个;
+# 全部失败输出 "||",各源失败原因写入 GEO_DIAG_FILE(命令替换会丢子 shell 变量)。
+geo_lookup() {
+    local cc tz loc
+    local _GEO_BODY="" _GEO_CC="" _GEO_TZ="" _GEO_SRC=""
+    GEO_DIAG=""
+
+    if _geo_fetch "https://ipinfo.io/json" ipinfo; then
+        cc=$(_geo_json_field "$_GEO_BODY" country)
+        tz=$(_geo_json_field "$_GEO_BODY" timezone)
+        if _geo_valid_country "$cc"; then
+            _geo_valid_tz "$tz" || tz=$(default_tz_for "$cc")
+            _geo_consider "$cc" "$tz" ipinfo
+        else
+            _geo_diag_add "ipinfo 国家字段无效"
+        fi
+    fi
+
+    if _geo_fetch "https://ipapi.co/json/" ipapi; then
+        cc=$(_geo_json_field "$_GEO_BODY" country_code)
+        tz=$(_geo_json_field "$_GEO_BODY" timezone)
+        if _geo_valid_country "$cc"; then
+            _geo_valid_tz "$tz" || tz=$(default_tz_for "$cc")
+            _geo_consider "$cc" "$tz" ipapi
+        else
+            _geo_diag_add "ipapi 国家字段无效"
+        fi
+    fi
+
+    if _geo_fetch "https://ifconfig.co/json" ifconfig; then
+        cc=$(_geo_json_field "$_GEO_BODY" country_iso)
+        tz=$(_geo_json_field "$_GEO_BODY" timezone)
+        if _geo_valid_country "$cc"; then
+            _geo_valid_tz "$tz" || tz=$(default_tz_for "$cc")
+            _geo_consider "$cc" "$tz" ifconfig
+        else
+            _geo_diag_add "ifconfig 国家字段无效"
+        fi
+    fi
+
+    if _geo_fetch "https://www.cloudflare.com/cdn-cgi/trace" cloudflare; then
+        loc=$(printf '%s\n' "$_GEO_BODY" | tr -d '\r' | sed -n 's/^loc=\([A-Za-z][A-Za-z]\)$/\1/p' | head -n 1 | tr 'a-z' 'A-Z')
+        if _geo_valid_country "$loc"; then
+            _geo_consider "$loc" "$(default_tz_for "$loc")" cloudflare
+        else
+            _geo_diag_add "cloudflare loc 无效"
+        fi
+    fi
+
+    if [ -z "$_GEO_CC" ]; then
+        printf '||\n'
+        return 1
+    fi
+    printf '%s|%s|%s\n' "$_GEO_CC" "$_GEO_TZ" "$_GEO_SRC"
+    return 0
+}
+
 # 国家代码 → 地区格式映射(未收录的国家回退 en_US)
 locale_for() {
     case "$1" in
@@ -688,7 +811,12 @@ check() {
     wr=$(webrtc_status "$ip")
     case "$wr" in fail:*) fails="$fails;WebRTC:${wr#fail:}" ;; esac
 
-    launchctl print system/local.claude-bodyguard >/dev/null 2>&1 || fails="$fails;保镖未运行"
+    guard_state=$(bodyguard_status)
+    case "$guard_state" in
+        ok:*) ;;
+        fail:*) fails="$fails;保镖:${guard_state#fail:}" ;;
+        *) fails="$fails;保镖:状态无法验证" ;;
+    esac
 
     # 置顶规则:Clash Verge 验证运行内核;全局模式下全部流量走代理,规则不适用;其他客户端只看行为检测
     if [ "$PROXY_MODE" = "clash-verge" ]; then
@@ -765,6 +893,33 @@ webrtc_status() {
     esac
 }
 
+# 保镖脚本由 root 安装，MODE 在安装时写死。核心切客户端后必须检测模式一致性，
+# 否则旧保镖可能按错误的代理进程状态关闭 Claude，单看 launchctl 在线会误报成功。
+bodyguard_status() {
+    if ! launchctl print system/local.claude-bodyguard >/dev/null 2>&1; then
+        echo 'fail:未安装'
+        return
+    fi
+    local guard="/Library/Application Support/claude-switcher/claude-bodyguard.sh"
+    if [ ! -r "$guard" ]; then
+        echo 'fail:守护脚本不可读或缺失(请重新运行安装器)'
+        return
+    fi
+    local guard_mode
+    guard_mode=$(sed -n 's/^MODE="\([^"]*\)".*/\1/p' "$guard" | head -1)
+    if [ -z "$guard_mode" ]; then
+        echo 'fail:守护模式无法识别(请重新运行安装器)'
+        return
+    fi
+    if [ "$guard_mode" != "$PROXY_MODE" ]; then
+        echo "fail:客户端不一致(核心=$PROXY_MODE,保镖=$guard_mode;请重新运行安装器同步)"
+        return
+    fi
+    local lastkill
+    lastkill=$(tail -1 "$HOME/Library/Logs/claude-bodyguard.log" 2>/dev/null | cut -c1-40)
+    echo "ok:${lastkill:-待命}"
+}
+
 # 逐项输出检查结果(供UI使用): 名称=ok|fail:细节
 checkdetail() {
     if proxy_alive; then
@@ -811,12 +966,7 @@ checkdetail() {
         *) echo "DNS=fail:未走隧道(${dnsip:-空})" ;;
     esac
     echo "WebRTC=$(webrtc_status "$ip")"
-    if launchctl print system/local.claude-bodyguard >/dev/null 2>&1; then
-        lastkill=$(tail -1 "$HOME/Library/Logs/claude-bodyguard.log" 2>/dev/null | cut -c1-40)
-        echo "保镖=ok:${lastkill:-待命}"
-    else
-        echo '保镖=fail:未安装'
-    fi
+    echo "保镖=$(bodyguard_status)"
     # 置顶规则:Clash Verge 验证运行内核;全局模式下规则不适用(全部流量已走代理)
     if [ "$PROXY_MODE" = "clash-verge" ]; then
         if [ "$(clash_mode)" = "global" ]; then
@@ -1019,20 +1169,61 @@ ASEOF
     return "$fix_failed"
 }
 
+# 更换代理客户端:改写已安装脚本头部的 PROXY_MODE(用于安装后换客户端/装错客户端)
+set_client() {
+    mode="${1:-}"
+    case "$mode" in
+        clash-verge|shadowrocket|sing-box|clashx|surge|auto) ;;
+        *) echo "FAIL:用法: claude-switch.sh set-client <clash-verge|shadowrocket|sing-box|clashx|surge|auto>"; return 1 ;;
+    esac
+    target="${CLAUDE_SWITCHER_CORE:-}"
+    if [ -z "$target" ]; then
+        if [ -f "$HOME/.local/bin/claude-switch.sh" ] && [ -w "$HOME/.local/bin/claude-switch.sh" ]; then
+            target="$HOME/.local/bin/claude-switch.sh"
+        else
+            target="$0"
+        fi
+    fi
+    [ -f "$target" ] && [ -w "$target" ] || { echo "FAIL:找不到可写的核心脚本: $target"; return 1; }
+    sed -i '' "s|^PROXY_MODE=\"[^\"]*\"|PROXY_MODE=\"$mode\"|" "$target" || { echo "FAIL:写入失败"; return 1; }
+    grep -q "^PROXY_MODE=\"$mode\"" "$target" || { echo "FAIL:校验失败"; return 1; }
+    PROXY_MODE="$mode"
+    echo "OK:代理客户端已设为 $mode"
+    guard_state=$(bodyguard_status)
+    case "$guard_state" in
+        fail:未安装) echo "INFO:保镖尚未安装,checkdetail 会提示未安装" ;;
+        fail:*) echo "WARN:保镖校验未通过(${guard_state#fail:});请重新运行安装器同步 root 守护脚本(需管理员权限),完成前不要启动 Claude" ;;
+    esac
+    echo "INFO:重新运行 checkdetail 生效;非 Clash 客户端请在应用内自行添加 Claude 域名置顶规则"
+    return 0
+}
+
 # 地区自适应:按当前出口国家一键重设 国家/时区/地区格式(换了国家节点后运行)
 set_region() {
-    trace=$(curl -s --max-time 8 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null)
-    loc=$(echo "$trace" | grep '^loc=' | cut -d= -f2)
-    [ -z "$loc" ] && { echo "FAIL:无法获取出口国家(cloudflare trace 无结果,请先挂代理)"; return 1; }
-    info=$(curl -s --max-time 8 https://ipinfo.io/json 2>/dev/null)
-    ctry=$(echo "$info" | grep '"country"' | cut -d'"' -f4)
-    ntz=$(echo "$info" | grep '"timezone"' | cut -d'"' -f4)
-    if [ -z "$ctry" ] || [ -z "$ntz" ]; then
-        echo "FAIL:ipinfo 未返回国家或时区"; return 1
+    local geo gfile ctry ntz src nlocale rc
+    gfile=$(mktemp "${TMPDIR:-/tmp}/claude-geo.XXXXXX" 2>/dev/null) || gfile=""
+    GEO_DIAG_FILE="$gfile"
+    geo=$(geo_lookup); rc=$?
+    if [ -n "$gfile" ]; then
+        GEO_DIAG=$(tr '\n' ';' < "$gfile" 2>/dev/null | sed 's/;$//')
+        rm -f "$gfile"
+    else
+        GEO_DIAG=""
     fi
-    if [ "$loc" != "$ctry" ]; then
-        echo "FAIL:出口国家不一致(cloudflare=$loc ipinfo=$ctry),已中止"; return 1
+    unset GEO_DIAG_FILE
+    if [ "$rc" -ne 0 ] || [ -z "$geo" ] || [ "${geo%%|*}" = "" ]; then
+        echo "FAIL:所有出口探测源均失败(${GEO_DIAG:-无诊断信息})"
+        echo "INFO:请确认代理已开启;若代理规则把 ipinfo/ipapi 判直连,可改为手动设置或稍后重试"
+        return 1
     fi
+    ctry=${geo%%|*}; geo=${geo#*|}
+    ntz=${geo%%|*}; src=${geo#*|}
+    if [ "$ctry" = "CN" ]; then
+        echo "FAIL:出口国家为 CN(来源 $src),已中止;请先切换节点再重试"
+        return 1
+    fi
+    [ -n "$ntz" ] || ntz=$(default_tz_for "$ctry")
+    [ "$src" = "cloudflare" ] && echo "INFO:时区使用国家默认(可手动改)"
     nlocale=$(locale_for "$ctry")
 
     # 改写脚本自身头部三个配置项
@@ -1066,7 +1257,7 @@ ASEOF
         sed -i '' "s|^TARGET=.*|TARGET=$ntz|" "$WD" 2>/dev/null || echo "WARN:看门狗目标未同步,请运行安装器刷新"
     fi
 
-    echo "OK:region=$loc tz=$ntz locale=$nlocale"
+    echo "OK:region=$ctry tz=$ntz locale=$nlocale source=$src"
 }
 
 # 自动更新:拉取 main 分支最新代码,SHA256 校验+配置注入+自检+失败回滚
@@ -1305,7 +1496,7 @@ open_safe() {
 
 snapshot_export() {
     target="${1:-}"; out="${2:-}"; mode="${3:-}"
-    case "$target" in A|B) ;; *) echo "FAIL:账号必须是 A 或 B"; return 1 ;; esac
+    case "$target" in A|B|C|D) ;; *) echo "FAIL:账号必须是 A、B、C 或 D"; return 1 ;; esac
     [ -d "$BASE/accounts/$target" ] || { echo "FAIL:账号$target 没有已归档快照(先切换一次让它归档)"; return 1; }
     [ -n "$out" ] || { echo "FAIL:请指定导出文件路径"; return 1; }
     case "$out" in /*) ;; *) out="$PWD/$out" ;; esac
@@ -1353,7 +1544,7 @@ EOF
 
 snapshot_import() {
     file="${1:-}"; target="${2:-}"; mode="${3:-}"
-    case "$target" in A|B) ;; *) echo "FAIL:账号必须是 A 或 B"; return 1 ;; esac
+    case "$target" in A|B|C|D) ;; *) echo "FAIL:账号必须是 A、B、C 或 D"; return 1 ;; esac
     [ -f "$file" ] || { echo "FAIL:找不到镜像文件: $file"; return 1; }
     [ -e "$BASE/accounts/$target" ] && { echo "FAIL:账号$target 已有快照,请先导出或删除后再导入"; return 1; }
 
@@ -1388,7 +1579,7 @@ import json, sys
 with open(sys.argv[1], encoding="utf-8") as f: meta = json.load(f)
 assert meta.get("format") == "claude-switcher-snapshot"
 assert meta.get("version") == 1
-assert meta.get("account") in ("A", "B")
+assert meta.get("account") in ("A", "B", "C", "D")
 sys.exit(0 if meta.get("account") == sys.argv[2] else 1)
 PY
     then
@@ -1412,10 +1603,21 @@ PY
 }
 
 status() {
-    cur="none"; [ -f "$BASE/current" ] && cur=$(cat "$BASE/current")
-    hasA=0; [ -d "$BASE/accounts/A" ] && hasA=1
-    hasB=0; [ -d "$BASE/accounts/B" ] && hasB=1
-    echo "current=$cur hasA=$hasA hasB=$hasB"
+    local cur="none" hasA=0 hasB=0 hasC=0 hasD=0 a dir size stamp accounts="" extras=""
+    [ -f "$BASE/current" ] && cur=$(cat "$BASE/current")
+    [ -d "$BASE/accounts/A" ] && hasA=1
+    [ -d "$BASE/accounts/B" ] && hasB=1
+    [ -d "$BASE/accounts/C" ] && hasC=1
+    [ -d "$BASE/accounts/D" ] && hasD=1
+    for a in A B C D; do
+        dir="$BASE/accounts/$a"
+        [ -d "$dir" ] || continue
+        accounts="${accounts:+$accounts,}$a"
+        size=$(du -sh "$dir" 2>/dev/null | awk '{print $1}')
+        stamp=$(date -r "$dir" '+%Y-%m-%d' 2>/dev/null)
+        extras="$extras acc$a=${size:-?}@${stamp:-?}"
+    done
+    echo "current=$cur hasA=$hasA hasB=$hasB hasC=$hasC hasD=$hasD accounts=${accounts:-none}$extras"
 }
 
 quit_claude() {
@@ -1492,15 +1694,106 @@ copy_tree() {
     ditto "$src" "$dst"
 }
 
+# 只接受 A-D 四个账号槽位
+valid_account() {
+    case "${1:-}" in
+        A|B|C|D) return 0 ;;
+        *) echo "FAIL:账号必须是 A、B、C 或 D"; return 1 ;;
+    esac
+}
+
+# ---------- 跨身份保留(可选) ----------
+# 校验相对路径的每个分量都不是符号链接,避免把 DATA 外的内容带进快照
+keep_path_safe() {
+    local rel="$1" prefix="$DATA" part
+    while [ -n "$rel" ]; do
+        part="${rel%%/*}"
+        if [ "$part" = "$rel" ]; then rel=""; else rel="${rel#*/}"; fi
+        [ -z "$part" ] && continue
+        prefix="$prefix/$part"
+        [ -L "$prefix" ] && return 1
+    done
+    return 0
+}
+
+# 归档当前账号之前,把 keep 列表里存在的路径收进暂存目录
+stage_keep_paths() {
+    local keepf="$BASE/keep-in-workspace.txt"
+    local stage="$BASE/keep-stage"
+    local rel src dst count=0
+    KEEP_STAGED=0
+    [ -f "$keepf" ] || return 0
+    # 上次还原失败时 stage 可能是唯一完整副本,不自动覆盖
+    if [ -e "$stage" ] || [ -L "$stage" ]; then
+        log "FAIL:跨身份保留暂存目录已存在，请检查或重试上次切换: $stage"
+        return 1
+    fi
+    while IFS= read -r rel || [ -n "$rel" ]; do
+        rel="${rel%$'\r'}"
+        case "$rel" in
+            ''|'#'*|[[:space:]]*'#'*) continue ;;
+            /*) log "WARN:keep 路径必须是相对路径，已跳过: $rel"; continue ;;
+            *..*) log "WARN:keep 路径不能包含 ..，已跳过: $rel"; continue ;;
+        esac
+        while [ "${rel%/}" != "$rel" ]; do rel="${rel%/}"; done
+        while [ "${rel#./}" != "$rel" ]; do rel="${rel#./}"; done
+        if [ -z "$rel" ] || [ "$rel" = "." ]; then
+            log "WARN:keep 路径为空或指向数据目录本身，已跳过: $rel"
+            continue
+        fi
+        if ! keep_path_safe "$rel"; then
+            log "WARN:keep 路径含符号链接，已跳过: $rel"
+            continue
+        fi
+        src="$DATA/$rel"
+        [ -e "$src" ] || continue
+        dst="$stage/$rel"
+        if ! mkdir -p "$(dirname "$dst")" || ! ditto "$src" "$dst"; then
+            rm -rf "$stage"
+            log "FAIL:跨身份保留暂存失败"
+            return 1
+        fi
+        count=$((count + 1))
+    done < "$keepf"
+    if [ "$count" -eq 0 ]; then
+        rm -rf "$stage"
+        log "跨身份保留:没有需要保留的路径"
+        return 0
+    fi
+    KEEP_STAGED=$count
+    log "跨身份保留:已收起 $count 条路径"
+    return 0
+}
+
+# 还原目标账号后,把暂存内容合并回 DATA;失败时保留 stage 供排查
+restore_keep_paths() {
+    local stage="$BASE/keep-stage"
+    [ -d "$stage" ] || return 0
+    if ! ditto "$stage/" "$DATA/"; then
+        log "FAIL:跨身份保留还原失败，暂存保留在 $stage"
+        return 1
+    fi
+    rm -rf "$stage"
+    log "跨身份保留:已还原 ${KEEP_STAGED:-0} 条路径到新账号"
+    return 0
+}
+
 switch_to() {
-    target="$1"
+    target="${1:-}"
+    valid_account "$target" || return 1
     cur="none"; [ -f "$BASE/current" ] && cur=$(cat "$BASE/current")
     just_archived=0
 
     # 首次运行:把当前登录中的状态收编为账号A
     if [ "$cur" = "none" ] && [ -d "$DATA" ] && [ -n "$(ls -A "$DATA" 2>/dev/null)" ]; then
         quit_claude || { echo "FAIL:Claude 未能退出，请手动退出后重试"; return 1; }
-        archive_current A || { echo "FAIL:首次账号归档失败，已停止切换"; return 1; }
+        if [ -s "$BASE/keep-in-workspace.txt" ]; then
+            stage_keep_paths || { echo "FAIL:跨身份保留暂存失败，已停止切换"; return 1; }
+        fi
+        archive_current A || {
+            rm -rf "$BASE/keep-stage"
+            echo "FAIL:首次账号归档失败，已停止切换"; return 1
+        }
         just_archived=1
         cur="A"; echo "$cur" > "$BASE/current"
         log "首次运行:当前登录状态已收编为账号A"
@@ -1508,9 +1801,18 @@ switch_to() {
     fi
 
     if [ "$cur" = "$target" ]; then
-        # 归档是移动语义,首次收编后需把当前账号还原回 DATA
-        if [ "$just_archived" = "1" ] && [ ! -d "$DATA" ] && [ -d "$BASE/accounts/$target" ]; then
-            copy_tree "$BASE/accounts/$target" "$DATA"
+        # 归档是移动语义;首次收编或上次切换中断后,先用存档恢复 DATA
+        if [ ! -d "$DATA" ]; then
+            if [ ! -d "$BASE/accounts/$target" ]; then
+                echo "FAIL:账号$target 数据目录缺失，已停止切换"; return 1
+            fi
+            if ! copy_tree "$BASE/accounts/$target" "$DATA"; then
+                echo "FAIL:账号$target 还原失败，已停止切换"; return 1
+            fi
+        fi
+        # 上次还原失败留下的 stage,在当前账号上重试合并
+        if [ -d "$BASE/keep-stage" ]; then
+            restore_keep_paths || { echo "FAIL:跨身份保留还原失败，暂存保留在 $BASE/keep-stage"; return 1; }
         fi
         open -a "Claude"
         echo "INFO:当前已是账号$target"
@@ -1520,20 +1822,45 @@ switch_to() {
     quit_claude || { echo "FAIL:Claude 未能退出，请手动退出后重试"; return 1; }
 
     if [ "$just_archived" = "0" ] && [ "$cur" != "none" ] && [ -d "$DATA" ]; then
-        archive_current "$cur" || { echo "FAIL:账号$cur 归档失败，已停止切换"; return 1; }
+        if [ -s "$BASE/keep-in-workspace.txt" ]; then
+            stage_keep_paths || { echo "FAIL:跨身份保留暂存失败，已停止切换"; return 1; }
+        fi
+        archive_current "$cur" || {
+            rm -rf "$BASE/keep-stage"
+            echo "FAIL:账号$cur 归档失败，已停止切换"; return 1
+        }
     fi
 
     rm -rf "$DATA.new"
     t0=$(date +%s)
     if [ -d "$BASE/accounts/$target" ]; then
-        copy_tree "$BASE/accounts/$target" "$DATA.new"
+        if ! copy_tree "$BASE/accounts/$target" "$DATA.new"; then
+            log "FAIL:账号$target 存档载入失败"
+            echo "FAIL:账号$target 存档载入失败，暂存保留在 $BASE/keep-stage"
+            return 1
+        fi
         log "已载入账号$target 存档 ($(( $(date +%s) - t0 ))s)"
     else
-        mkdir -p "$DATA.new"
+        if ! mkdir -p "$DATA.new"; then
+            log "FAIL:无法创建账号$target 数据目录"
+            echo "FAIL:无法创建账号$target 数据目录"
+            return 1
+        fi
         log "账号$target 无存档，将以全新状态初始化"
     fi
-    rm -rf "$DATA" && mv "$DATA.new" "$DATA"
+    if ! { rm -rf "$DATA" && mv "$DATA.new" "$DATA"; }; then
+        log "FAIL:载入账号$target 失败"
+        echo "FAIL:载入账号$target 失败，暂存保留在 $BASE/keep-stage"
+        return 1
+    fi
     echo "$target" > "$BASE/current"
+
+    if [ -d "$BASE/keep-stage" ]; then
+        if ! restore_keep_paths; then
+            echo "FAIL:跨身份保留还原失败，暂存保留在 $BASE/keep-stage"
+            return 1
+        fi
+    fi
 
     open -a "Claude"
     log "已切换到账号$target 并启动 ($(( $(date +%s) - t0 ))s)"
@@ -1556,6 +1883,7 @@ case "${1:-}" in
     status) status ;;
     switch) switch_to "${2:-}" ;;
     set-region) set_region ;;
+    set-client) set_client "${2:-}" ;;
     update) self_update "${2:-}" ;;
     update-check) self_update --check ;;  # 只读检查;独立入口,避免旧版核心把 --check 当成真实更新
     open-safe) open_safe "${2:-}" ;;
@@ -1564,5 +1892,5 @@ case "${1:-}" in
     snapshot-import) snapshot_import "${2:-}" "${3:-}" "${4:-}" ;;
     write-merge-rules) write_merge_rules ;;  # 隐藏入口:供安装器调用,保证两处合并逻辑一致
     fingerprint) fingerprint ;;
-    *) echo "用法: claude-switch.sh check|checkdetail|fix|status|switch A|B|set-region|update [--check|--auto]|update-check|fingerprint|snapshot-export <A|B> <file>|snapshot-import <file> <A|B>|open-safe <url>|cli-info|diagnose-proxy [--proxy URL|--config FILE]"; exit 2 ;;
+    *) echo "用法: claude-switch.sh check|checkdetail|fix|status|switch A|B|C|D|set-region|set-client <mode>|update [--check|--auto]|update-check|fingerprint|snapshot-export <A|B|C|D> <file>|snapshot-import <file> <A|B|C|D>|open-safe <url>|cli-info|diagnose-proxy [--proxy URL|--config FILE]"; exit 2 ;;
 esac

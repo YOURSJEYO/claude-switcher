@@ -6,7 +6,7 @@
 python3 -m unittest discover -s tests -v
 ```
 
-27 个菜单栏场景覆盖本地账号刷新、切换前重新审计、警告放行、失败/缺行/重复行/空值/超时/非零退出阻断、忙碌互斥、退出保护、隐藏回调与单窗口生命周期。非 macOS 系统跳过这部分，继续运行现有的核心脚本测试。
+31 个菜单栏场景覆盖多账号状态解析、A–D 切换与首次使用提示、旧版状态回退、本地账号刷新、切换前重新审计、警告放行、失败/缺行/重复行/空值/超时/非零退出阻断、忙碌互斥、退出保护、隐藏回调与单窗口生命周期。非 macOS 系统跳过这部分，继续运行现有的核心脚本测试。
 
 ## UI 演示程序
 
@@ -32,7 +32,7 @@ case "$1" in
     for key in 代理内核 TUN网卡 出口IP IP一致 时区 地区 IPv6 DNS WebRTC 保镖 规则置顶 客户端语言 ASN属性 生态可达性; do
       if [ "$key" = ASN属性 ]; then echo "$key=warn:演示机房"; else echo "$key=ok:演示数据"; fi
     done ;;
-  status) echo 'current=A hasA=1 hasB=1' ;;
+  status) echo 'current=A hasA=1 hasB=1 hasC=1 hasD=0 accounts=A,B,C accA=1.2G@2026-10-20 accB=900M@2026-10-19 accC=2.0G@2026-10-18' ;;
   switch) echo "OK:演示切换至 $2" ;;
   fix) echo 'FIX:演示修复' ;;
   fingerprint) echo 'GPU=ok:演示设备' ;;
@@ -58,7 +58,7 @@ _trash/menu-bar-demo/MenuBarFixture "$PWD/_trash/menu-bar-demo/fake-core.sh"
 
 截图只使用这个演示程序。不要运行真实账号切换或把住宅/代理 IP、凭据放进截图。
 
-以下为隔离演示的主窗口截图，不是顶部状态栏下拉菜单截图：
+以下为隔离演示的主窗口截图，不是顶部状态栏下拉菜单截图。截图拍摄于双账号版本，A–D 四宫格卡片以当前构建为准：
 
 | 浅色系统控件 | 深色系统控件 |
 | --- | --- |

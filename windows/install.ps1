@@ -40,11 +40,53 @@ function Get-SetupIdentity {
     } finally { $identity.Dispose() }
 }
 
+function Get-GeoInfo {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    $headers=@{'User-Agent'='claude-switcher-installer/1.0'}
+    $countryTz=@{
+        US='America/New_York'; JP='Asia/Tokyo'; TW='Asia/Taipei'; HK='Asia/Hong_Kong'
+        SG='Asia/Singapore'; GB='Europe/London'; DE='Europe/Berlin'; FR='Europe/Paris'
+        KR='Asia/Seoul'; AU='Australia/Sydney'; CA='America/Toronto'
+    }
+    $sources=@(
+        @{Url='https://ipinfo.io/json';Country='country';Timezone='timezone'},
+        @{Url='https://ipapi.co/json/';Country='country_code';Timezone='timezone'},
+        @{Url='https://ifconfig.co/json';Country='country_iso';Timezone='timezone'}
+    )
+    $observations=New-Object 'System.Collections.Generic.List[object]'
+    foreach($source in $sources) {
+        try { $data=Invoke-RestMethod -Uri $source.Url -Headers $headers -TimeoutSec 8 -ErrorAction Stop }
+        catch { continue }
+        $country=[string](Get-UserSetupProperty $data $source.Country)
+        if ($country -cnotmatch '^[A-Z]{2}$') { continue }
+        $timezone=[string](Get-UserSetupProperty $data $source.Timezone)
+        if ([string]::IsNullOrWhiteSpace($timezone)) { $timezone=$countryTz[$country] }
+        $observations.Add([pscustomobject]@{Country=$country;Timezone=$timezone})
+    }
+    try {
+        $trace=Invoke-WebRequest -Uri 'https://www.cloudflare.com/cdn-cgi/trace' -Headers $headers -TimeoutSec 8 -UseBasicParsing -ErrorAction Stop
+        foreach($line in ([string]$trace.Content -split '\r?\n')) {
+            if ($line -cmatch '^loc=([A-Z]{2})$') {
+                $country=$Matches[1]
+                $observations.Add([pscustomobject]@{Country=$country;Timezone=$countryTz[$country]})
+                break
+            }
+        }
+    } catch {}
+    $countries=@($observations | Select-Object -ExpandProperty Country -Unique)
+    if ($countries -contains 'CN') { throw 'CN egress observation is not supported.' }
+    if ($countries.Count -gt 1) { throw 'Egress sources disagree; retry after confirming a consistent proxy route.' }
+    foreach($observation in $observations) {
+        if ((Get-CultureTarget $observation.Country) -and (Get-WindowsTimeZoneId $observation.Timezone)) { return $observation }
+    }
+    throw 'No supported egress observation is available.'
+}
+
 function Get-SetupEgress {
     # Only reviewed region scalars leave this function. Never print the raw response.
-    $response=Invoke-RestMethod -Uri 'https://ipinfo.io/json' -TimeoutSec 8 -ErrorAction Stop
-    $country=[string](Get-UserSetupProperty $response 'country')
-    $zone=Get-WindowsTimeZoneId ([string](Get-UserSetupProperty $response 'timezone'))
+    $response=Get-GeoInfo
+    $country=$response.Country
+    $zone=Get-WindowsTimeZoneId $response.Timezone
     $culture=Get-CultureTarget $country
     if ($country -cnotmatch '^[A-Z]{2}$' -or $country -eq 'CN' -or -not $zone -or -not $culture) { throw 'Supported non-CN region required.' }
     [pscustomobject]@{Country=$country;TimeZoneId=$zone;Culture=$culture}
@@ -113,6 +155,18 @@ function Copy-SetupUserTemplates {
             else { [IO.File]::Move($temporary,$target) }
         } finally { if ([IO.File]::Exists($temporary)) { [IO.File]::Delete($temporary) } }
     }
+    # Keep the compatibility updater's installed-version contract without changing user configuration.
+    $versionSrc = Join-Path $script:SetupSourceDirectory '..\VERSION'
+    if (-not (Test-Path -LiteralPath $versionSrc -PathType Leaf)) { $versionSrc = Join-Path $script:SetupSourceDirectory 'VERSION' }
+    $appVersion = 'unknown'
+    if (Test-Path -LiteralPath $versionSrc -PathType Leaf) {
+        $versionFile=Get-Item -LiteralPath $versionSrc -ErrorAction Stop
+        if ($versionFile.Length -le 256 -and -not ($versionFile.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            $candidate=[IO.File]::ReadAllText($versionSrc).Trim()
+            if ($candidate -cmatch '^\d+\.\d+\.\d+(?:-[0-9A-Za-z]+(?:\.[0-9A-Za-z]+)*)?$') { $appVersion=$candidate }
+        }
+    }
+    [IO.File]::WriteAllText((Join-Path $Destination 'version.txt'),$appVersion,(New-Object Text.UTF8Encoding($false)))
 }
 
 function Invoke-NativeUserSetupFlow {

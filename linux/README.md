@@ -31,6 +31,7 @@ bash install.sh
 ```
 
 - 安装器自动识别代理客户端与代理组名,并按出口 IP 锁定 国家/时区/地区格式
+- 地区识别支持多源探测(ipinfo → ipapi → ifconfig → Cloudflare trace)与失败时的手动选择;全部失败且设置了 `FORCE=1` 时按 US / America/New_York 继续
 - 时区锁定和 IPv6 关闭需要一次 sudo 密码
 - IPv6 关闭会持久化到 `/etc/sysctl.d/90-claude-switcher.conf`;恢复:删掉该文件后 `sudo sysctl -p`
 

@@ -26,8 +26,8 @@ case "$ARCH" in
     x86_64) ARCH_LABEL="x86_64" ;;
     *)      ARCH_LABEL="$ARCH" ;;
 esac
-ZIP="$BUILD/ClaudeSwitcher-$VERSION-macos-$ARCH_LABEL.zip"
-DMG="$BUILD/ClaudeSwitcher-$VERSION-macos-$ARCH_LABEL.dmg"
+ZIP="$BUILD/ClaudeSwitcher-$VERSION-macos-$ARCH_LABEL-app-only.zip"
+DMG="$BUILD/ClaudeSwitcher-$VERSION-macos-$ARCH_LABEL-app-only.dmg"
 KIT_NAME="ClaudeSwitcher-$VERSION"
 KIT_ZIP="$BUILD/ClaudeSwitcher-$VERSION-installer-kit.zip"
 
@@ -85,13 +85,28 @@ else
     echo "⚠️ ad-hoc 签名失败，继续打包"
 fi
 
-echo "==> 生成 macOS zip"
-ditto -c -k --keepParent --norsrc --noextattr "$APP" "$ZIP"
+NOTE="$WORK/安装说明.txt"
+cat > "$NOTE" <<'NOTE_EOF'
+这是仅包含 macOS 界面 App 的安装包，不含核心脚本与守护进程。
 
-echo "==> 生成 DMG"
+首次使用请下载 installer-kit.zip，解压后双击 installer/安装.command。
+若已安装过核心脚本，可把本 App 拖入「应用程序」覆盖旧版界面。
+
+未安装核心脚本时，App 会提示「还差一步：安装核心脚本」并提供下载入口。
+NOTE_EOF
+
+echo "==> 生成 macOS zip(app-only)"
+APP_STAGE="$WORK/appstage"
+mkdir -p "$APP_STAGE"
+ditto "$APP" "$APP_STAGE/$APP_NAME.app"
+cp "$NOTE" "$APP_STAGE/安装说明.txt"
+ditto -c -k --norsrc --noextattr "$APP_STAGE" "$ZIP"
+
+echo "==> 生成 DMG(app-only)"
 DMG_STAGE="$WORK/dmg"
 mkdir -p "$DMG_STAGE"
 ditto "$APP" "$DMG_STAGE/$APP_NAME.app"
+cp "$NOTE" "$DMG_STAGE/安装说明.txt"
 ln -s /Applications "$DMG_STAGE/Applications"
 hdiutil create -quiet -volname "$APP_NAME" -srcfolder "$DMG_STAGE" \
     -ov -format UDZO "$DMG" >/dev/null

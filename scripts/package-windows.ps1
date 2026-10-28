@@ -274,7 +274,8 @@ function Assert-ClosedArchiveList {
     param([object[]]$Files)
     $allowed = @(
         'windows/claude-switch.ps1', 'windows/SwitcherUI.ps1', 'windows/install.ps1',
-        'windows/claude-bodyguard.ps1', 'windows/README.md', 'README.md', 'LICENSE', 'SECURITY.md'
+        'windows/claude-bodyguard.ps1', 'windows/README.md', 'README.md', 'LICENSE', 'SECURITY.md',
+        'VERSION'
     )
     foreach ($file in $Files) {
         $path = ([string]$file.RelativePath).Replace('\', '/')
@@ -321,7 +322,7 @@ function Copy-ClosedStageFile {
 }
 
 function Get-StagedPayloadPlan {
-    param($Inputs, [string]$RepoRoot, [string]$PublishApp, [string]$PublishAdmin)
+    param($Inputs, [string]$RepoRoot, [string]$PublishApp, [string]$PublishAdmin, [string]$VersionFile)
     $plan = New-Object System.Collections.ArrayList
     foreach ($file in @(Get-ChildItem -LiteralPath $PublishApp -Recurse -File -Force | Sort-Object FullName)) {
         $relative = $file.FullName.Substring($PublishApp.TrimEnd('\', '/').Length).TrimStart('\', '/').Replace('\', '/')
@@ -342,6 +343,7 @@ function Get-StagedPayloadPlan {
         $relative = 'helpers/' + $file.FullName.Substring($Inputs.HelperDirectory.TrimEnd('\', '/').Length).TrimStart('\', '/').Replace('\', '/')
         [void]$plan.Add([pscustomobject]@{ RelativePath = $relative; SourcePath = $file.FullName })
     }
+    [void]$plan.Add([pscustomobject]@{ RelativePath = 'VERSION'; SourcePath = $VersionFile })
     [void]$plan.Add([pscustomobject]@{ RelativePath = 'LICENSE'; SourcePath = $Inputs.Files.License })
     return @($plan | Sort-Object RelativePath)
 }
@@ -462,7 +464,9 @@ function Invoke-WindowsPackage {
             Assert-ProcessSuccess $publishResult "dotnet publish $($publish.Project)"
         }
 
-        $plan = Get-StagedPayloadPlan $inputs $repo $publishApp $publishAdmin
+        $versionFile = Join-Path $publishRoot 'VERSION'
+        [IO.File]::WriteAllText($versionFile, $versionInfo.Version + "`n", (New-Object Text.UTF8Encoding($false)))
+        $plan = Get-StagedPayloadPlan $inputs $repo $publishApp $publishAdmin $versionFile
         foreach ($file in $plan) { Copy-ClosedStageFile $file.SourcePath $stageRoot $file.RelativePath }
         if (-not (Test-Path -LiteralPath (Join-Path $stageRoot 'ClaudeSwitcher.exe') -PathType Leaf)) { throw (New-PackageFailure 'Required published payload is missing: ClaudeSwitcher.exe') }
 
@@ -482,7 +486,8 @@ function Invoke-WindowsPackage {
         }
         if (-not (Test-Path -LiteralPath $setupPath -PathType Leaf)) { throw (New-PackageFailure "Inno Setup did not produce $setupName") }
 
-        $fallbackFiles = Get-PackageFallbackFiles $repo $inputs
+        $fallbackFiles = @(Get-PackageFallbackFiles $repo $inputs)
+        $fallbackFiles += [pscustomobject]@{ RelativePath = 'VERSION'; SourcePath = $versionFile }
         New-PackageZip $zipPath $repo $fallbackFiles
         $gitResult = Invoke-PackageProcess -Runner $ProcessRunner -Spec ([pscustomobject]@{ FilePath = $tools.Git; Arguments = @('rev-parse', 'HEAD'); WorkingDirectory = $repo; TimeoutSeconds = 60 })
         Assert-ProcessSuccess $gitResult 'git rev-parse HEAD'

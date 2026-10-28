@@ -110,6 +110,7 @@ function New-PackageProcessFixture {
         OmitAppExecutable = $OmitAppExecutable
         ProtocolExitCode = $ProtocolExitCode
         StageFiles = @()
+        StageVersion = $null
     }
     $runner = {
         param($Spec)
@@ -178,6 +179,10 @@ function New-PackageProcessFixture {
             $state.StageFiles = @(Get-ChildItem -LiteralPath $stage -Recurse -File | ForEach-Object {
                 $_.FullName.Substring($stage.Length).TrimStart('\', '/').Replace('\', '/')
             } | Sort-Object)
+            $stageVersionPath = Join-Path $stage 'VERSION'
+            if (Test-Path -LiteralPath $stageVersionPath -PathType Leaf) {
+                $state.StageVersion = [IO.File]::ReadAllText($stageVersionPath)
+            }
             $output = $defines['OutputDir']
             New-Item -ItemType Directory -Path $output -Force | Out-Null
             [IO.File]::WriteAllText((Join-Path $output ($defines['OutputBaseFilename'] + '.exe')), 'fake compiled setup')
@@ -218,6 +223,18 @@ function Get-PackageZipEntryNames {
     $zip = [IO.Compression.ZipFile]::OpenRead($Path)
     try { return @($zip.Entries | ForEach-Object { $_.FullName.Replace('\', '/') } | Sort-Object) }
     finally { $zip.Dispose() }
+}
+
+function Get-PackageZipEntryText {
+    param([string]$Path, [string]$Name)
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $zip = [IO.Compression.ZipFile]::OpenRead($Path)
+    try {
+        $entry = $zip.GetEntry($Name)
+        if ($null -eq $entry) { throw "ASSERT: ZIP entry is missing: $Name" }
+        $reader = New-Object IO.StreamReader($entry.Open(), [Text.Encoding]::UTF8)
+        try { return $reader.ReadToEnd() } finally { $reader.Dispose() }
+    } finally { $zip.Dispose() }
 }
 
 Add-CoreTest -Tag Packaging -Name 'production mode rejects the fake process hook before tool discovery' {
@@ -454,9 +471,10 @@ Add-CoreTest -Tag Packaging -Name 'closed fallback zip contains approved scripts
     foreach ($expected in @(
         'windows/claude-switch.ps1', 'windows/SwitcherUI.ps1', 'windows/install.ps1',
         'windows/claude-bodyguard.ps1', 'windows/helpers/bodyguard-template.ps1',
-        'windows/helpers/setup.json', 'windows/README.md', 'README.md', 'LICENSE', 'SECURITY.md'
+        'windows/helpers/setup.json', 'windows/README.md', 'README.md', 'LICENSE', 'SECURITY.md', 'VERSION'
     )) { Assert-PackageContains $names $expected "fallback zip must include $expected" }
-    Assert-Equal 10 $names.Count 'fallback zip has an exact closed file list'
+    Assert-Equal 11 $names.Count 'fallback zip has an exact closed file list'
+    Assert-Equal '1.2.3-beta.1' ((Get-PackageZipEntryText -Path $result.ZipPath -Name 'VERSION').Trim()) 'root VERSION records the package version'
     Assert-False ($names -contains 'windows/ClaudeSwitcher.Admin.Tests/InstallerProtocolTests.ps1') 'protocol tests are not release payload'
     foreach ($name in $names) {
         Assert-False ($name -match '(^|/)(bin|obj|accounts|tests)(/|$)') "archive must not contain private tree: $name"
@@ -498,6 +516,8 @@ Add-CoreTest -Tag Packaging -Name 'ISCC is used only for compilation and never e
     Assert-True ($process.State.StageFiles -contains 'helpers/ClaudeSwitcher.Admin.exe') 'admin helper is installed in the protected helper directory'
     Assert-False ($process.State.StageFiles -contains 'ClaudeSwitcher.Admin/ClaudeSwitcher.Admin.exe') 'runtime files are not placed outside the fixed helper directory'
     Assert-True ($process.State.StageFiles -contains 'helpers/setup.json') 'staged helper payload is compiled into setup'
+    Assert-True ($process.State.StageFiles -contains 'VERSION') 'root VERSION is staged for installer scripts/../VERSION'
+    Assert-Equal '1.2.3-beta.1' ($process.State.StageVersion.Trim()) 'staged root VERSION matches the package version'
     Assert-True ($process.State.StageFiles -contains 'LICENSE') 'project license is staged'
     Assert-False (@($process.State.StageFiles | Where-Object { $_ -match '(^|/)(bin|obj|accounts|tests)(/|$)|(^|/)(last-check\.txt|lastip)$' }).Count -gt 0) 'staging excludes private or generated trees'
 }

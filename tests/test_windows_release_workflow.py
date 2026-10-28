@@ -128,6 +128,9 @@ class WindowsReleaseWorkflowContractTests(unittest.TestCase):
         mac_job = jobs["build-macos-linux"]
         mac_text = job_text(mac_job)
         self.assertIn("scripts/package-macos.sh", mac_text)
+        self.assertIn("ClaudeSwitcher-${VERSION}-macos-${ARCH_LABEL}-app-only.zip", mac_text)
+        self.assertIn("ClaudeSwitcher-${VERSION}-macos-${ARCH_LABEL}-app-only.dmg", mac_text)
+        self.assertNotIn("macos-arm64-app-only", mac_text)
         self.assertIn("-linux.tar.gz", mac_text)
         self.assertNotIn("ClaudeSwitcher-${VERSION}-windows.zip", mac_text)
         self.assertEqual(
@@ -216,7 +219,8 @@ class WindowsReleaseWorkflowContractTests(unittest.TestCase):
         publisher_text = job_text(publisher)
         for asset in (
             "macos-",
-            ".dmg",
+            "-app-only.zip",
+            "-app-only.dmg",
             "installer-kit.zip",
             "linux.tar.gz",
             "-windows-setup.exe",
@@ -252,6 +256,8 @@ class WindowsReleaseWorkflowContractTests(unittest.TestCase):
         self.assertIn("entry.is_symlink()", validation_text)
         self.assertIn('"setup": f"ClaudeSwitcher-{version}-windows-setup.exe"', validation_text)
         self.assertIn('"zip": f"ClaudeSwitcher-{version}-windows.zip"', validation_text)
+        self.assertIn("macos-{os.environ['MACOS_ARCH']}-app-only.zip", validation_text)
+        self.assertIn("macos-{os.environ['MACOS_ARCH']}-app-only.dmg", validation_text)
         self.assertIn("manifest[\"artifacts\"][key][\"name\"] == filename", validation_text)
         self.assertLess(validation_text.index("actual != expected"), validation_text.index("manifest ="))
 

@@ -110,7 +110,7 @@ AI 服务平台的风控已经从"看 IP"进化到**全维度环境画像**：�
 到 [Releases](https://github.com/YOURSJEYO/claude-switcher/releases/latest) 下载最新版本，按用途选择：
 
 - `ClaudeSwitcher-<版本>-installer-kit.zip`：**首次安装推荐**。解压后双击 `installer/安装.command`，安装核心脚本、守护进程与桌面 App。
-- `ClaudeSwitcher-<版本>-macos-arm64.dmg` / `.zip`：仅包含 macOS 界面 App；核心脚本已安装时可用于替换旧版界面。
+- `ClaudeSwitcher-<版本>-macos-<架构>-app-only.dmg` / `.zip`：**仅包含界面 App**（不含核心脚本）；架构由构建主机动态决定。已安装核心脚本时可用于替换旧版界面，首次安装请用上面的 installer-kit。
 - `ClaudeSwitcher-<version>-windows-setup.exe`：**计划中的** Windows x64 Inno Setup 安装包（Development Beta，未签名，.NET 10 self-contained App/Admin）。源码中的 `windows/ClaudeSwitcher.iss`、`windows/helpers/` 和受控安装流程已存在，但本机没有 ISCC，尚未成功编译 Setup EXE；安装/UAC/升级/卸载/保留行为仍待 Windows 10/11 VM acceptance，见 [windows/README.md](windows/README.md)。
 - `ClaudeSwitcher-<version>-windows.zip`：**计划中的** Windows PowerShell 脚本兼容包，不是便携原生 EXE，也不是原生安装器。It is a compatibility UI/CLI package only: it does not contain the protected Admin helper executable and does not install the protected helper; it provides no full install or system-repair parity. Protected system changes require native setup or a separately documented, auditable administrator procedure; never run user-writable scripts elevated. 当前没有 Setup EXE 编译或 Windows 10/11 VM acceptance 证据，不要把它当作完整安装路径或当前已发布的资产。
 - `ClaudeSwitcher-<版本>-linux.tar.gz`：Linux 脚本包（Beta），说明见 [linux/README.md](linux/README.md)。
@@ -128,12 +128,12 @@ git clone https://github.com/YOURSJEYO/claude-switcher.git
 
 ## 地区自适应
 
-不再锁死美国：安装程序按当前出口 IP 的国家自动锁定**目标国家 + 时区 + 地区格式**三件套（出口是 CN 会直接拒装，逼你先挂好代理）。之后换了其他国家的节点，不用重装，一条命令重新适配：
+不再锁死美国：安装程序按当前出口 IP 的国家自动锁定**目标国家 + 时区 + 地区格式**三件套（出口是 CN 会直接拒装，逼你先挂好代理）。地区识别按 ipinfo → ipapi → ifconfig → Cloudflare trace 多源依次探测，单个域名被规则判直连、被墙或限流时会自动换下一个源；全部失败时交互式安装器会列出诊断并让你手动选地区（`FORCE=1` 则强制 US / America/New_York）。之后换了其他国家的节点，不用重装，一条命令重新适配：
 
 ```bash
 ~/.local/bin/claude-switch.sh set-region
 # 自动探测出口国家 → 改写自身配置 → 设地区格式 → 弹一次授权锁时区 → 同步看门狗
-# 输出: OK:region=JP tz=Asia/Tokyo locale=ja_JP
+# 输出: OK:region=JP tz=Asia/Tokyo locale=ja_JP source=ipinfo
 ```
 
 14 项检查里的「出口 IP / 时区 / 地区」全部按新目标判定，界面无需任何改动。
@@ -146,14 +146,14 @@ git clone https://github.com/YOURSJEYO/claude-switcher.git
 
 1. 双击桌面「Claude切换器」→ 等待 14 项检查
 2. 全绿 → 选账号启动；有红项 → 「一键修复」自动处理
-3. B 账号首次使用登录一次，以后 A/B 随切随用、互不干扰
+3. B/C/D 账号首次使用登录一次，以后 A–D 随切随用、互不干扰
 4. 换了其他国家的节点 → 跑一次 `~/.local/bin/claude-switch.sh set-region`，国家/时区/地区格式一键重新锁定
 
 ### macOS 菜单栏常驻
 
 启动后，顶部菜单栏会显示盾牌图标，Dock 不显示应用图标。首次启动自动打开主窗口；关闭窗口或切换账号成功后只隐藏窗口，仍可从盾牌菜单重新打开。
 
-- 菜单显示当前账号和「最近检查」结果（通过 / 有警告 / 失败 / 检查中），提供「打开主窗口」「重新检查」「退出 Claude 切换器」。A/B 切换仍在主窗口完成。
+- 菜单显示当前账号和「最近检查」结果（通过 / 有警告 / 失败 / 检查中），提供「打开主窗口」「重新检查」「退出 Claude 切换器」。A–D 切换仍在主窗口完成。
 - 启动时检查一次；隐藏期间不轮询网络，展开菜单只读取本地账号状态。每次切换账号前会重新完成全部环境检查，检查失败、超时或输出不完整时不会执行切换；警告沿用现有放行规则。
 - 检查、修复、切换和指纹体检期间不会重复执行操作；修复或账号切换期间暂时不能退出。操作结束后可从菜单明确退出。
 - 退出切换器不会卸载或停止独立的保镖、时区看门狗和自动更新服务。应用本身不会因此新增登录自启动。
@@ -161,6 +161,45 @@ git clone https://github.com/YOURSJEYO/claude-switcher.git
 已安装的旧版 GUI 需要重新编译（或重新运行安装器）才会获得菜单栏功能；现有 `update` 命令仅更新核心脚本，不会替换 GUI。
 
 开发者可在 macOS 上运行 `python3 -m unittest discover -s tests -v`，其中菜单栏模型测试使用假核心脚本，不访问真实账号或网络。隔离 UI 验证方法见 [tests/MENU-BAR-TESTING.md](tests/MENU-BAR-TESTING.md)。
+
+## 多账号（A–D）
+
+除 A/B 外，还支持 C、D 两个账号槽位，最多同时保留四份互不干扰的登录态。
+
+- **创建**：在账号卡片里点击「账号 C」或「账号 D」的空槽位即可。首次使用会在 Claude 里看到登录页，登录一次后该槽位自动成为该账号的独立身份。
+- **卡片含义**：
+  - `当前`：切换器正在使用的账号
+  - `已建档 · 1.2G · 10-20`：该槽位已有独立快照，附带快照体积与最后归档日期
+  - `未初始化`：空槽位，点击后创建新身份
+- **快照位置**：`~/.claude-switcher/accounts/<A|B|C|D>/`。切换时当前账号会先归档到对应目录，再把目标账号还原到 `~/Library/Application Support/Claude`；四个目录彼此独立，互不覆盖。
+- **CLI**：`~/.local/bin/claude-switch.sh switch A|B|C|D`。账号参数只接受 A–D，其他值会输出 `FAIL:` 并拒绝切换。
+- **状态**：`claude-switch.sh status` 在原有 `current/hasA/hasB` 字段外新增 `hasC/hasD`、`accounts=A,B,C`（无归档时为 `none`）与 `accA=<大小>@<日期>`；旧版界面仍可读取前两组字段。
+- 加密导出/导入同样支持 C/D：`snapshot-export <A|B|C|D> <file>` / `snapshot-import <file> <A|B|C|D>`。
+
+## 跨身份保留（可选）
+
+默认关闭。切换账号时，每个账号的数据目录整体替换，因此 `settings.json`、`skills/` 这类想沿用的小文件不会自动带过去。需要共享时，创建：
+
+```text
+~/.claude-switcher/keep-in-workspace.txt
+```
+
+每行写一个**相对于 Claude 数据目录**的路径，`#` 开头为注释、空行忽略：
+
+```text
+# 只保留通用设置与自定义技能
+settings.json
+skills/
+```
+
+行为：
+
+- 切换时先把这些路径收进 `~/.claude-switcher/keep-stage/`，归档当前账号、还原目标账号后再合并回去；首次运行收编为账号 A 时同样生效。
+- 路径必须是相对路径，不能包含 `..`，也不能是符号链接；绝对路径、越界路径和符号链接会跳过并在 `~/Library/Logs/claude-switch.log` 记 `WARN`。
+- 文件不存在或为空时，切换行为与未启用该功能完全一致。
+- 暂存或还原失败会中止切换（不会打开 Claude），还原失败时暂存目录会保留供排查；下次重试同一账号会再次尝试合并。若暂存目录已存在，切换到其他账号会拒绝覆盖，避免丢掉唯一副本。
+
+**风险提示**：跨身份保留意味着这些文件会成为多个账号之间的共同特征。不要放登录凭证、Cookie、设备标识、缓存或任何账号专属数据；只共享自己确认无关联风险的内容。默认关闭是有意为之。
 
 ## Web 版环境检测（零安装）
 
@@ -225,6 +264,20 @@ git clone https://github.com/YOURSJEYO/claude-switcher.git
 - 打开前检查代理/TUN 是否就绪，未就绪直接拒绝，避免裸连
 - 只接受 `http/https`；窗口关闭后临时 profile 自动销毁
 - **注意**：该窗口里的登录会话会随窗口关闭一起丢弃；如果链接需要保留登录，请在确认可信后改用日常浏览器
+
+## 更换代理客户端（macOS）
+
+安装时选错了客户端、或后来从 Clash Verge 换到 Shadowrocket 等，可以先更改核心配置；**如果已安装 root 保镖，还必须重新运行安装器同步其模式**（不会由用户态命令直接改写 root 文件）：
+
+```bash
+~/.local/bin/claude-switch.sh set-client shadowrocket
+```
+
+支持 `clash-verge|shadowrocket|sing-box|clashx|surge|auto`。改完重新跑一次 `checkdetail` 即可：
+
+- 换成 Shadowrocket 后，「代理内核」检查 `scutil --nc` 的连接状态，不再去找 Clash Verge
+- 非 Clash 客户端不做配置改写，「规则置顶」改用 fake-ip 行为检测；不通过时按提示在客户端里手动添加 Claude 域名规则
+- 「保镖」现在会核对运行中 LaunchDaemon 与 root 所有的保镖脚本内 `MODE`，不再只看进程是否存在；客户端模式不一致时显示 `fail:客户端不一致`，此时需手动重跑 `installer/安装.command` 同步保镖（需要管理员权限）。`fix` 只能启动缺失的 LaunchDaemon，**不会更新已有 root 脚本内的旧模式**；在重新检查通过前不要启动 Claude。
 
 ## 账号快照加密导出（macOS）
 

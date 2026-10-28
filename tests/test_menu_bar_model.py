@@ -8,7 +8,8 @@ import unittest
 
 PROJECT = Path(__file__).resolve().parents[1]
 SCENARIOS = (
-    "startup_once", "warnings_allowed", "local_status_refresh", "fresh_audit", "failed_check",
+    "startup_once", "multi_account_status", "first_use_cd_note", "legacy_status_fallback",
+    "invalid_multi_account_status", "warnings_allowed", "local_status_refresh", "fresh_audit", "failed_check",
     "incomplete_check", "duplicate_check", "duplicate_overwrite", "empty_check",
     "unknown_check_code", "empty_check_code", "nonzero_check", "timeout_check",
     "invalid_status", "nonzero_status", "switch_note_then_failure", "empty_switch",

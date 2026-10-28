@@ -85,8 +85,8 @@ jobs:
           mkdir -p build/release-macos-linux
           ARCH_LABEL="${{ steps.macos-arch.outputs.arch }}"
           for path in \
-            "build/ClaudeSwitcher-${VERSION}-macos-${ARCH_LABEL}.zip" \
-            "build/ClaudeSwitcher-${VERSION}-macos-${ARCH_LABEL}.dmg" \
+            "build/ClaudeSwitcher-${VERSION}-macos-${ARCH_LABEL}-app-only.zip" \
+            "build/ClaudeSwitcher-${VERSION}-macos-${ARCH_LABEL}-app-only.dmg" \
             "build/ClaudeSwitcher-${VERSION}-installer-kit.zip" \
             "build/ClaudeSwitcher-${VERSION}-linux.tar.gz"; do
             test -f "$path"
@@ -287,8 +287,8 @@ jobs:
               "zip": f"ClaudeSwitcher-{version}-windows.zip",
           }
           expected = {
-              f"ClaudeSwitcher-{version}-macos-{os.environ['MACOS_ARCH']}.zip",
-              f"ClaudeSwitcher-{version}-macos-{os.environ['MACOS_ARCH']}.dmg",
+              f"ClaudeSwitcher-{version}-macos-{os.environ['MACOS_ARCH']}-app-only.zip",
+              f"ClaudeSwitcher-{version}-macos-{os.environ['MACOS_ARCH']}-app-only.dmg",
               f"ClaudeSwitcher-{version}-installer-kit.zip",
               f"ClaudeSwitcher-{version}-linux.tar.gz",
               *windows.values(),
@@ -328,8 +328,8 @@ jobs:
           ARCH_LABEL="${MACOS_ARCH}"
           cd build/release-assets
           sha256sum \
-            "ClaudeSwitcher-${VERSION}-macos-${ARCH_LABEL}.zip" \
-            "ClaudeSwitcher-${VERSION}-macos-${ARCH_LABEL}.dmg" \
+            "ClaudeSwitcher-${VERSION}-macos-${ARCH_LABEL}-app-only.zip" \
+            "ClaudeSwitcher-${VERSION}-macos-${ARCH_LABEL}-app-only.dmg" \
             "ClaudeSwitcher-${VERSION}-installer-kit.zip" \
             "ClaudeSwitcher-${VERSION}-windows-setup.exe" \
             "ClaudeSwitcher-${VERSION}-windows.zip" \

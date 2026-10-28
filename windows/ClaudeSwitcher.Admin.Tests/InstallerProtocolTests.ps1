@@ -9,6 +9,7 @@ if ($taskErrors.Count) { throw 'Installer must parse.' }
 foreach ($taskFunction in $taskAst.FindAll({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] }, $false)) {
     . ([scriptblock]::Create($taskFunction.Extent.Text))
 }
+$script:ActualSetupEgress=(Get-Command Get-SetupEgress).ScriptBlock
 if (-not (Get-Command Invoke-NativeUserSetupFlow -ErrorAction SilentlyContinue)) { throw 'ASSERT: installer must expose an isolated Preview/Apply flow.' }
 $script:TestRoot = Join-Path ([IO.Path]::GetTempPath()) ('switcher-install-flow-' + [guid]::NewGuid().ToString('N'))
 $script:SetupSourceDirectory = Join-Path $script:TestRoot 'templates'
@@ -21,6 +22,7 @@ $script:SetupOwnedTasks = @()
 $script:OpenedSetupApp = $null
 function Get-SetupIdentity { [pscustomobject]@{ Sid='S-1-5-21-1-2-3-1001'; SessionId=1; Elevated=$script:ElevatedIdentity } }
 function Get-SetupEgress { [pscustomobject]@{ Country=$script:ObservedCountry; TimeZoneId='Tokyo Standard Time'; Culture='ja-JP' } }
+function Invoke-WebRequest { param($Uri,$Headers,$TimeoutSec,[switch]$UseBasicParsing,$ErrorAction) throw 'synthetic service unavailable' }
 function Get-SetupProtectedPayload {
     if (-not $script:ProtectedPayloadAvailable) { return $null }
     [pscustomobject]@{ Helper='C:\synthetic\ClaudeSwitcher.Admin.exe'; App='C:\synthetic\ClaudeSwitcher.exe' }
@@ -188,6 +190,61 @@ try {
         Assert-Flow ($initialize -notmatch '(?i)remove-bodyguard-task|-RemoveUserTask|DeleteFile|DelTree') 'uninstall refusal must not mutate tasks or files'
         Assert-Flow (-not ($script:InnoTemplate -match '(?im)^\s*\[Uninstall(?:Run|Delete)\]')) 'uninstaller must not declare deletion or run stages'
         Assert-Flow (-not ($script:InnoTemplate -match '(?i)operation-lease|OperationLease\.ps1')) 'development Beta must not advertise an unimplemented lease'
+    }
+    Test-Flow 'region preview falls back to a second source without exposing raw response fields' {
+        $script:GeoCalls=0
+        function Invoke-RestMethod {
+            param($Uri,$Headers,$TimeoutSec,$ErrorAction)
+            $script:GeoCalls++
+            if ($Uri -eq 'https://ipinfo.io/json') { throw 'synthetic service unavailable' }
+            [pscustomobject]@{country_code='JP';timezone='Asia/Tokyo';ip='203.0.113.7'}
+        }
+        $region=& $script:ActualSetupEgress
+        Assert-Flow ($script:GeoCalls -eq 3) 'all JSON sources must be checked even after a fallback succeeds'
+        Assert-Flow ($region.Country -ceq 'JP' -and $region.TimeZoneId -ceq 'Tokyo Standard Time' -and $region.Culture -ceq 'ja-JP') 'secondary source must map validated region scalars'
+        Assert-Flow (@($region.PSObject.Properties).Count -eq 3) 'IP and raw service response must not leave the region function'
+    }
+    Test-Flow 'region preview uses Cloudflare only with a known country default' {
+        function Invoke-RestMethod { param($Uri,$Headers,$TimeoutSec,$ErrorAction) throw 'synthetic unavailable' }
+        function Invoke-WebRequest { param($Uri,$Headers,$TimeoutSec,[switch]$UseBasicParsing,$ErrorAction) [pscustomobject]@{Content="loc=JP`nip=203.0.113.7`n"} }
+        $region=& $script:ActualSetupEgress
+        Assert-Flow ($region.Country -ceq 'JP' -and $region.TimeZoneId -ceq 'Tokyo Standard Time') 'Cloudflare country must use its own known time zone'
+    }
+    Test-Flow 'region preview never replaces a CN observation with a fallback region' {
+        function Invoke-RestMethod { param($Uri,$Headers,$TimeoutSec,$ErrorAction) [pscustomobject]@{country='CN';timezone='Asia/Shanghai'} }
+        $rejected=$false
+        try { $null=& $script:ActualSetupEgress } catch { $rejected=$true }
+        Assert-Flow $rejected 'CN must be rejected before a fallback can authorize a different region'
+    }
+    Test-Flow 'region preview rejects a later CN observation after an otherwise valid primary source' {
+        function Invoke-RestMethod {
+            param($Uri,$Headers,$TimeoutSec,$ErrorAction)
+            if ($Uri -eq 'https://ipinfo.io/json') { return [pscustomobject]@{country='US';timezone='America/New_York'} }
+            [pscustomobject]@{country_code='CN';timezone='Asia/Shanghai'}
+        }
+        $rejected=$false
+        try { $null=& $script:ActualSetupEgress } catch { $rejected=$true }
+        Assert-Flow $rejected 'a later CN observation must not be ignored'
+    }
+    Test-Flow 'region preview uses a later valid time zone when the primary time zone is unmapped' {
+        function Invoke-RestMethod {
+            param($Uri,$Headers,$TimeoutSec,$ErrorAction)
+            if ($Uri -eq 'https://ipinfo.io/json') { return [pscustomobject]@{country='JP';timezone='Not/A_Zone'} }
+            [pscustomobject]@{country_code='JP';timezone='Asia/Tokyo'}
+        }
+        $region=$null
+        try { $region=& $script:ActualSetupEgress } catch {}
+        Assert-Flow ($null -ne $region -and $region.TimeZoneId -ceq 'Tokyo Standard Time') 'later valid mapping must remain usable'
+    }
+    Test-Flow 'region preview rejects conflicting non-CN countries before applying settings' {
+        function Invoke-RestMethod {
+            param($Uri,$Headers,$TimeoutSec,$ErrorAction)
+            if ($Uri -eq 'https://ipinfo.io/json') { return [pscustomobject]@{country='JP';timezone='Asia/Tokyo'} }
+            [pscustomobject]@{country_code='US';timezone='America/New_York'}
+        }
+        $rejected=$false
+        try { $null=& $script:ActualSetupEgress } catch { $rejected=$true }
+        Assert-Flow $rejected 'conflicting regions require a fresh consistent preview'
     }
     Write-Host ('RESULT total={0} passed={0} failed=0' -f $script:Passed)
 } finally {
