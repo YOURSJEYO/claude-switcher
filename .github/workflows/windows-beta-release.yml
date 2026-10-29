@@ -68,8 +68,24 @@ jobs:
           if ($process.ExitCode -ne 0) { throw "Inno Setup installer exited $($process.ExitCode)" }
           $iscc = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'
           if (-not (Test-Path -LiteralPath $iscc -PathType Leaf)) { throw 'ISCC.exe was not installed.' }
-          $reported = (& $iscc /? 2>&1 | Out-String)
-          if ($reported -notmatch '6\.7\.3') { throw 'Inno Setup 6.7.3 was not installed.' }
+          # ISCC 6 /? prints only the major version and exits 1. Probe the engine instead.
+          $probe = Join-Path $env:RUNNER_TEMP 'inno-compiler-probe.iss'
+          @(
+            '[Setup]'
+            'AppName=ClaudeSwitcherCompilerProbe'
+            'AppVersion=0.0.0'
+            'DefaultDirName={tmp}\ClaudeSwitcherCompilerProbe'
+            'Uninstallable=no'
+            'Output=no'
+          ) | Set-Content -LiteralPath $probe -Encoding ascii
+          $probeOutput = @(& $iscc '/O-' $probe 2>&1)
+          $probeExitCode = $LASTEXITCODE
+          $reported = $probeOutput | Out-String
+          Write-Host $reported
+          if ($probeExitCode -ne 0) { throw "Inno Setup compiler probe failed with exit code $probeExitCode." }
+          if ($reported -notmatch '(?m)^Compiler engine version: Inno Setup 6\.7\.3(?:\s|$)') {
+            throw "Expected Inno Setup 6.7.3; actual compiler output: $reported"
+          }
 
       - name: Package Windows x64
         shell: powershell

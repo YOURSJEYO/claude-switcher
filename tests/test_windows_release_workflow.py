@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import re
+import shutil
+import subprocess
+import sys
+import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
@@ -55,7 +59,95 @@ def job_permissions(job: dict[str, Any]) -> dict[str, str]:
     return permissions if isinstance(permissions, dict) else {}
 
 
+def inno_version_verification(relative_path: str) -> str:
+    _, workflow = load_yaml(relative_path)
+    steps = [
+        step
+        for job in workflow["jobs"].values()
+        for step in job_steps(job)
+        if step.get("name") == "Set up Inno Setup 6.7.3"
+    ]
+    if len(steps) != 1:
+        raise AssertionError(f"expected one Inno Setup step in {relative_path}")
+    lines = steps[0]["run"].splitlines()
+    start = next(index for index, line in enumerate(lines) if line.startswith("$iscc = "))
+    return "\n".join(lines[start + 1 :])
+
+
+INNO_WORKFLOWS = (
+    ".github/workflows/checks.yml",
+    ".github/workflows/release.yml",
+    ".github/workflows/windows-beta-release.yml",
+)
+
+
 class WindowsReleaseWorkflowContractTests(unittest.TestCase):
+    def test_inno_version_check_compiles_without_output_instead_of_parsing_help(self) -> None:
+        for workflow_path in INNO_WORKFLOWS:
+            with self.subTest(workflow=workflow_path):
+                verification = inno_version_verification(workflow_path)
+                self.assertNotRegex(verification, r"&\s*\$iscc\s+/\?", "ISCC 6 help contains no patch version and exits 1")
+                self.assertIn("/O-", verification)
+                self.assertIn("Uninstallable=no", verification)
+                self.assertIn("Output=no", verification)
+                self.assertIn("$LASTEXITCODE", verification)
+                self.assertIn("Compiler engine version: Inno Setup", verification)
+
+    @unittest.skipUnless(sys.platform == "win32", "PowerShell process regression requires Windows")
+    def test_inno_version_check_executes_exact_workflow_logic_against_compiler_results(self) -> None:
+        hosts = [path for name in ("powershell.exe", "pwsh.exe") if (path := shutil.which(name))]
+        self.assertTrue(hosts, "at least one PowerShell host must be available on Windows")
+        fixture = r'''param([string]$Mode, [string]$ProbePath)
+if ($Mode -eq '/?') {
+    'Inno Setup 6 Command-Line Compiler'
+    'Usage: iscc [options] scriptfile.iss'
+    exit 1
+}
+if ($Mode -ne '/O-' -or -not (Test-Path -LiteralPath $ProbePath -PathType Leaf)) { exit 2 }
+$probe = [IO.File]::ReadAllText($ProbePath)
+foreach ($required in @('[Setup]', 'AppName=', 'AppVersion=', 'DefaultDirName=', 'Uninstallable=no', 'Output=no')) {
+    if (-not $probe.Contains($required)) { exit 2 }
+}
+__BANNER__
+exit __EXIT_CODE__
+'''
+        scenarios = (
+            ("valid", "'Compiler engine version: Inno Setup 6.7.3'", 0, True),
+            ("wrong-version", "'Compiler engine version: Inno Setup 6.7.2'", 0, False),
+            ("version-prefix", "'Compiler engine version: Inno Setup 6.7.30'", 0, False),
+            ("failed-compile", "'Compiler engine version: Inno Setup 6.7.3'", 2, False),
+            ("help-only", "'Inno Setup 6 Command-Line Compiler'", 0, False),
+        )
+        for workflow_path in INNO_WORKFLOWS:
+            verification = inno_version_verification(workflow_path)
+            for host in hosts:
+                for name, banner, exit_code, expected_success in scenarios:
+                    with self.subTest(workflow=workflow_path, host=host, scenario=name):
+                        with tempfile.TemporaryDirectory(prefix="inno-version-test-") as temporary:
+                            root = Path(temporary)
+                            compiler = root / "fake-iscc.ps1"
+                            compiler.write_text(
+                                fixture.replace("__BANNER__", banner).replace("__EXIT_CODE__", str(exit_code)),
+                                encoding="utf-8-sig",
+                            )
+                            runner = root / "verify.ps1"
+                            runner.write_text(
+                                "param([string]$iscc, [string]$RunTemp)\n"
+                                "$ErrorActionPreference = 'Stop'\n"
+                                "$env:RUNNER_TEMP = $RunTemp\n" + verification + "\n",
+                                encoding="utf-8-sig",
+                            )
+                            result = subprocess.run(
+                                [host, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(runner), str(compiler), str(root)],
+                                text=True, encoding="utf-8", errors="replace", capture_output=True, timeout=30,
+                            )
+                            self.assertEqual(
+                                result.returncode == 0,
+                                expected_success,
+                                (result.stdout + result.stderr)[-1800:],
+                            )
+                            self.assertFalse(list(root.rglob("*.exe")), "compiler probe must not emit or execute a Setup EXE")
+
     def test_windows_beta_release_builds_user_downloadable_setup_without_vm_gate(self) -> None:
         text, workflow = load_yaml(".github/workflows/windows-beta-release.yml")
         trigger_value = trigger(workflow)
