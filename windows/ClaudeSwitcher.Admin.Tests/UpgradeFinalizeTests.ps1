@@ -9,6 +9,7 @@ $script:Passed = 0
 $script:Failed = 0
 $script:PayloadCalls = 0
 $script:FakePayload = $null
+$script:TestElevatedIdentity = $false
 $script:TemplateNames = @('claude-switch.ps1', 'SwitcherUI.ps1', 'claude-bodyguard.ps1')
 $script:SnapshotNames = @($script:TemplateNames + 'version.txt')
 
@@ -25,6 +26,15 @@ function Assert-TestEqual([object]$Expected, [object]$Actual, [string]$Message) 
 function Get-SetupProtectedPayload {
     $script:PayloadCalls++
     return $script:FakePayload
+}
+
+function Get-SetupIdentity {
+    # The runner may itself be elevated. Simulate the requested caller role
+    # while retaining the real test process identity used by the isolated lease.
+    $identity=[Security.Principal.WindowsIdentity]::GetCurrent()
+    try {
+        [pscustomobject]@{Sid=$identity.User.Value;SessionId=[Diagnostics.Process]::GetCurrentProcess().SessionId;Elevated=$script:TestElevatedIdentity}
+    } finally {$identity.Dispose()}
 }
 
 function New-TestWorkspace {
@@ -96,6 +106,7 @@ function Invoke-IsolatedTest {
         $env:TMP = Join-Path $root 'Temp'
         $script:PayloadCalls = 0
         $script:FakePayload = $null
+        $script:TestElevatedIdentity = $false
         & $Body $root
         $script:Passed++
         Write-Host ('PASS ' + $Name)
@@ -154,6 +165,20 @@ Invoke-IsolatedTest 'finalize requires a snapshot prepared for the same operatio
     } finally {
         Close-TestOperation $operation
     }
+}
+
+Invoke-IsolatedTest 'finalize rejects an elevated caller before updating templates' {
+    param($root)
+    $fixture=New-TestFixture $root
+    $operation=Enter-UserSetupOperation -BasePath $fixture.Base
+    Assert-Test $operation.Success $operation.Error
+    try {
+        $script:TestElevatedIdentity=$true
+        $result=Invoke-NativeUpgradeFinalize -BasePath $fixture.Base -Operation $operation
+        Assert-Test (-not $result.Result.success) 'an elevated caller must be refused'
+        Assert-TestEqual 'normal_user_required' $result.Result.code 'role refusal is explicit'
+        Assert-TestEqual 'old-claude-switch.ps1' ([IO.File]::ReadAllText((Join-Path $fixture.Base 'claude-switch.ps1'))) 'templates remain unchanged'
+    } finally {Close-TestOperation $operation}
 }
 
 Invoke-IsolatedTest 'finalize validates protected scripts source and preserves user data' {
