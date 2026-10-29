@@ -299,6 +299,34 @@ function Restore-InstallerRegistrySnapshot {
     }
 }
 
+function New-InstallerRegistryRestoreSecurity {
+    # Recreate only this product's registration with a protected DACL. Do not
+    # reintroduce inherited Terminal Server Users mutation rights on rollback.
+    $security=[Security.AccessControl.RegistrySecurity]::new()
+    $security.SetSecurityDescriptorSddlForm('O:BAG:BAD:P(A;CI;KA;;;BA)(A;CI;KA;;;SY)(A;CI;KR;;;BU)')
+    return $security
+}
+
+function Assert-InstallerRegistryCommands {
+    param([Parameter(Mandatory=$true)][object]$Snapshot)
+    $metadata=ConvertFrom-InstallerRegistrySnapshot $Snapshot
+    if(-not $metadata.Existed){return}
+    $root=Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles)) 'ClaudeSwitcher'
+    $powerShell=Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::System)) 'WindowsPowerShell\v1.0\powershell.exe'
+    $native='"'+(Join-Path $root 'unins000.exe')+'"'
+    $broker='"'+$powerShell+'" -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "'+(Join-Path $root 'helpers\InstallerMaintenance.ps1')+'" -Mode LaunchUninstall'
+    $values=@{}
+    foreach($value in $metadata.Values){$values[$value.Name]=$value}
+    if(-not $values.ContainsKey('UninstallString') -or $values.UninstallString.Kind -ne [Microsoft.Win32.RegistryValueKind]::String -or ($values.UninstallString.Value -ine $native -and $values.UninstallString.Value -ine $broker)){
+        throw 'Registration command does not match the fixed product contract.'
+    }
+    if($values.ContainsKey('QuietUninstallString')) {
+        $quiet=if($values.UninstallString.Value -ieq $native){$native+' /SILENT'}else{$broker+' -Quiet'}
+        if($values.QuietUninstallString.Kind -ne [Microsoft.Win32.RegistryValueKind]::String -or $values.QuietUninstallString.Value -ine $quiet){throw 'Quiet registration command does not match the fixed product contract.'}
+    }
+    foreach($name in @('ModifyPath','RepairPath')){if($values.ContainsKey($name)){throw 'Unexpected executable registration metadata.'}}
+}
+
 function Assert-InstallerRegistrySecurity {
     param([Parameter(Mandatory=$true)][Security.AccessControl.RegistrySecurity]$Security,[switch]$SnapshotOnly)
     $trusted = @('S-1-5-18','S-1-5-32-544','S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464')
@@ -313,7 +341,7 @@ function Assert-InstallerRegistrySecurity {
         if ($rule.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and $trusted -notcontains $rule.IdentityReference.Value) {
             $bits=[BitConverter]::ToUInt32([BitConverter]::GetBytes([int]$rule.RegistryRights),0)
             if (($bits -band [uint32]$writeMask) -ne 0 -or ($bits -band [uint32]0x50000000) -ne 0) {
-                if($SnapshotOnly -and $rule.IdentityReference.Value -eq $snapshotCompatibilitySid){continue}
+                if($SnapshotOnly -and $rule.IsInherited -and $rule.IdentityReference.Value -eq $snapshotCompatibilitySid -and ($bits -bor [uint32]0x3001f) -eq [uint32]0x3001f){continue}
                 throw 'Registry key is user writable.'
             }
         }
@@ -388,7 +416,12 @@ function New-InstallerRealRegistryAdapter {
             $parentRelative = Split-Path -Parent $relative
             $parent = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($parentRelative,$true)
             if ($null -eq $parent) { throw 'Registry parent key is unavailable.' }
-            try { $key = $parent.CreateSubKey($leaf); if ($null -eq $key) { throw 'Registry key could not be created.' }; $key.Dispose() } finally { $parent.Dispose() }
+            try {
+                $security=New-InstallerRegistryRestoreSecurity
+                $key=$parent.CreateSubKey($leaf,[Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree,$security)
+                if($null -eq $key){throw 'Registry key could not be created.'}
+                try { Assert-InstallerRegistrySecurity -Security ($key.GetAccessControl()) } finally {$key.Dispose()}
+            } finally { $parent.Dispose() }
         }
         SetValue = {
             param([string]$Path,[string]$Name,$Kind,$Value)
@@ -398,7 +431,7 @@ function New-InstallerRealRegistryAdapter {
             if ($null -eq $key) { throw 'Registry key is unavailable.' }
             try { $key.SetValue($Name,$Value,[Microsoft.Win32.RegistryValueKind]$Kind) } finally { $key.Dispose() }
         }
-        AssertProtected = { param([string]$Path) Assert-InstallerRegistryProtected $Path }
+        AssertProtected = { param([string]$Path) Assert-InstallerRegistryProtected $Path -SnapshotOnly }
     }
 }
 function Invoke-InstallerPayloadOperation {
@@ -425,6 +458,7 @@ function Invoke-InstallerPayloadOperation {
         $script:InstallerPayloadFailureCode=20 # registry snapshot/ACL
         if ($null -eq $RegistryAdapter) { $RegistryAdapter = New-InstallerRealRegistryAdapter }
         $registrySnapshot = Get-InstallerRegistrySnapshot -Path $registryPath -RegistryAdapter $RegistryAdapter
+        Assert-InstallerRegistryCommands -Snapshot $registrySnapshot
         $script:InstallerPayloadFailureCode=21 # protected backup directory
         [void][IO.Directory]::CreateDirectory($backup)
         Assert-InstallerProtectedPath $backup $programFiles
@@ -452,6 +486,7 @@ function Invoke-InstallerPayloadOperation {
     if ($record.schemaVersion -ne 1 -or -not (Test-InstallerPayloadManifest $payload @($record.files))) { throw 'Rollback receipt could not be verified.' }
     # Validate the registry receipt before touching the installed payload.
     $null = ConvertFrom-InstallerRegistrySnapshot $record.registry
+    Assert-InstallerRegistryCommands -Snapshot $record.registry
     if($Mode -eq 'Verify'){return}
     $script:InstallerPayloadFailureCode=31 # restore original program files
     if (Test-Path -LiteralPath $root) {

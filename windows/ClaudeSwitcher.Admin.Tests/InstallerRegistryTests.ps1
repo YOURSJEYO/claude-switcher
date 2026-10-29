@@ -154,16 +154,54 @@ try {
         Assert-Throws {Get-InstallerRegistrySnapshot -Path $script:RegistryPath -RegistryAdapter $adapter} 'a writable key must still fail before backup'
         Assert-Equal 0 $script:Mutations.Count 'rejected snapshot must not change the registry'
     }
-    Run-Test 'Terminal Server Users mutation grant is allowed for read-only metadata snapshot only' {
-        $security=New-TestRegistrySecurity -Rights SetValue -Identity 'S-1-5-13'
+    Run-Test 'only the inherited legacy Terminal Server Users profile permits a metadata snapshot' {
+        $security=[Security.AccessControl.RegistrySecurity]::new()
+        $security.SetSecurityDescriptorSddlForm('O:BAG:BAD:AI(A;ID;0x3001f;;;S-1-5-13)(A;ID;KR;;;BU)(A;ID;KA;;;BA)(A;ID;KA;;;SY)')
         Assert-Throws {Assert-InstallerRegistrySecurity -Security $security} 'strict restore policy must reject the legacy mutation grant'
         Assert-InstallerRegistrySecurity -Security $security -SnapshotOnly
     }
-    Run-Test 'the host uninstall key can be read when it exists, without mutation' {
-        $adapter=New-InstallerRealRegistryAdapter
-        $snapshot=Get-InstallerRegistrySnapshot -Path $script:RegistryPath -RegistryAdapter $adapter
-        if($snapshot.existed){Assert-True (@($snapshot.values).Count -gt 0) 'existing uninstall metadata must be readable'}
-        Assert-Equal 0 $script:Mutations.Count 'real snapshot is read-only'
+    Run-Test 'explicit or excessive Terminal Server Users grants never enter the compatibility profile' {
+        foreach($rights in @('SetValue','ChangePermissions','TakeOwnership','FullControl')) {
+            $security=New-TestRegistrySecurity -Rights $rights -Identity 'S-1-5-13'
+            Assert-Throws {Assert-InstallerRegistrySecurity -Security $security -SnapshotOnly} ('explicit grant must be rejected: '+$rights)
+        }
+        $security=[Security.AccessControl.RegistrySecurity]::new()
+        $security.SetSecurityDescriptorSddlForm('O:BAG:BAD:AI(A;ID;GA;;;S-1-5-13)')
+        Assert-Throws {Assert-InstallerRegistrySecurity -Security $security -SnapshotOnly} 'inherited generic-all must still be rejected'
+    }
+    Run-Test 'rollback registration gets a protected ACL without legacy writers' {
+        $security=New-InstallerRegistryRestoreSecurity
+        Assert-InstallerRegistrySecurity -Security $security
+        Assert-True $security.AreAccessRulesProtected 'restored key must not inherit a legacy parent mutation grant'
+        $writers=@($security.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])|Where-Object {$_.IdentityReference.Value -eq 'S-1-5-13'})
+        Assert-Equal 0 $writers.Count 'legacy writers must not be recreated'
+    }
+    Run-Test 'backup registration commands are validated as fixed product metadata' {
+        $root=Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles)) 'ClaudeSwitcher'
+        $native='"'+(Join-Path $root 'unins000.exe')+'"'
+        $snapshot=[pscustomobject]@{schemaVersion=1;path=$script:RegistryPath;existed=$true;descendants=@();values=@(
+            [pscustomobject]@{name='UninstallString';kind='String';encoding='string';data=$native},
+            [pscustomobject]@{name='QuietUninstallString';kind='String';encoding='string';data=($native+' /SILENT')})}
+        Assert-InstallerRegistryCommands -Snapshot $snapshot
+        $snapshot.values[0].data='powershell.exe -Command malicious'
+        Assert-Throws {Assert-InstallerRegistryCommands -Snapshot $snapshot} 'registry content cannot select another executable'
+        $snapshot.values[0].data=$native
+        $snapshot.values[1].data='cmd.exe /c arbitrary'
+        Assert-Throws {Assert-InstallerRegistryCommands -Snapshot $snapshot} 'quiet uninstall cannot select another command'
+        $powerShell=Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::System)) 'WindowsPowerShell\v1.0\powershell.exe'
+        $broker='"'+$powerShell+'" -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "'+(Join-Path $root 'helpers\InstallerMaintenance.ps1')+'" -Mode LaunchUninstall'
+        $snapshot.values[0].data=$broker
+        $snapshot.values[1].data=$broker+' -Quiet'
+        Assert-InstallerRegistryCommands -Snapshot $snapshot
+        $snapshot.values[0].kind='ExpandString'
+        $snapshot.values[0].encoding='string'
+        Assert-Throws {Assert-InstallerRegistryCommands -Snapshot $snapshot} 'environment-expanded commands cannot select an executable'
+    }
+    Run-Test 'snapshot compatibility does not accept another writer or untrusted owner' {
+        $security=New-TestRegistrySecurity -Rights SetValue
+        Assert-Throws {Assert-InstallerRegistrySecurity -Security $security -SnapshotOnly} 'ordinary Users write access must still fail'
+        $security=New-TestRegistrySecurity -Owner 'S-1-5-21-1-2-3-1001'
+        Assert-Throws {Assert-InstallerRegistrySecurity -Security $security -SnapshotOnly} 'owner validation must apply to snapshots'
     }
     Run-Test 'absent key restore deletes a newly-created key' {
         $adapter = New-MockRegistryAdapter
