@@ -112,6 +112,7 @@ AI 服务平台的风控已经从"看 IP"进化到**全维度环境画像**：�
 - `ClaudeSwitcher-<版本>-installer-kit.zip`：**首次安装推荐**。解压后双击 `installer/安装.command`，安装核心脚本、守护进程与桌面 App。
 - `ClaudeSwitcher-<版本>-macos-<架构>-app-only.dmg` / `.zip`：**仅包含界面 App**（不含核心脚本）；架构由构建主机动态决定。已安装核心脚本时可用于替换旧版界面，首次安装请用上面的 installer-kit。
 - `ClaudeSwitcher-<version>-windows-setup.exe`：**计划中的** Windows x64 Inno Setup 安装包（Development Beta，未签名，.NET 10 self-contained App/Admin）。源码中的 `windows/ClaudeSwitcher.iss`、`windows/helpers/` 和受控安装流程已存在，但本机没有 ISCC，尚未成功编译 Setup EXE；安装/UAC/升级/卸载/保留行为仍待 Windows 10/11 VM acceptance，见 [windows/README.md](windows/README.md)。
+- Windows 新装 Beta 可通过推送 `win-v<版本>` 标签触发 `.github/workflows/windows-beta-release.yml`，生成 GitHub prerelease 的 Setup EXE、兼容 ZIP、manifest 和 SHA256 清单。该路径只覆盖首次安装，不代表升级、卸载、签名或 Windows 10/11 VM 验收已经完成。
 - `ClaudeSwitcher-<version>-windows.zip`：**计划中的** Windows PowerShell 脚本兼容包，不是便携原生 EXE，也不是原生安装器。It is a compatibility UI/CLI package only: it does not contain the protected Admin helper executable and does not install the protected helper; it provides no full install or system-repair parity. Protected system changes require native setup or a separately documented, auditable administrator procedure; never run user-writable scripts elevated. 当前没有 Setup EXE 编译或 Windows 10/11 VM acceptance 证据，不要把它当作完整安装路径或当前已发布的资产。
 - `ClaudeSwitcher-<版本>-linux.tar.gz`：Linux 脚本包（Beta），说明见 [linux/README.md](linux/README.md)。
 

@@ -56,6 +56,38 @@ def job_permissions(job: dict[str, Any]) -> dict[str, str]:
 
 
 class WindowsReleaseWorkflowContractTests(unittest.TestCase):
+    def test_windows_beta_release_builds_user_downloadable_setup_without_vm_gate(self) -> None:
+        text, workflow = load_yaml(".github/workflows/windows-beta-release.yml")
+        trigger_value = trigger(workflow)
+        self.assertIsInstance(trigger_value, dict)
+        self.assertIn("workflow_dispatch", trigger_value)
+        self.assertIn("push", trigger_value)
+        self.assertIn("tags", trigger_value["push"])
+        self.assertIn("win-v*", trigger_value["push"]["tags"])
+
+        jobs = workflow.get("jobs", {})
+        self.assertEqual(set(jobs), {"build"})
+        build = jobs["build"]
+        self.assertEqual(build.get("runs-on"), "windows-2022")
+        self.assertEqual(workflow.get("permissions"), {"contents": "write"})
+        build_text = job_text(build)
+        for required in (
+            "actions/setup-dotnet@v4",
+            "10.0.403",
+            "innosetup-6.7.3.exe",
+            "Get-AuthenticodeSignature",
+            "scripts/package-windows.ps1",
+            "ClaudeSwitcher-$env:VERSION-windows-setup.exe",
+            "ClaudeSwitcher-$env:VERSION-windows.zip",
+            "manifest.json",
+            "SHA256SUMS-release.txt",
+            "gh release create",
+            "--prerelease",
+        ):
+            self.assertIn(required, build_text)
+        self.assertNotIn("WINDOWS_VM_REPORT_HMAC_KEY", build_text)
+        self.assertNotIn("windows-vm-acceptance", build_text)
+
     def test_checks_are_read_only_and_preserve_existing_macos_coverage(self) -> None:
         _, workflow = load_yaml(".github/workflows/checks.yml")
         self.assertEqual(workflow.get("permissions"), {"contents": "read"})

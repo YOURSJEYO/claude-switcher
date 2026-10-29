@@ -160,4 +160,6 @@ powershell.exe -NoProfile -File scripts/package-windows.ps1 `
 
 ## 发布门槛
 
+如果只需要给用户提供一个可新装使用的 Windows Beta，可推送 `win-v<版本>` 标签触发 `.github/workflows/windows-beta-release.yml`。工作流在 Windows 2022 runner 上使用 .NET 10.0.403 和 Inno Setup 6.7.3 构建 `ClaudeSwitcher-<版本>-windows-setup.exe`，并创建 GitHub prerelease；发布资产包含 Setup EXE、兼容 ZIP、manifest 和 SHA256 清单。该 Beta 路径只覆盖首次安装，升级、卸载、Windows 10/11 VM 验收和代码签名仍不属于已验证范围。
+
 发布工作流分别构建 macOS/Linux 与 Windows x64 工件，只有单一聚合发布任务能写入 Release。该任务设计为同时取得全部平台工件，并由受保护环境中的 `WINDOWS_VM_REPORT_HMAC_KEY` 验证外部产生的签名 VM 验收报告。报告必须精确绑定当前 commit、版本和 Setup EXE 的 SHA256；缺失、签名错误、哈希不符或任一平台工件缺失都会阻止发布。托管 runner 的构建结果不构成 VM 验收。当前 Setup EXE 编译和 Windows 10/11 VM acceptance 证据均缺失，因此没有 Windows release readiness。

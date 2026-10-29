@@ -1,0 +1,124 @@
+name: Windows native beta release
+
+on:
+  push:
+    tags:
+      - "win-v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "SemVer version without the win-v prefix"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: windows-beta-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build Windows x64 beta installer
+    runs-on: windows-2022
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve beta version
+        shell: pwsh
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch') {
+            $version = [string]$env:INPUT_VERSION
+            $tag = "win-v$version"
+          } else {
+            $tag = [string]$env:GITHUB_REF_NAME
+            $version = $tag -replace '^win-v', ''
+          }
+          if ($version -notmatch '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z]+(?:\.[0-9A-Za-z]+)*)?$') {
+            throw "Beta version must be SemVer x.y.z[-suffix]: $version"
+          }
+          "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "BETA_TAG=$tag" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Set up .NET SDK 10.0.403
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.403
+          dotnet-quality: ga
+
+      - name: Set up Inno Setup 6.7.3
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installer = Join-Path $env:RUNNER_TEMP 'innosetup-6.7.3.exe'
+          Invoke-WebRequest -Uri 'https://files.jrsoftware.org/is/6/innosetup-6.7.3.exe' -OutFile $installer
+          $signature = Get-AuthenticodeSignature -LiteralPath $installer
+          if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'Jordan Russell|Pyrsys') {
+            throw "Inno Setup installer signature validation failed: $($signature.Status)"
+          }
+          $process = Start-Process -FilePath $installer -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-' -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "Inno Setup installer exited $($process.ExitCode)" }
+          $iscc = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'
+          if (-not (Test-Path -LiteralPath $iscc -PathType Leaf)) { throw 'ISCC.exe was not installed.' }
+          $reported = (& $iscc /? 2>&1 | Out-String)
+          if ($reported -notmatch '6\.7\.3') { throw 'Inno Setup 6.7.3 was not installed.' }
+
+      - name: Package Windows x64
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $output = Join-Path $env:RUNNER_TEMP 'windows-package'
+          powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/package-windows.ps1 -Version $env:VERSION -OutputDirectory $output
+          if ($LASTEXITCODE -ne 0) { throw "Windows packaging failed with exit code $LASTEXITCODE" }
+          $versionRoot = Join-Path $output $env:VERSION
+          $setup = Join-Path $versionRoot "ClaudeSwitcher-$env:VERSION-windows-setup.exe"
+          $zip = Join-Path $versionRoot "ClaudeSwitcher-$env:VERSION-windows.zip"
+          $manifestPath = Join-Path $versionRoot 'manifest.json'
+          foreach ($path in @($setup, $zip, $manifestPath)) {
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Missing package artifact: $path" }
+          }
+          $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+          if ($manifest.product -ne 'ClaudeSwitcher' -or $manifest.version -ne $env:VERSION -or $manifest.runtime -ne 'win-x64') { throw 'Package manifest mismatch.' }
+          if ($manifest.sourceCommit -ne '${{ github.sha }}') { throw 'Package manifest commit mismatch.' }
+          foreach ($entry in @($manifest.artifacts.setup, $manifest.artifacts.zip)) {
+            $artifact = Join-Path $versionRoot $entry.name
+            $actual = (Get-FileHash -LiteralPath $artifact -Algorithm SHA256).Hash.ToUpperInvariant()
+            if ($actual -ne $entry.sha256.ToUpperInvariant()) { throw "Package hash mismatch: $($entry.name)" }
+          }
+          New-Item -ItemType Directory -Path build/beta-assets -Force | Out-Null
+          Copy-Item -LiteralPath $setup, $zip, $manifestPath -Destination build/beta-assets -Force
+          $sumLines = foreach ($path in @($setup, $zip, $manifestPath)) {
+            $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash *$([IO.Path]::GetFileName($path))"
+          }
+          $sumLines | Set-Content -LiteralPath build/beta-assets/SHA256SUMS-release.txt -Encoding ascii
+
+      - name: Upload Windows beta artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-native-beta-${{ github.run_id }}-${{ github.run_attempt }}
+          path: build/beta-assets/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish prerelease for win-v tag
+        if: github.event_name == 'push'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh release create "$BETA_TAG" build/beta-assets/* \
+            --prerelease \
+            --verify-tag \
+            --generate-notes \
+            --title "Claude Switcher Windows ${VERSION}"
