@@ -99,7 +99,8 @@ function New-InstallerRegistryAdapter {
         [Parameter(Mandatory=$true)][scriptblock]$GetValues,
         [Parameter(Mandatory=$true)][scriptblock]$DeleteKeyTree,
         [Parameter(Mandatory=$true)][scriptblock]$CreateKey,
-        [Parameter(Mandatory=$true)][scriptblock]$SetValue
+        [Parameter(Mandatory=$true)][scriptblock]$SetValue,
+        [scriptblock]$AssertProtected=$null
     )
     [pscustomobject]@{
         TestKey=$TestKey
@@ -108,6 +109,7 @@ function New-InstallerRegistryAdapter {
         DeleteKeyTree=$DeleteKeyTree
         CreateKey=$CreateKey
         SetValue=$SetValue
+        AssertProtected=$AssertProtected
     }
 }
 
@@ -286,6 +288,7 @@ function Restore-InstallerRegistrySnapshot {
         if ($unexpected.Count -ne 0) { throw 'Registry key contains unexpected descendants.' }
     }
     if ($normalized.Existed) {
+        if ($null -ne $RegistryAdapter.AssertProtected) { & $RegistryAdapter.AssertProtected $canonical }
         if ($exists) { & $RegistryAdapter.DeleteKeyTree $canonical }
         & $RegistryAdapter.CreateKey $canonical
         foreach ($value in $normalized.Values) {
@@ -297,31 +300,35 @@ function Restore-InstallerRegistrySnapshot {
 }
 
 function Assert-InstallerRegistrySecurity {
-    param([Parameter(Mandatory=$true)][Security.AccessControl.RegistrySecurity]$Security)
+    param([Parameter(Mandatory=$true)][Security.AccessControl.RegistrySecurity]$Security,[switch]$SnapshotOnly)
     $trusted = @('S-1-5-18','S-1-5-32-544','S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464')
     $owner = $Security.GetOwner([Security.Principal.SecurityIdentifier]).Value
     if ($trusted -notcontains $owner) { throw 'Registry key has an untrusted owner.' }
     # WriteKey is a composite containing READ_CONTROL, which ReadKey also
     # contains. Only actual mutations belong in this mask (KEY_CREATE_LINK=0x20).
     $writeMask = [Security.AccessControl.RegistryRights]::SetValue -bor [Security.AccessControl.RegistryRights]::CreateSubKey -bor [Security.AccessControl.RegistryRights]::Delete -bor [Security.AccessControl.RegistryRights]::ChangePermissions -bor [Security.AccessControl.RegistryRights]::TakeOwnership -bor 0x20
+    $snapshotCompatibilitySid='S-1-5-13' # Terminal Server Users: legacy inherited ACL on this metadata key only
     foreach ($rule in $Security.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])) {
         if ($rule.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly) { continue }
         if ($rule.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and $trusted -notcontains $rule.IdentityReference.Value) {
             $bits=[BitConverter]::ToUInt32([BitConverter]::GetBytes([int]$rule.RegistryRights),0)
-            if (($bits -band [uint32]$writeMask) -ne 0 -or ($bits -band [uint32]0x50000000) -ne 0) { throw 'Registry key is user writable.' }
+            if (($bits -band [uint32]$writeMask) -ne 0 -or ($bits -band [uint32]0x50000000) -ne 0) {
+                if($SnapshotOnly -and $rule.IdentityReference.Value -eq $snapshotCompatibilitySid){continue}
+                throw 'Registry key is user writable.'
+            }
         }
     }
 }
 
 function Assert-InstallerRegistryProtected {
-    param([string]$Path)
+    param([string]$Path,[switch]$SnapshotOnly)
     $canonical = Assert-InstallerRegistryPath $Path
     $relative = Get-InstallerRegistryRelativePath -Path $canonical
     $key = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($relative,$false)
     if ($null -eq $key) { return }
     try {
         $security = $key.GetAccessControl([Security.AccessControl.AccessControlSections]::Owner -bor [Security.AccessControl.AccessControlSections]::Access)
-        Assert-InstallerRegistrySecurity -Security $security
+        Assert-InstallerRegistrySecurity -Security $security -SnapshotOnly:$SnapshotOnly
     } finally { $key.Dispose() }
 }
 
@@ -333,7 +340,7 @@ function New-InstallerRealRegistryAdapter {
             $relative = Get-InstallerRegistryRelativePath -Path $canonical
             $key = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($relative,$false)
             if ($null -eq $key) { return $false }
-            try { Assert-InstallerRegistryProtected $canonical; return $true } finally { $key.Dispose() }
+            try { Assert-InstallerRegistryProtected $canonical -SnapshotOnly; return $true } finally { $key.Dispose() }
         }
         GetSubKeyNames = {
             param([string]$Path)
@@ -391,6 +398,7 @@ function New-InstallerRealRegistryAdapter {
             if ($null -eq $key) { throw 'Registry key is unavailable.' }
             try { $key.SetValue($Name,$Value,[Microsoft.Win32.RegistryValueKind]$Kind) } finally { $key.Dispose() }
         }
+        AssertProtected = { param([string]$Path) Assert-InstallerRegistryProtected $Path }
     }
 }
 function Invoke-InstallerPayloadOperation {

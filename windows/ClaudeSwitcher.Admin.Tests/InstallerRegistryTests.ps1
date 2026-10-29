@@ -77,6 +77,7 @@ function New-TestRegistrySecurity {
         [Security.AccessControl.RegistryRights]$Rights=[Security.AccessControl.RegistryRights]::ReadKey,
         [Security.AccessControl.PropagationFlags]$Propagation=[Security.AccessControl.PropagationFlags]::None,
         [string]$Owner='S-1-5-32-544',
+        [string]$Identity='S-1-5-32-545',
         [Security.AccessControl.AccessControlType]$AccessType=[Security.AccessControl.AccessControlType]::Allow
     )
     $security=[Security.AccessControl.RegistrySecurity]::new()
@@ -84,7 +85,7 @@ function New-TestRegistrySecurity {
     $inheritance=[Security.AccessControl.InheritanceFlags]::None
     if($Propagation -ne [Security.AccessControl.PropagationFlags]::None){$inheritance=[Security.AccessControl.InheritanceFlags]::ContainerInherit}
     $rule=[Security.AccessControl.RegistryAccessRule]::new(
-        [Security.Principal.SecurityIdentifier]::new('S-1-5-32-545'),$Rights,$inheritance,$Propagation,$AccessType)
+        [Security.Principal.SecurityIdentifier]::new($Identity),$Rights,$inheritance,$Propagation,$AccessType)
     [void]$security.AddAccessRule($rule)
     return $security
 }
@@ -152,6 +153,17 @@ try {
         $script:MockSecurity=New-TestRegistrySecurity -Rights SetValue
         Assert-Throws {Get-InstallerRegistrySnapshot -Path $script:RegistryPath -RegistryAdapter $adapter} 'a writable key must still fail before backup'
         Assert-Equal 0 $script:Mutations.Count 'rejected snapshot must not change the registry'
+    }
+    Run-Test 'Terminal Server Users mutation grant is allowed for read-only metadata snapshot only' {
+        $security=New-TestRegistrySecurity -Rights SetValue -Identity 'S-1-5-13'
+        Assert-Throws {Assert-InstallerRegistrySecurity -Security $security} 'strict restore policy must reject the legacy mutation grant'
+        Assert-InstallerRegistrySecurity -Security $security -SnapshotOnly
+    }
+    Run-Test 'the host uninstall key can be read when it exists, without mutation' {
+        $adapter=New-InstallerRealRegistryAdapter
+        $snapshot=Get-InstallerRegistrySnapshot -Path $script:RegistryPath -RegistryAdapter $adapter
+        if($snapshot.existed){Assert-True (@($snapshot.values).Count -gt 0) 'existing uninstall metadata must be readable'}
+        Assert-Equal 0 $script:Mutations.Count 'real snapshot is read-only'
     }
     Run-Test 'absent key restore deletes a newly-created key' {
         $adapter = New-MockRegistryAdapter
