@@ -114,6 +114,12 @@ jobs:
             throw "Expected Inno Setup 6.7.3; actual compiler output: $reported"
           }
 
+      - name: Compile actual Inno installer lifecycle without output
+        shell: powershell
+        run: |
+          $iscc = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'
+          & scripts/test-windows-installer-compile.ps1 -IsccPath $iscc
+
       - name: PowerShell syntax
         shell: pwsh
         run: |

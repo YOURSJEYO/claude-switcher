@@ -205,6 +205,7 @@ function Get-CoreRecoveryResiduePaths {
     param([string]$BasePath)
     $dataPath = Join-Path $env:APPDATA 'Claude'
     return @(
+        (Join-Path $BasePath 'installer-maintenance.json'),
         (Join-Path $BasePath 'transaction.json'),
         ($dataPath + '.new'),
         ($dataPath + '.previous'),
@@ -218,6 +219,18 @@ function Get-CoreRecoveryResiduePaths {
 
 function Enter-UserSetupOperation {
     param([string]$BasePath)
+    $maintenanceMutex=$null
+    try {
+        $maintenanceMutex=[Threading.Mutex]::OpenExisting('Global\ClaudeSwitcher.InstallerMaintenance')
+        if(-not $maintenanceMutex.WaitOne(0)){return New-UserSetupResult $false 'Installer maintenance is active.' @{Code='core-busy';Retryable=$true}}
+        $maintenanceMutex.ReleaseMutex()
+    } catch [Threading.WaitHandleCannotBeOpenedException] {
+        # No machine maintenance is active.
+    } catch [Threading.AbandonedMutexException] {
+        if($null -ne $maintenanceMutex){$maintenanceMutex.ReleaseMutex()}
+    } catch {
+        return New-UserSetupResult $false 'Installer maintenance could not be excluded safely.' @{Code='core-busy'}
+    } finally {if($null -ne $maintenanceMutex){$maintenanceMutex.Dispose()}}
     if ([string]::IsNullOrWhiteSpace($BasePath)) {
         return New-UserSetupResult $false 'BasePath is required.'
     }

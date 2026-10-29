@@ -11,6 +11,7 @@ public partial class MainWindow : Window
 {
     private readonly MainWindowState _initialState = MainWindowState.Initial;
     private CoreClient _client;
+    private readonly Func<CoreClient> _clientFactory;
     private MainWindowState _state;
     private bool _busy;
     private bool _setupOpen;
@@ -20,14 +21,19 @@ public partial class MainWindow : Window
     {
     }
 
-    internal MainWindow(Task<SetupApplyRunResult>? pendingSetup)
+    internal MainWindow(Task<SetupApplyRunResult>? pendingSetup) : this(pendingSetup, null)
+    {
+    }
+
+    internal MainWindow(Task<SetupApplyRunResult>? pendingSetup, Func<CoreClient>? clientFactory)
     {
         InitializeComponent();
         _setupMutationPending = pendingSetup is not null;
         _state = pendingSetup is null
             ? _initialState
             : _initialState.Running("配置变更可能仍在运行；正在等待原配置进程的明确结果，暂时禁止其他操作。");
-        _client = CreateClient();
+        _clientFactory = clientFactory ?? CreateClient;
+        _client = _clientFactory();
         RenderState();
         Loaded += async (_, _) =>
         {
@@ -73,7 +79,7 @@ public partial class MainWindow : Window
             _setupOpen = false;
             if (completed)
             {
-                _client = CreateClient();
+                _client = _clientFactory();
                 _state = MainWindowState.Initial;
                 await RefreshFromCoreAsync();
                 return;
@@ -104,7 +110,7 @@ public partial class MainWindow : Window
         {
             await pendingApply;
             _setupMutationPending = false;
-            _client = CreateClient();
+            _client = _clientFactory();
             _state = MainWindowState.Initial;
             await RefreshFromCoreAsync();
         }

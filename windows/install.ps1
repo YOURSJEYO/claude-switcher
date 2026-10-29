@@ -169,6 +169,477 @@ function Copy-SetupUserTemplates {
     [IO.File]::WriteAllText((Join-Path $Destination 'version.txt'),$appVersion,(New-Object Text.UTF8Encoding($false)))
 }
 
+if ($null -eq $script:NativeUpgradeSnapshots) {
+    $script:NativeUpgradeSnapshots = @{}
+}
+function ConvertTo-NativeUpgradeCanonicalPath {
+    param([string]$Path)
+    if ([string]::IsNullOrWhiteSpace($Path) -or -not [IO.Path]::IsPathRooted($Path)) { return $null }
+    try {
+        $full = [IO.Path]::GetFullPath($Path)
+        $root = [IO.Path]::GetPathRoot($full)
+        if ($full.Length -gt $root.Length) {
+            $trimChars = [char[]]@([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+            $full = $full.TrimEnd($trimChars)
+        }
+        return $full
+    } catch { return $null }
+}
+
+function Test-NativeUpgradePathEqual {
+    param([string]$Left, [string]$Right)
+    $a = ConvertTo-NativeUpgradeCanonicalPath $Left
+    $b = ConvertTo-NativeUpgradeCanonicalPath $Right
+    return ($null -ne $a -and $null -ne $b -and $a.Equals($b, [StringComparison]::OrdinalIgnoreCase))
+}
+
+function Test-NativeUpgradePathWithin {
+    param([string]$Path, [string]$Boundary)
+    $candidate = ConvertTo-NativeUpgradeCanonicalPath $Path
+    $root = ConvertTo-NativeUpgradeCanonicalPath $Boundary
+    if ($null -eq $candidate -or $null -eq $root) { return $false }
+    if ($candidate.Equals($root, [StringComparison]::OrdinalIgnoreCase)) { return $true }
+    return $candidate.StartsWith($root + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)
+}
+
+function Test-NativeUpgradePathHasNoReparse {
+    param([string]$Path, [string]$Boundary)
+    $candidate = ConvertTo-NativeUpgradeCanonicalPath $Path
+    $root = ConvertTo-NativeUpgradeCanonicalPath $Boundary
+    if ($null -eq $candidate -or $null -eq $root -or -not (Test-NativeUpgradePathWithin $candidate $root)) { return $false }
+    $cursor = $candidate
+    while ($true) {
+        if ([IO.File]::Exists($cursor) -or [IO.Directory]::Exists($cursor)) {
+            try {
+                $item = Get-Item -LiteralPath $cursor -Force -ErrorAction Stop
+                if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { return $false }
+            } catch { return $false }
+        }
+        if ($cursor.Equals($root, [StringComparison]::OrdinalIgnoreCase)) { return $true }
+        $parent = Split-Path -Parent $cursor
+        if ([string]::IsNullOrWhiteSpace($parent) -or $parent.Equals($cursor, [StringComparison]::OrdinalIgnoreCase)) { return $false }
+        $cursor = $parent
+    }
+}
+
+function Test-NativeUpgradeRegularFile {
+    param([string]$Path, [string]$Boundary)
+    if (-not [IO.File]::Exists($Path)) { return $false }
+    if (-not (Test-NativeUpgradePathHasNoReparse $Path $Boundary)) { return $false }
+    try {
+        $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+        return (-not $item.PSIsContainer -and -not ($item.Attributes -band [IO.FileAttributes]::ReparsePoint))
+    } catch { return $false }
+}
+
+function Get-NativeUpgradeExpectedBasePath {
+    $profile = [string]$env:USERPROFILE
+    if ([string]::IsNullOrWhiteSpace($profile) -or -not [IO.Path]::IsPathRooted($profile)) { return $null }
+    return ConvertTo-NativeUpgradeCanonicalPath (Join-Path $profile '.claude-switcher')
+}
+
+function Get-NativeUpgradeOperationHandle {
+    param([object]$Operation)
+    return Get-UserSetupProperty $Operation 'Handle'
+}
+
+function Get-NativeUpgradeOperationLease {
+    param([object]$Operation)
+    $lease = Get-UserSetupProperty $Operation 'Lease'
+    if ($null -eq $lease) {
+        $handle = Get-NativeUpgradeOperationHandle $Operation
+        $lease = Get-UserSetupProperty $handle 'ClaudeSwitcherLease'
+    }
+    return $lease
+}
+
+function Get-NativeUpgradeSnapshotPath {
+    param([object]$Snapshot)
+    if ($null -eq $Snapshot) { return $null }
+    if ($Snapshot -is [string]) { return [string]$Snapshot }
+    foreach ($name in @('SnapshotPath','Path','snapshotPath')) {
+        $value = Get-UserSetupProperty $Snapshot $name
+        if (-not [string]::IsNullOrWhiteSpace([string]$value)) { return [string]$value }
+    }
+    $result = Get-UserSetupProperty $Snapshot 'Result'
+    if ($null -ne $result) {
+        foreach ($name in @('snapshotPath','SnapshotPath')) {
+            $value = Get-UserSetupProperty $result $name
+            if (-not [string]::IsNullOrWhiteSpace([string]$value)) { return [string]$value }
+        }
+    }
+    return $null
+}
+function Test-NativeUpgradeOperationBoundary {
+    param([object]$Operation, [string]$BasePath)
+    if ($null -eq $Operation) {
+        return New-InstallerFlowResult 1 'user' 'operation_required' 'An active user setup operation is required.'
+    }
+    $resolvedBase = ConvertTo-NativeUpgradeCanonicalPath $BasePath
+    $expectedBase = Get-NativeUpgradeExpectedBasePath
+    if ($null -eq $resolvedBase -or $null -eq $expectedBase) {
+        return New-InstallerFlowResult 1 'user' 'user_profile_unavailable' 'The current user profile path is unavailable.'
+    }
+    if (-not (Test-NativeUpgradePathEqual $resolvedBase $expectedBase)) {
+        return New-InstallerFlowResult 1 'user' 'base_path_mismatch' 'Upgrade finalization must target the exact current user setup directory.'
+    }
+    if (-not [IO.Directory]::Exists($resolvedBase) -or -not (Test-NativeUpgradePathHasNoReparse $resolvedBase $resolvedBase)) {
+        return New-InstallerFlowResult 1 'user' 'unsafe_template_path' 'The user setup directory is missing or unsafe.'
+    }
+
+    $handle = Get-NativeUpgradeOperationHandle $Operation
+    $lease = Get-NativeUpgradeOperationLease $Operation
+    if ($handle -isnot [IO.FileStream] -or $null -eq $lease) {
+        return New-InstallerFlowResult 1 'user' 'operation_lock_not_held' 'The broker operation lock is not held.'
+    }
+    try {
+        $null = $handle.Length
+        $null = $handle.Name
+    } catch {
+        return New-InstallerFlowResult 1 'user' 'operation_lock_not_held' 'The broker operation lock is not held.'
+    }
+
+    $expectedLockPath = ConvertTo-NativeUpgradeCanonicalPath (Join-Path $resolvedBase 'operation.lock')
+    $heldLockPath = ConvertTo-NativeUpgradeCanonicalPath ([string]$handle.Name)
+    if ($null -eq $expectedLockPath -or $null -eq $heldLockPath -or -not (Test-NativeUpgradePathEqual $expectedLockPath $heldLockPath)) {
+        return New-InstallerFlowResult 1 'user' 'operation_lock_not_held' 'The broker operation lock is not the expected lock.'
+    }
+
+    $probe = $null
+    try {
+        $probe = [IO.File]::Open($expectedLockPath, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+        $probe.Dispose()
+        $probe = $null
+        return New-InstallerFlowResult 1 'user' 'operation_lock_not_held' 'The broker operation lock is not held.'
+    } catch [IO.IOException] {
+        if ($null -ne $probe) { $probe.Dispose() }
+    } catch {
+        if ($null -ne $probe) { $probe.Dispose() }
+        return New-InstallerFlowResult 1 'user' 'operation_lock_unverified' 'The broker operation lock could not be verified.'
+    }
+
+    try {
+        $identity = Get-SetupIdentity
+        if ([bool]$identity.Elevated) {
+            return New-InstallerFlowResult 1 'user' 'normal_user_required' 'Upgrade finalization must run as the original user.'
+        }
+        $process = [Diagnostics.Process]::GetCurrentProcess()
+        if (-not (Test-NativeUpgradePathEqual ([string]$lease.BasePath) $resolvedBase) -or
+            [string]$lease.OwnerSid -cne [string]$identity.Sid -or
+            [int]$lease.SessionId -ne [int]$identity.SessionId -or
+            [int]$lease.OwnerPid -ne [int]$process.Id) {
+            return New-InstallerFlowResult 1 'user' 'operation_owner_mismatch' 'The operation lease does not belong to this broker process.'
+        }
+    } catch {
+        return New-InstallerFlowResult 1 'user' 'operation_owner_mismatch' 'The operation owner identity could not be verified.'
+    }
+
+    $status = Get-OperationLeaseStatus -BasePath $resolvedBase
+    if (-not $status.Success -or [string]$status.Status -cne 'active') {
+        return New-InstallerFlowResult 1 'user' 'operation_lease_inactive' 'The operation lease is not active.'
+    }
+    if (-not (Test-OperationLeaseOwnerMatch $lease $status.Lease)) {
+        return New-InstallerFlowResult 1 'user' 'operation_lease_mismatch' 'The active lease does not match the broker operation.'
+    }
+    return New-InstallerFlowResult 0 'user' 'ok' 'operation boundary valid'
+}
+
+function Copy-NativeUpgradeFileAtomic {
+    param([string]$Source, [string]$Destination, [string]$DestinationRoot)
+    if (-not (Test-NativeUpgradeRegularFile $Source (Split-Path -Parent $Source))) { throw 'Unsafe snapshot source.' }
+    if (-not (Test-NativeUpgradePathWithin $Destination $DestinationRoot)) { throw 'Snapshot destination escaped its root.' }
+    $parent = Split-Path -Parent $Destination
+    if (-not [IO.Directory]::Exists($parent) -or -not (Test-NativeUpgradePathHasNoReparse $parent $DestinationRoot)) { throw 'Unsafe snapshot destination parent.' }
+    if ([IO.File]::Exists($Destination) -and -not (Test-NativeUpgradeRegularFile $Destination $DestinationRoot)) { throw 'Unsafe snapshot destination.' }
+    $temporary = Join-Path $parent ('.upgrade.' + [guid]::NewGuid().ToString('N') + '.tmp')
+    try {
+        $bytes = [IO.File]::ReadAllBytes($Source)
+        [IO.File]::WriteAllBytes($temporary, $bytes)
+        if ([IO.File]::Exists($Destination)) {
+            [IO.File]::Replace($temporary, $Destination, [NullString]::Value)
+        } else {
+            [IO.File]::Move($temporary, $Destination)
+        }
+    } finally {
+        if ([IO.File]::Exists($temporary)) { [IO.File]::Delete($temporary) }
+    }
+}
+
+function Test-NativeUpgradeSnapshotPath {
+    param([string]$SnapshotPath)
+    $tempRoot = ConvertTo-NativeUpgradeCanonicalPath ([IO.Path]::GetTempPath())
+    $snapshot = ConvertTo-NativeUpgradeCanonicalPath $SnapshotPath
+    if ($null -eq $tempRoot -or $null -eq $snapshot -or -not (Test-NativeUpgradePathWithin $snapshot $tempRoot)) { return $false }
+    if ((Split-Path -Leaf $snapshot) -cnotmatch '^ClaudeSwitcher-upgrade-[0-9a-f]{32}$') { return $false }
+    return Test-NativeUpgradePathHasNoReparse $snapshot $tempRoot
+}
+
+function New-NativeUpgradeSnapshot {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory=$true)][string]$BasePath,
+        [Parameter(Mandatory=$true)][object]$Operation
+    )
+    $snapshotPath = $null
+    $operationId = $null
+    try {
+        $boundary = Test-NativeUpgradeOperationBoundary -Operation $Operation -BasePath $BasePath
+        if (-not $boundary.Result.success) { return $boundary }
+        $renewed = Renew-UserSetupOperation -Operation $Operation -Phase 'upgrade-snapshot' -TtlSeconds 300
+        if (-not $renewed.Success) {
+            return New-InstallerFlowResult 2 'snapshot' 'operation_lease_renewal_failed' 'The operation lease could not be renewed before the template snapshot.'
+        }
+        $boundary = Test-NativeUpgradeOperationBoundary -Operation $Operation -BasePath $BasePath
+        if (-not $boundary.Result.success) { return $boundary }
+
+        $payload = Get-SetupProtectedPayload
+        $source = Resolve-NativeUpgradeTemplateSource -Payload $payload
+        if (-not $source.Result.success) { return $source }
+
+        $lease = Get-NativeUpgradeOperationLease $Operation
+        $operationId = [string](Get-UserSetupProperty $lease 'OperationId')
+        if ([string]::IsNullOrWhiteSpace($operationId)) {
+            return New-InstallerFlowResult 1 'snapshot' 'operation_lease_mismatch' 'The operation lease id is unavailable.'
+        }
+        if ($script:NativeUpgradeSnapshots.ContainsKey($operationId)) {
+            $existing = [string]$script:NativeUpgradeSnapshots[$operationId]
+            if (-not [string]::IsNullOrWhiteSpace($existing)) {
+                $removed = Remove-NativeUpgradeSnapshot -Snapshot $existing
+                if (-not $removed.Result.success) { return $removed }
+            }
+        }
+
+        $resolvedBase = ConvertTo-NativeUpgradeCanonicalPath $BasePath
+        if ($null -eq $resolvedBase -or -not [IO.Directory]::Exists($resolvedBase) -or -not (Test-NativeUpgradePathHasNoReparse $resolvedBase $resolvedBase)) {
+            return New-InstallerFlowResult 1 'snapshot' 'unsafe_template_path' 'The user setup directory is missing or unsafe.'
+        }
+        $tempRoot = ConvertTo-NativeUpgradeCanonicalPath ([IO.Path]::GetTempPath())
+        if ($null -eq $tempRoot -or -not [IO.Directory]::Exists($tempRoot) -or -not (Test-NativeUpgradePathHasNoReparse $tempRoot $tempRoot)) {
+            return New-InstallerFlowResult 1 'snapshot' 'temp_unavailable' 'The user temporary directory is unavailable or unsafe.'
+        }
+        $snapshotPath = Join-Path $tempRoot ('ClaudeSwitcher-upgrade-' + [guid]::NewGuid().ToString('N'))
+        [void][IO.Directory]::CreateDirectory($snapshotPath)
+        if (-not (Test-NativeUpgradePathHasNoReparse $snapshotPath $tempRoot)) {
+            [void](Remove-NativeUpgradeSnapshot -Snapshot $snapshotPath)
+            return New-InstallerFlowResult 1 'snapshot' 'unsafe_snapshot_path' 'The snapshot directory is unsafe.'
+        }
+        foreach ($name in @('claude-switch.ps1','SwitcherUI.ps1','claude-bodyguard.ps1','version.txt')) {
+            $sourceFile = Join-Path $resolvedBase $name
+            if (-not (Test-Path -LiteralPath $sourceFile)) { continue }
+            if (-not (Test-NativeUpgradeRegularFile $sourceFile $resolvedBase)) {
+                [void](Remove-NativeUpgradeSnapshot -Snapshot $snapshotPath)
+                return New-InstallerFlowResult 1 'snapshot' 'unsafe_template_path' 'A template path is unsafe.'
+            }
+            Copy-NativeUpgradeFileAtomic -Source $sourceFile -Destination (Join-Path $snapshotPath $name) -DestinationRoot $snapshotPath
+        }
+        $script:NativeUpgradeSnapshots[$operationId] = $snapshotPath
+        $result = New-InstallerFlowResult 0 'snapshot' 'ok' 'template snapshot created'
+        Add-Member -InputObject $result.Result -NotePropertyName snapshotPath -NotePropertyValue $snapshotPath -Force
+        Add-Member -InputObject $result.Result -NotePropertyName operationId -NotePropertyValue $operationId -Force
+        Add-Member -InputObject $result -NotePropertyName SnapshotPath -NotePropertyValue $snapshotPath -Force
+        Add-Member -InputObject $result -NotePropertyName Path -NotePropertyValue $snapshotPath -Force
+        Add-Member -InputObject $result -NotePropertyName OperationId -NotePropertyValue $operationId -Force
+        Add-Member -InputObject $result -NotePropertyName BasePath -NotePropertyValue $resolvedBase -Force
+        return $result
+    } catch {
+        if ($null -ne $snapshotPath -and (Test-Path -LiteralPath $snapshotPath)) {
+            [void](Remove-NativeUpgradeSnapshot -Snapshot $snapshotPath)
+        }
+        if ($null -ne $operationId) { [void]$script:NativeUpgradeSnapshots.Remove($operationId) }
+        return New-InstallerFlowResult 1 'snapshot' 'snapshot_failed' 'The template snapshot could not be created safely.'
+    }
+}
+
+function Restore-NativeUpgradeSnapshot {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory=$true)][object]$Snapshot,
+        [Parameter(Mandatory=$true)][object]$Operation
+    )
+    try {
+        $snapshotPath = Get-NativeUpgradeSnapshotPath $Snapshot
+        if ([string]::IsNullOrWhiteSpace($snapshotPath)) {
+            return New-InstallerFlowResult 1 'restore' 'unsafe_snapshot_path' 'The snapshot object does not contain a valid path.'
+        }
+        $resolvedBase = Get-NativeUpgradeExpectedBasePath
+        if ([string]::IsNullOrWhiteSpace($resolvedBase)) {
+            return New-InstallerFlowResult 1 'restore' 'user_profile_unavailable' 'The current user profile path is unavailable.'
+        }
+        $boundary = Test-NativeUpgradeOperationBoundary -Operation $Operation -BasePath $resolvedBase
+        if (-not $boundary.Result.success) { return $boundary }
+        $renewed = Renew-UserSetupOperation -Operation $Operation -Phase 'upgrade-restore' -TtlSeconds 300
+        if (-not $renewed.Success) {
+            return New-InstallerFlowResult 2 'restore' 'operation_lease_renewal_failed' 'The operation lease could not be renewed before template restore.'
+        }
+        $boundary = Test-NativeUpgradeOperationBoundary -Operation $Operation -BasePath $resolvedBase
+        if (-not $boundary.Result.success) { return $boundary }
+        $payload = Get-SetupProtectedPayload
+        $source = Resolve-NativeUpgradeTemplateSource -Payload $payload
+        if (-not $source.Result.success) { return $source }
+        if (-not [IO.Directory]::Exists($resolvedBase) -or -not (Test-NativeUpgradePathHasNoReparse $resolvedBase $resolvedBase)) {
+            return New-InstallerFlowResult 1 'restore' 'unsafe_template_path' 'The restore target is missing or unsafe.'
+        }
+        if (-not (Test-NativeUpgradeSnapshotPath $snapshotPath)) {
+            return New-InstallerFlowResult 1 'restore' 'unsafe_snapshot_path' 'The snapshot path is outside the unique user snapshot namespace.'
+        }
+        $snapshot = ConvertTo-NativeUpgradeCanonicalPath $snapshotPath
+        if (-not [IO.Directory]::Exists($snapshot)) {
+            return New-InstallerFlowResult 1 'restore' 'snapshot_missing' 'The template snapshot is missing.'
+        }
+        foreach ($entry in @(Get-ChildItem -LiteralPath $snapshot -Force)) {
+            if ($entry.PSIsContainer -or @('claude-switch.ps1','SwitcherUI.ps1','claude-bodyguard.ps1','version.txt') -cnotcontains $entry.Name) {
+                return New-InstallerFlowResult 1 'restore' 'unsafe_snapshot_path' 'The snapshot contains an unexpected entry.'
+            }
+            if ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+                return New-InstallerFlowResult 1 'restore' 'unsafe_snapshot_path' 'The snapshot contains a reparse entry.'
+            }
+        }
+        foreach ($name in @('claude-switch.ps1','SwitcherUI.ps1','claude-bodyguard.ps1','version.txt')) {
+            $snapshotFile = Join-Path $snapshot $name
+            $target = Join-Path $resolvedBase $name
+            if (Test-Path -LiteralPath $snapshotFile) {
+                if (-not (Test-NativeUpgradeRegularFile $snapshotFile $snapshot)) {
+                    return New-InstallerFlowResult 1 'restore' 'unsafe_snapshot_path' 'A snapshot file is unsafe.'
+                }
+                if ([IO.File]::Exists($target) -and -not (Test-NativeUpgradeRegularFile $target $resolvedBase)) {
+                    return New-InstallerFlowResult 1 'restore' 'unsafe_template_path' 'A template target is unsafe.'
+                }
+                Copy-NativeUpgradeFileAtomic -Source $snapshotFile -Destination $target -DestinationRoot $resolvedBase
+            } elseif ([IO.File]::Exists($target)) {
+                if (-not (Test-NativeUpgradeRegularFile $target $resolvedBase)) {
+                    return New-InstallerFlowResult 1 'restore' 'unsafe_template_path' 'A template target is unsafe.'
+                }
+                [IO.File]::Delete($target)
+            }
+        }
+        return New-InstallerFlowResult 0 'restore' 'ok' 'template snapshot restored'
+    } catch {
+        return New-InstallerFlowResult 1 'restore' 'restore_failed' 'The template snapshot could not be restored safely.'
+    }
+}
+
+function Remove-NativeUpgradeSnapshot {
+    [CmdletBinding()]
+    param([Parameter(Mandatory=$true)][object]$Snapshot)
+    try {
+        $snapshotPath = Get-NativeUpgradeSnapshotPath $Snapshot
+        if ([string]::IsNullOrWhiteSpace($snapshotPath) -or -not (Test-NativeUpgradeSnapshotPath $snapshotPath)) {
+            return New-InstallerFlowResult 1 'cleanup' 'unsafe_snapshot_path' 'The snapshot path is outside the unique user snapshot namespace.'
+        }
+        $snapshot = ConvertTo-NativeUpgradeCanonicalPath $snapshotPath
+        if (-not [IO.Directory]::Exists($snapshot)) {
+            foreach ($key in @($script:NativeUpgradeSnapshots.Keys)) {
+                if (Test-NativeUpgradePathEqual ([string]$script:NativeUpgradeSnapshots[$key]) $snapshot) { [void]$script:NativeUpgradeSnapshots.Remove($key) }
+            }
+            return New-InstallerFlowResult 0 'cleanup' 'ok' 'snapshot already absent'
+        }
+        foreach ($entry in @(Get-ChildItem -LiteralPath $snapshot -Force)) {
+            if ($entry.PSIsContainer -or @('claude-switch.ps1','SwitcherUI.ps1','claude-bodyguard.ps1','version.txt') -cnotcontains $entry.Name) {
+                return New-InstallerFlowResult 1 'cleanup' 'unsafe_snapshot_path' 'The snapshot contains an unexpected entry.'
+            }
+            if ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+                return New-InstallerFlowResult 1 'cleanup' 'unsafe_snapshot_path' 'The snapshot contains a reparse entry.'
+            }
+            [IO.File]::Delete($entry.FullName)
+        }
+        [IO.Directory]::Delete($snapshot, $false)
+        foreach ($key in @($script:NativeUpgradeSnapshots.Keys)) {
+            if (Test-NativeUpgradePathEqual ([string]$script:NativeUpgradeSnapshots[$key]) $snapshot) { [void]$script:NativeUpgradeSnapshots.Remove($key) }
+        }
+        return New-InstallerFlowResult 0 'cleanup' 'ok' 'template snapshot removed'
+    } catch {
+        return New-InstallerFlowResult 1 'cleanup' 'cleanup_failed' 'The template snapshot could not be removed safely.'
+    }
+}
+
+function Resolve-NativeUpgradeTemplateSource {
+    param([object]$Payload)
+    if ($null -eq $Payload) {
+        return New-InstallerFlowResult 1 'user' 'protected_payload_required' 'The protected native payload is unavailable.'
+    }
+    try {
+        $app = ConvertTo-NativeUpgradeCanonicalPath ([string](Get-UserSetupProperty $Payload 'App'))
+        if ($null -eq $app -or -not (Test-NativeUpgradeRegularFile $app (Split-Path -Parent $app))) {
+            return New-InstallerFlowResult 1 'user' 'protected_payload_required' 'The protected native application is unavailable.'
+        }
+        $appRoot = Split-Path -Parent $app
+        $installedScripts = ConvertTo-NativeUpgradeCanonicalPath (Join-Path $appRoot 'scripts')
+        $source = ConvertTo-NativeUpgradeCanonicalPath $script:SetupSourceDirectory
+        if ($null -eq $installedScripts -or $null -eq $source -or -not (Test-NativeUpgradePathEqual $installedScripts $source)) {
+            return New-InstallerFlowResult 1 'user' 'template_source_mismatch' 'Upgrade templates must come from the installed scripts directory.'
+        }
+        foreach ($name in @('claude-switch.ps1','SwitcherUI.ps1','claude-bodyguard.ps1')) {
+            if (-not (Test-NativeUpgradeRegularFile (Join-Path $installedScripts $name) $installedScripts)) {
+                return New-InstallerFlowResult 1 'user' 'template_missing' 'Protected user templates are incomplete or unsafe.'
+            }
+        }
+        $versionPath = Join-Path $appRoot 'VERSION'
+        if (-not (Test-NativeUpgradeRegularFile $versionPath $appRoot)) {
+            return New-InstallerFlowResult 1 'user' 'template_missing' 'The protected version file is missing or unsafe.'
+        }
+        $result = New-InstallerFlowResult 0 'user' 'ok' 'protected template source validated'
+        Add-Member -InputObject $result.Result -NotePropertyName scriptsDirectory -NotePropertyValue $installedScripts -Force
+        Add-Member -InputObject $result.Result -NotePropertyName versionPath -NotePropertyValue $versionPath -Force
+        return $result
+    } catch {
+        return New-InstallerFlowResult 1 'user' 'protected_payload_required' 'The protected native payload could not be validated.'
+    }
+}
+
+function Invoke-NativeUpgradeFinalize {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory=$true)][object]$Operation,
+        [string]$BasePath=''
+    )
+    $snapshotPath = $null
+    try {
+        if ([string]::IsNullOrWhiteSpace($BasePath)) { $BasePath = Get-NativeUpgradeExpectedBasePath }
+        $boundary = Test-NativeUpgradeOperationBoundary -Operation $Operation -BasePath $BasePath
+        if (-not $boundary.Result.success) { return $boundary }
+        $renewed = Renew-UserSetupOperation -Operation $Operation -Phase 'upgrade-finalize' -TtlSeconds 300
+        if (-not $renewed.Success) {
+            return New-InstallerFlowResult 2 'user' 'operation_lease_renewal_failed' 'The operation lease could not be renewed before upgrade finalization.'
+        }
+        $boundary = Test-NativeUpgradeOperationBoundary -Operation $Operation -BasePath $BasePath
+        if (-not $boundary.Result.success) { return $boundary }
+
+        $lease = Get-NativeUpgradeOperationLease $Operation
+        $operationId = [string](Get-UserSetupProperty $lease 'OperationId')
+        if ([string]::IsNullOrWhiteSpace($operationId) -or -not $script:NativeUpgradeSnapshots.ContainsKey($operationId)) {
+            return New-InstallerFlowResult 1 'user' 'snapshot_required' 'Upgrade finalization requires a prepared template snapshot for this operation.'
+        }
+        $snapshotPath = [string]$script:NativeUpgradeSnapshots[$operationId]
+        if ([string]::IsNullOrWhiteSpace($snapshotPath) -or -not (Test-NativeUpgradeSnapshotPath $snapshotPath) -or -not [IO.Directory]::Exists($snapshotPath)) {
+            return New-InstallerFlowResult 1 'user' 'snapshot_required' 'The prepared template snapshot is missing or unsafe.'
+        }
+
+        $payload = Get-SetupProtectedPayload
+        $source = Resolve-NativeUpgradeTemplateSource -Payload $payload
+        if (-not $source.Result.success) { return $source }
+
+        try {
+            Copy-SetupUserTemplates -Destination $BasePath
+            $result = New-InstallerFlowResult 0 'completed' 'ok' 'user templates updated; configuration and account data retained'
+            Add-Member -InputObject $result.Result -NotePropertyName snapshotPath -NotePropertyValue $snapshotPath -Force
+            return $result        } catch {
+            $restore = Restore-NativeUpgradeSnapshot -Snapshot $snapshotPath -Operation $Operation
+            if ($restore.Result.success) {
+                $failed = New-InstallerFlowResult 1 'user' 'upgrade_finalize_failed' 'User templates could not be updated safely; template changes were restored and the snapshot is retained for outer rollback.'
+                Add-Member -InputObject $failed.Result -NotePropertyName snapshotPath -NotePropertyValue $snapshotPath -Force
+                Add-Member -InputObject $failed.Result -NotePropertyName restoreState -NotePropertyValue 'restored' -Force
+                return $failed
+            }
+            $failed = New-InstallerFlowResult 1 'user' 'upgrade_finalize_rollback_failed' 'User templates could not be updated and rollback failed; retain recovery material.'
+            Add-Member -InputObject $failed.Result -NotePropertyName snapshotPath -NotePropertyValue $snapshotPath -Force
+            Add-Member -InputObject $failed.Result -NotePropertyName restoreState -NotePropertyValue 'failed' -Force
+            return $failed
+        }
+    } catch {
+        return New-InstallerFlowResult 1 'user' 'upgrade_finalize_failed' 'User templates could not be updated safely.'
+    }
+}
+
 function Invoke-NativeUserSetupFlow {
     param([hashtable]$Options,[string]$BasePath=(Join-Path $env:USERPROFILE '.claude-switcher'))
     $stage='user'; $handle=$null

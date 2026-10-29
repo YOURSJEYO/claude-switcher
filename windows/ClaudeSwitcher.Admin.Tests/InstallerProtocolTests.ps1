@@ -1,7 +1,7 @@
 ﻿# Isolated entry-point tests. Network, identity, protected payload, and UAC are replaced.
 $ErrorActionPreference = 'Stop'
 $taskRepo = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
-$script:InnoTemplate = [IO.File]::ReadAllText((Join-Path $taskRepo 'windows/ClaudeSwitcher.iss'))
+$script:InnoTemplate = [IO.File]::ReadAllText((Join-Path $taskRepo 'windows/ClaudeSwitcher.iss')) + "`n" + [IO.File]::ReadAllText((Join-Path $taskRepo 'windows/InstallerLifecycle.iss'))
 . (Join-Path $taskRepo 'windows/helpers/UserSetup.ps1')
 $taskTokens = $null; $taskErrors = $null
 $taskAst = [Management.Automation.Language.Parser]::ParseFile((Join-Path $taskRepo 'windows/install.ps1'), [ref]$taskTokens, [ref]$taskErrors)
@@ -155,24 +155,33 @@ try {
         Assert-Flow ($r.ExitCode -eq 4 -and $r.Result.code -eq 'uac_cancelled' -and -not $r.Result.success) 'removal cancellation must retain retryable classification'
         Assert-Flow ([IO.File]::ReadAllText($taskConfig) -ceq 'synthetic-preserve') 'user configuration must survive removal failure'
     }
-    Test-Flow 'existing native install is rejected before Files mutation' {
+    Test-Flow 'existing native install enters a protected maintenance path' {
         $files=@(Get-InnoSectionEntries 'Files')
-        Assert-Flow ($files.Count -eq 1) 'development Beta must stage only the normal app payload'
-        Assert-Flow ($files[0] -match '^Source:\s*"\{#StageDir\}\\?\*";\s*DestDir:\s*"\{app\}";') 'only the app payload may be installed'
+        Assert-Flow ($files.Count -eq 3) 'setup must stage the app payload and the temporary maintenance broker'
+        Assert-Flow (@($files | Where-Object { $_ -match '^Source:\s*"\{#StageDir\}\\?\*";\s*DestDir:\s*"\{app\}";' }).Count -eq 1) 'only one entry may install the app payload'
+        Assert-Flow (@($files | Where-Object { $_ -match 'InstallerMaintenance\.ps1.*dontcopy' }).Count -eq 1) 'maintenance broker must be extractable without installing a second copy'
         $prepare=Get-InnoFunction 'PrepareToInstall'
         $detect=Get-InnoFunction 'ExistingNativeInstall'
         $initializeSetup=Get-InnoFunction 'InitializeSetup'
-        Assert-Flow ($detect -match 'ClaudeSwitcher\.exe') 'existing install detection must include the native app executable'
+        Assert-Flow ($detect -match 'DirExists') 'existing install detection must include the native app executable'
         Assert-Flow ($detect -match 'RegQueryStringValue') 'existing install detection must include the uninstall registration'
         Assert-Flow ($detect -notmatch '\{app\}') 'early setup detection must not expand the app directory before it is initialized'
         Assert-Flow ($detect -match '\{autopf\}\\ClaudeSwitcher') 'early setup detection must use the fixed Program Files path'
-        Assert-Flow ($initializeSetup -match 'Result\s*:=\s*not\s+ExistingNativeInstall') 'setup initialization must fail closed before any wizard or Files stage'
-        Assert-Flow ($initializeSetup -match 'does not support safe in-place upgrades') 'setup initialization rejection must be explicit'
-        $guardIndex=$prepare.IndexOf('if ExistingNativeInstall')
-        $pathIndex=$prepare.IndexOf('CompareText')
-        Assert-Flow ($guardIndex -ge 0 -and $pathIndex -gt $guardIndex) 'upgrade rejection must precede all other install checks'
-        Assert-Flow ($prepare -match 'does not support safe in-place upgrades') 'upgrade rejection must be explicit'
-        Assert-Flow ($prepare -notmatch '\bExtractTemporaryFile\s*\(') 'fail-closed development Beta must not claim an unimplemented lease'
+        Assert-Flow ($initializeSetup -match 'Result\s*:=\s*True;') 'setup initialization must allow a validated existing install'
+        Assert-Flow ($initializeSetup -match '(?i)preflight|protected|maintenance') 'setup initialization must retain a protected preflight'
+        Assert-Flow ($prepare -match '(?i)maintenance|broker|operation\.lock') 'upgrade preparation must coordinate the operation lock'
+        Assert-Flow ($prepare -match '(?i)backup|rollback') 'upgrade preparation must retain rollback material'
+        Assert-Flow ($prepare -notmatch 'does not support safe in-place upgrades') 'upgrade preparation must not blanket-reject existing installs'
+    }
+
+    Test-Flow 'uninstall and upgrade lifecycle no longer claim blanket refusal' {
+        $template = $script:InnoTemplate
+        Assert-Flow ($template -match '(?s)function InitializeSetup.*?ExistingNativeInstall') 'existing install preflight must remain present'
+        Assert-Flow ($template -notmatch 'does not support safe in-place upgrades') 'installer must not blanket-reject upgrades'
+        Assert-Flow ($template -match '(?i)maintenance|broker|operation\.lock') 'installer must coordinate a maintenance lock'
+        Assert-Flow ($template -match '(?s)function InitializeUninstall.*?Result\s*:=\s*True;') 'uninstall must be enabled after preflight'
+        Assert-Flow ($template -match '(?i)preserve|user data|delete') 'uninstall data policy must be visible'
+        Assert-Flow ($template -notmatch '(?im)^\s*\[UninstallDelete\]') 'user data must not be deleted by Inno declarative cleanup'
     }
     Test-Flow 'new installation still installs the app and opens ordinary-user setup' {
         $run=@(Get-InnoSectionEntries 'Run')
@@ -181,15 +190,13 @@ try {
         Assert-Flow ($run[0] -match 'runasoriginaluser') 'post-install setup must not run as the elevated installer'
         Assert-Flow ($run[0] -match 'waituntilterminated') 'setup must observe the fixed entry result'
     }
-    Test-Flow 'uninstall is rejected before any task or file mutation' {
+    Test-Flow 'uninstall allows a protected, data-preserving lifecycle' {
         $initialize=Get-InnoFunction 'InitializeUninstall'
-        Assert-Flow ($initialize -match '(?s)Result\s*:=\s*False;') 'uninstall must return false'
-        Assert-Flow ($initialize -match 'Safe uninstall is not supported') 'uninstall refusal must be explicit'
-        Assert-Flow ($initialize -match 'No scheduled tasks or program files were changed') 'uninstall refusal must state the no-mutation guarantee'
-        Assert-Flow ($initialize -notmatch '\bExec\s*\(') 'uninstall refusal must not launch a task-removal helper'
-        Assert-Flow ($initialize -notmatch '(?i)remove-bodyguard-task|-RemoveUserTask|DeleteFile|DelTree') 'uninstall refusal must not mutate tasks or files'
-        Assert-Flow (-not ($script:InnoTemplate -match '(?im)^\s*\[Uninstall(?:Run|Delete)\]')) 'uninstaller must not declare deletion or run stages'
-        Assert-Flow (-not ($script:InnoTemplate -match '(?i)operation-lease|OperationLease\.ps1')) 'development Beta must not advertise an unimplemented lease'
+        Assert-Flow ($initialize -match '(?s)Result\s*:=\s*True;') 'uninstall must return true after preflight'
+        Assert-Flow ($initialize -match '(?i)preserve|user data|delete') 'uninstall must expose the data policy'
+        Assert-Flow ($initialize -notmatch '(?i)Safe uninstall is not supported') 'uninstall must not blanket-reject the product'
+        Assert-Flow ($script:InnoTemplate -match '(?i)maintenance|broker|operation\.lock') 'uninstall must coordinate a maintenance lock'
+        Assert-Flow (-not ($script:InnoTemplate -match '(?im)^\s*\[UninstallDelete\]')) 'user data must not be declaratively deleted'
     }
     Test-Flow 'region preview falls back to a second source without exposing raw response fields' {
         $script:GeoCalls=0

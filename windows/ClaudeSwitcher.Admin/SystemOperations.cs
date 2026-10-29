@@ -144,7 +144,19 @@ public sealed class SystemOperations : ISystemOperations
             case BodyguardTaskDecision.Reject:
                 throw new InvalidOperationException("Refusing to remove a task not owned by this product and user.");
             case BodyguardTaskDecision.Remove:
-                task!.Stop(0);
+                if ((int)task!.State is 2 or 4)
+                {
+                    task.Stop(0);
+                    var stopTimer = Stopwatch.StartNew();
+                    while ((int)task.State is 2 or 4)
+                    {
+                        if (stopTimer.Elapsed > TimeSpan.FromSeconds(10))
+                        {
+                            throw new InvalidOperationException("Owned bodyguard task did not stop in time.");
+                        }
+                        Thread.Sleep(100);
+                    }
+                }
                 folder.DeleteTask(paths.TaskName, 0);
                 return;
             default:

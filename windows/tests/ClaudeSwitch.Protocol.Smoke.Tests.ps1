@@ -81,3 +81,13 @@ Add-CoreTest -Name 'protocol status observes a live operation identity without w
         Assert-Equal 'checking' $result.transactionPhase 'status retains a bounded known phase'
     } finally { Remove-CoreActivity; Exit-OperationLock -Handle $held }
 }
+
+Add-CoreTest -Name 'interrupted installer journal blocks core mutation and reports recovery' -Tag Protocol -Body {
+    New-TestWorkspace | Out-Null
+    $journal=Join-Path $script:BASE 'installer-maintenance.json'
+    [IO.File]::WriteAllText($journal,'{"schemaVersion":1,"phase":"holding"}')
+    Assert-True ($null -eq (Enter-OperationLock -WaitMilliseconds 0)) 'installer journal blocks every core mutation'
+    $result=Invoke-CoreRequest -Command status -OperationId ([guid]::NewGuid().ToString('D'))
+    Assert-True $result.recoveryRequired 'orphan installer material requires recovery'
+    Assert-True (Test-Path -LiteralPath $journal) 'query retains installer journal'
+}

@@ -121,7 +121,13 @@
         "uninstall removes owned task and shortcut",
         "uninstall preserves account data by default",
         "packaged files and task ACL/identity are verified",
-        "normal-user Claude launch is verified"
+        "normal-user Claude launch is verified",
+        "same-version repair preserves configuration and account snapshots",
+        "upgrade rollback restores old payload and task",
+        "interrupted upgrade leaves a recovery-required maintenance journal and lease",
+        "uninstall preserves user data by default and explicit deletion requires two confirmations",
+        "uninstall launcher runs data cleanup as the initiating non-elevated user",
+        "other-user tasks and reparse payloads block maintenance before mutation"
       ],
       "requiredDiagnosticKinds": [
         "setup-exit",

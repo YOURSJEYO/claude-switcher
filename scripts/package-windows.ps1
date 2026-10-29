@@ -130,6 +130,12 @@ function Get-RequiredPackageInputs {
     foreach ($item in @(
         @{ Key = 'GlobalJson'; Path = 'global.json'; Label = 'SDK pin' },
         @{ Key = 'InnoTemplate'; Path = 'windows/ClaudeSwitcher.iss'; Label = 'Inno Setup template' },
+        @{ Key = 'InnoLifecycle'; Path = 'windows/InstallerLifecycle.iss'; Label = 'Inno maintenance lifecycle' },
+        @{ Key = 'MaintenanceBroker'; Path = 'windows/helpers/InstallerMaintenance.ps1'; Label = 'maintenance broker' },
+        @{ Key = 'MaintenancePayload'; Path = 'windows/helpers/InstallerPayload.ps1'; Label = 'protected maintenance payload operations' },
+        @{ Key = 'MaintenanceTests'; Path = 'windows/ClaudeSwitcher.Admin.Tests/InstallerMaintenanceTests.ps1'; Label = 'maintenance regression tests' },
+        @{ Key = 'UpgradeTests'; Path = 'windows/ClaudeSwitcher.Admin.Tests/UpgradeFinalizeTests.ps1'; Label = 'upgrade finalization tests' },
+        @{ Key = 'RegistryTests'; Path = 'windows/ClaudeSwitcher.Admin.Tests/InstallerRegistryTests.ps1'; Label = 'installer registry rollback tests' },
         @{ Key = 'AppProject'; Path = 'windows/ClaudeSwitcher.App/ClaudeSwitcher.App.csproj'; Label = 'WPF application project' },
         @{ Key = 'AppTests'; Path = 'windows/ClaudeSwitcher.App.Tests/ClaudeSwitcher.App.Tests.csproj'; Label = 'WPF test project' },
         @{ Key = 'AdminProject'; Path = 'windows/ClaudeSwitcher.Admin/ClaudeSwitcher.Admin.csproj'; Label = 'admin project' },
@@ -435,6 +441,15 @@ function Invoke-WindowsPackage {
                 TimeoutSeconds = 300
             })
             Assert-ProcessSuccess $protocolResult "isolated installer protocol tests via $(Split-Path -Leaf $coreHost)"
+            foreach($suite in @('InstallerMaintenanceTests.ps1','UpgradeFinalizeTests.ps1','InstallerRegistryTests.ps1')) {
+                $maintenanceTests = Invoke-PackageProcess -Runner $ProcessRunner -Spec ([pscustomobject]@{
+                    FilePath = $coreHost
+                    Arguments = @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $repo ('windows/ClaudeSwitcher.Admin.Tests/'+$suite)))
+                    WorkingDirectory = $repo
+                    TimeoutSeconds = 300
+                })
+                Assert-ProcessSuccess $maintenanceTests "isolated maintenance tests $suite"
+            }
         }
 
         foreach ($testProject in @(

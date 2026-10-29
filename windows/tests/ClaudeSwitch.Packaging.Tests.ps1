@@ -48,6 +48,9 @@ function New-PackageFixture {
     }
     New-PackageFixtureFile $root 'windows/helpers/bodyguard-template.ps1' '# synthetic helper' | Out-Null
     New-PackageFixtureFile $root 'windows/helpers/setup.json' '{"synthetic":true}' | Out-Null
+    foreach($newFile in @('windows/helpers/InstallerMaintenance.ps1','windows/helpers/InstallerPayload.ps1','windows/InstallerLifecycle.iss','windows/ClaudeSwitcher.Admin.Tests/InstallerMaintenanceTests.ps1','windows/ClaudeSwitcher.Admin.Tests/UpgradeFinalizeTests.ps1','windows/ClaudeSwitcher.Admin.Tests/InstallerRegistryTests.ps1')) {
+        New-PackageFixtureFile $root $newFile '# synthetic maintenance payload' | Out-Null
+    }
     New-PackageFixtureFile $root 'windows/ClaudeSwitcher.App/ClaudeSwitcher.App.csproj' '<Project />' | Out-Null
     New-PackageFixtureFile $root 'windows/ClaudeSwitcher.App.Tests/ClaudeSwitcher.App.Tests.csproj' '<Project />' | Out-Null
     New-PackageFixtureFile $root 'windows/ClaudeSwitcher.Admin/ClaudeSwitcher.Admin.csproj' '<Project />' | Out-Null
@@ -482,9 +485,10 @@ Add-CoreTest -Tag Packaging -Name 'closed fallback zip contains approved scripts
     foreach ($expected in @(
         'windows/claude-switch.ps1', 'windows/SwitcherUI.ps1', 'windows/install.ps1',
         'windows/claude-bodyguard.ps1', 'windows/helpers/bodyguard-template.ps1',
+        'windows/helpers/InstallerMaintenance.ps1','windows/helpers/InstallerPayload.ps1',
         'windows/helpers/setup.json', 'windows/README.md', 'README.md', 'LICENSE', 'SECURITY.md', 'VERSION'
     )) { Assert-PackageContains $names $expected "fallback zip must include $expected" }
-    Assert-Equal 11 $names.Count 'fallback zip has an exact closed file list'
+    Assert-Equal 13 $names.Count 'fallback zip has an exact closed file list'
     Assert-Equal '1.2.3-beta.1' ((Get-PackageZipEntryText -Path $result.ZipPath -Name 'VERSION').Trim()) 'root VERSION records the package version'
     Assert-False ($names -contains 'windows/ClaudeSwitcher.Admin.Tests/InstallerProtocolTests.ps1') 'protocol tests are not release payload'
     foreach ($name in $names) {

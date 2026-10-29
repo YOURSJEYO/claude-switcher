@@ -96,10 +96,8 @@ public sealed class SetupConfigurationEntryTests
                 MainWindow? window = null;
                 try
                 {
-                    window = new MainWindow();
                     using var fixture = new SyntheticCoreProducer();
-                    typeof(MainWindow).GetField("_client", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
-                        .SetValue(window, fixture.Client);
+                    window = new MainWindow(null, () => fixture.Client);
                     SetState(window, MainWindowState.Initial.ApplyCheck(CoreResultParser.Parse(CoreResultParserTests.DetailJson(), 0, CoreCommand.CheckDetail, CoreResultParserTests.TestOperationId)));
                     var pending = new TaskCompletionSource<SetupApplyRunResult>(TaskCreationOptions.RunContinuationsAsynchronously);
                     var keepRunning = typeof(MainWindow).GetMethod(
@@ -153,10 +151,8 @@ public sealed class SetupConfigurationEntryTests
                 MainWindow? window = null;
                 try
                 {
-                    window = new MainWindow();
                     using var fixture = new SyntheticCoreProducer();
-                    typeof(MainWindow).GetField("_client", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
-                        .SetValue(window, fixture.Client);
+                    window = new MainWindow(null, () => fixture.Client);
                     SetState(window, MainWindowState.Initial.ApplyCheck(CoreResultParser.Parse(CoreResultParserTests.DetailJson(), 0, CoreCommand.CheckDetail, CoreResultParserTests.TestOperationId)));
                     var failed = Task.FromException<SetupApplyRunResult>(
                         new InvalidOperationException("synthetic observation failure"));
@@ -199,12 +195,12 @@ public sealed class SetupConfigurationEntryTests
         {
             Directory.CreateDirectory(_root);
             var path = Path.Combine(_root, "core.ps1");
-            var script = "$ErrorActionPreference = 'Stop'`n" +
-                "$id = @($args)[[Array]::IndexOf(@($args), '-OperationId') + 1]`n" +
-                "if ($args[0] -eq 'status') { $json = '" + CoreResultParserTests.StatusJson().Replace("'", "''", StringComparison.Ordinal) + "' }`n" +
-                "elseif ($args[0] -eq 'checkdetail') { $json = '" + CoreResultParserTests.DetailJson().Replace("'", "''", StringComparison.Ordinal) + "' }`n" +
-                "else { throw 'Unexpected synthetic command' }`n" +
-                "[Console]::Write($json.Replace('" + CoreResultParserTests.TestOperationId.ToString("D") + "', $id))`n";
+            var script = "$ErrorActionPreference = 'Stop'\n" +
+                "$id = @($args)[[Array]::IndexOf(@($args), '-OperationId') + 1]\n" +
+                "if ($args[0] -eq 'status') { $json = '" + CoreResultParserTests.StatusJson().Replace("'", "''", StringComparison.Ordinal) + "' }\n" +
+                "elseif ($args[0] -eq 'checkdetail') { $json = '" + CoreResultParserTests.DetailJson().Replace("'", "''", StringComparison.Ordinal) + "' }\n" +
+                "else { throw 'Unexpected synthetic command' }\n" +
+                "[Console]::Write($json.Replace('" + CoreResultParserTests.TestOperationId.ToString("D") + "', $id))\n";
             File.WriteAllText(path, script, new System.Text.UTF8Encoding(true));
             Client = new CoreClient(
                 path,

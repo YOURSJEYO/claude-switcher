@@ -5,8 +5,10 @@ $script:Failures = 0
 $script:TestRoot = Join-Path ([IO.Path]::GetTempPath()) ('claude-switcher-user-setup-tests-' + [guid]::NewGuid().Guid)
 $script:HelperPath = Join-Path (Split-Path $PSScriptRoot -Parent) 'helpers\UserSetup.ps1'
 $script:LeasePath = Join-Path (Split-Path $PSScriptRoot -Parent) 'helpers\OperationLease.ps1'
+$script:MaintenancePath = Join-Path (Split-Path $PSScriptRoot -Parent) 'helpers\InstallerMaintenance.ps1'
 . $script:HelperPath
 if (Test-Path -LiteralPath $script:LeasePath -PathType Leaf) { . $script:LeasePath }
+if (Test-Path -LiteralPath $script:MaintenancePath -PathType Leaf) { . $script:MaintenancePath }
 
 function Add-Test([string]$Name, [scriptblock]$Body) { [void]$script:Tests.Add([pscustomobject]@{ Name = $Name; Body = $Body }) }
 function Assert-True([bool]$Condition, [string]$Message) { if (-not $Condition) { throw "ASSERT: $Message" } }
@@ -399,7 +401,7 @@ Add-Test 'original-user setup blocks a pending transaction before any write' {
     Assert-False (Test-Path -LiteralPath $configPath) 'config must not be written'
 }
 
-Add-Test 'Inno upgrade and uninstall fail closed while preserving per-user data' {
+Add-Test 'Inno upgrade and uninstall preserve per-user data by default' {
     $repoRoot = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
     $issPath = Join-Path $repoRoot 'windows\ClaudeSwitcher.iss'
     Assert-True (Test-Path -LiteralPath $issPath -PathType Leaf) 'Inno template must exist'
@@ -416,13 +418,13 @@ Add-Test 'Inno upgrade and uninstall fail closed while preserving per-user data'
         }
         if ($inFiles -and $trimmed -and -not $trimmed.StartsWith(';')) { [void]$filesEntries.Add($trimmed) }
     }
-    Assert-Equal 1 $filesEntries.Count 'only the app payload is staged for a new installation'
-    $entry = [string]$filesEntries[0]
+    Assert-Equal 3 $filesEntries.Count 'app payload and temporary maintenance broker are staged'
+    $entry = [string](@($filesEntries | Where-Object { $_ -match '^Source: "\{#StageDir\}\\\*"; DestDir: "\{app\}";' })[0])
     Assert-True $entry.StartsWith('Source: "{#StageDir}\*"; DestDir: "{app}";') 'payload must be staged directly under the app directory'
     Assert-Match 'recursesubdirs\s+createallsubdirs' $entry 'payload subdirectories must be installed under the app directory'
     Assert-False ($entry -imatch 'uninsneveruninstall') 'program payload must be removed on uninstall'
     Assert-False $hasUninstallDelete 'uninstaller must not declare extra filesystem deletion outside managed app payload'
-    $template = $lines -join "`n"
+    $template = ($lines -join "`n") + "`n" + [IO.File]::ReadAllText((Join-Path $repoRoot 'windows/InstallerLifecycle.iss'))
     Assert-Match '(?im)^\s*Uninstallable=yes\s*$' $template 'uninstall must remain available'
     Assert-Match '(?im)^\s*DisableDirPage=yes\s*$' $template 'install location must stay fixed'
     Assert-Match '(?im)^\s*UsePreviousAppDir=no\s*$' $template 'a previous custom install path must not be reused'
@@ -432,12 +434,12 @@ Add-Test 'Inno upgrade and uninstall fail closed while preserving per-user data'
     Assert-False ($template -imatch '(?im)(?:^|[\\/])accounts(?:[\\/]|$)') 'uninstaller must not reference account archives'
     Assert-False ($template -imatch '(?i)(?:\{userappdata\}|\{appdata\}|%APPDATA%)\\Claude(?:\\|"|$)') 'uninstaller must not reference the Claude data directory'
     Assert-Match '(?im)^\s*CloseApplications=yes\s*$' $template 'Setup must not replace payload while the WPF executable is in use'
-    Assert-Match '(?s)function InitializeSetup.*?Result\s*:=\s*not\s+ExistingNativeInstall' $template 'existing installation must be refused before any wizard or file mutation'
-    Assert-Match 'does not support safe in-place upgrades' $template 'upgrade refusal must explain the limitation'
-    Assert-Match '(?s)function InitializeUninstall.*?Result\s*:=\s*False;.*?Safe uninstall is not supported' $template 'uninstall must be refused before mutation'
-    Assert-Match 'No scheduled tasks or program files were changed' $template 'uninstall refusal must guarantee no task or app file changes'
-    Assert-False ($template -imatch '(?i)OperationLease\.ps1|operation-lease\.|ExecAsOriginalUser.*?InitializeUninstall') 'unverified lease logic must not be advertised'
-    Assert-False ($template -imatch '(?im)^\s*\[Uninstall(?:Run|Delete)\]') 'no uninstall mutation may be declared'
+    Assert-Match '(?s)function InitializeSetup.*?Result\s*:=\s*True;' $template 'existing installation must enter a validated maintenance path'
+    Assert-Match '(?i)maintenance|broker|operation\.lock' $template 'upgrade must coordinate the operation lock'
+    Assert-False ($template -imatch 'does not support safe in-place upgrades') 'upgrade must not be blanket-rejected'
+    Assert-Match '(?s)function InitializeUninstall.*?Result\s*:=\s*True;' $template 'uninstall must remain available after preflight'
+    Assert-Match '(?i)preserve|user data|delete' $template 'uninstall must state the data policy'
+    Assert-False ($template -imatch '(?im)^\s*\[UninstallDelete\]') 'user data deletion must not use declarative Inno cleanup'
 }
 Add-Test 'UAC cancellation returns a visible retryable elevated-stage result' {
     $result = Invoke-ElevatedSystemSetup -HelperPath 'C:\synthetic\ClaudeSwitcher.Admin.exe' -Operation 'flush-dns' -UserSid 'S-1-5-21-1-2-3-1001' -SessionId 1 -Invoker {
@@ -494,6 +496,49 @@ Add-Test 'elevated invocation uses only the fixed scalar helper contract' {
     Assert-Match '--session-id 7' $captured.Arguments 'scalar session'
     Assert-Match '--time-zone-id "Pacific Standard Time"' $captured.Arguments 'quoted scalar timezone'
     Assert-False ($captured.Arguments -match '--request-file|--path|--command|--script') 'no caller path or command flags'
+}
+
+Add-Test 'installer maintenance preserves user data unless deletion is explicitly confirmed' {
+    Assert-True (Test-Path -LiteralPath $script:MaintenancePath -PathType Leaf) 'maintenance broker must be present'
+    Assert-True ($null -ne (Get-Command Invoke-InstallerUserDataCleanup -ErrorAction SilentlyContinue)) 'cleanup function must be exported'
+    $root = New-Workspace
+    $base = Join-Path $root '.claude-switcher'
+    $claude = Join-Path $root 'Claude'
+    New-Item -ItemType Directory -Force -Path $base, $claude | Out-Null
+    Set-Content -LiteralPath (Join-Path $base 'config.json') -Value '{}' -Encoding utf8
+    Set-Content -LiteralPath (Join-Path $claude 'session.json') -Value 'session' -Encoding utf8
+
+    $withoutConfirmation = Invoke-InstallerUserDataCleanup -BasePath $base -ClaudeDataPath $claude
+    Assert-False $withoutConfirmation.Success 'cleanup must require explicit confirmation'
+    Assert-Equal 'confirmation-required' $withoutConfirmation.Code 'missing confirmation must be explicit'
+    Assert-True (Test-Path -LiteralPath $base) 'default cleanup must preserve switcher data'
+    Assert-True (Test-Path -LiteralPath $claude) 'default cleanup must preserve Claude data'
+
+    $deleted = Invoke-InstallerUserDataCleanup -BasePath $base -ClaudeDataPath $claude -ConfirmDeleteUserData
+    Assert-True $deleted.Success $deleted.Error
+    Assert-False (Test-Path -LiteralPath $base) 'confirmed cleanup removes switcher data'
+    Assert-False (Test-Path -LiteralPath $claude) 'confirmed cleanup removes Claude data'
+}
+
+Add-Test 'installer maintenance rejects reparse points before deleting user data' {
+    Assert-True ($null -ne (Get-Command Invoke-InstallerUserDataCleanup -ErrorAction SilentlyContinue)) 'cleanup function must be exported'
+    $root = New-Workspace
+    $base = Join-Path $root '.claude-switcher'
+    $claude = Join-Path $root 'Claude'
+    New-Item -ItemType Directory -Force -Path $base, $claude | Out-Null
+    Set-Content -LiteralPath (Join-Path $base 'config.json') -Value '{}' -Encoding utf8
+    $link = Join-Path $base 'linked'
+    try {
+        New-Item -ItemType Junction -Path $link -Target $claude -ErrorAction Stop | Out-Null
+    } catch {
+        return
+    }
+
+    $result = Invoke-InstallerUserDataCleanup -BasePath $base -ClaudeDataPath $claude -ConfirmDeleteUserData
+    Assert-False $result.Success 'reparse data must fail closed'
+    Assert-Equal 'unsafe-user-data' $result.Code 'reparse rejection must be classified'
+    Assert-True (Test-Path -LiteralPath $base) 'reparse rejection must preserve switcher data'
+    Assert-True (Test-Path -LiteralPath $claude) 'reparse rejection must preserve Claude data'
 }
 
 

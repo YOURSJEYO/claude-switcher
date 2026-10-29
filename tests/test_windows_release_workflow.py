@@ -84,6 +84,7 @@ INNO_WORKFLOWS = (
 class WindowsReleaseWorkflowContractTests(unittest.TestCase):
     def test_inno_template_avoids_line_leading_preprocessor_like_control_codes(self) -> None:
         text = (ROOT / "windows/ClaudeSwitcher.iss").read_text(encoding="utf-8-sig")
+        text += (ROOT / "windows/InstallerLifecycle.iss").read_text(encoding="utf-8-sig")
         self.assertNotRegex(text, r"(?m)^\s+#13")
         self.assertIn("Chr(13) + Chr(10)", text)
 

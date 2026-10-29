@@ -1370,6 +1370,17 @@ function Test-CoreRecoveryEntry([string]$Path) {
 }
 
 function Enter-OperationLock([int]$WaitMilliseconds = 2000) {
+    $maintenanceMutex=$null
+    try {
+        $maintenanceMutex=[Threading.Mutex]::OpenExisting('Global\ClaudeSwitcher.InstallerMaintenance')
+        if(-not $maintenanceMutex.WaitOne(0)){return $null}
+        $maintenanceMutex.ReleaseMutex()
+    } catch [Threading.WaitHandleCannotBeOpenedException] {
+    } catch [Threading.AbandonedMutexException] {
+        if($null -ne $maintenanceMutex){$maintenanceMutex.ReleaseMutex()}
+    } catch {return $null}
+    finally {if($null -ne $maintenanceMutex){$maintenanceMutex.Dispose()}}
+    if (Test-CoreRecoveryEntry (Join-Path $BASE 'installer-maintenance.json')) { return $null }
     if (Test-CoreRecoveryEntry (Join-Path $BASE 'operation.lease.json')) { return $null }
     $timer = [Diagnostics.Stopwatch]::StartNew()
     do {
@@ -1762,7 +1773,7 @@ function Get-CoreOperationStatus {
         $journal=$null; $activity=$null
         if([IO.File]::Exists("$BASE\transaction.json")){ try{$journal=[IO.File]::ReadAllText("$BASE\transaction.json") | ConvertFrom-Json -ErrorAction Stop}catch{$invalid=$true} }
         if($busy -and [IO.File]::Exists("$BASE\operation.json")){ try{$activity=[IO.File]::ReadAllText("$BASE\operation.json") | ConvertFrom-Json -ErrorAction Stop}catch{} }
-        $residue=@("$BASE\operation.lease.json","$BASE\transaction.json","$DATA.new","$DATA.previous","$DATA.claude-switch-staging","$BASE\accounts\A.new","$BASE\accounts\A.previous","$BASE\accounts\B.new","$BASE\accounts\B.previous")
+        $residue=@("$BASE\installer-maintenance.json","$BASE\operation.lease.json","$BASE\transaction.json","$DATA.new","$DATA.previous","$DATA.claude-switch-staging","$BASE\accounts\A.new","$BASE\accounts\A.previous","$BASE\accounts\B.new","$BASE\accounts\B.previous")
         $pending=$invalid -or @($residue | Where-Object{Test-CoreRecoveryEntry $_}).Count -gt 0
         if($busy -or $pending){
             $state.phase=if($busy){'running'}else{'recoveryRequired'}; $state.recoveryRequired=-not $busy
@@ -1934,7 +1945,7 @@ function Invoke-UpdateNow {
         "MESSAGE=$($restriction.Message)"
         return
     }
-    $residue=@("$BASE\operation.lease.json","$BASE\transaction.json","$DATA.new","$DATA.previous","$DATA.claude-switch-staging","$BASE\accounts\A.new","$BASE\accounts\A.previous","$BASE\accounts\B.new","$BASE\accounts\B.previous")
+    $residue=@("$BASE\installer-maintenance.json","$BASE\operation.lease.json","$BASE\transaction.json","$DATA.new","$DATA.previous","$DATA.claude-switch-staging","$BASE\accounts\A.new","$BASE\accounts\A.previous","$BASE\accounts\B.new","$BASE\accounts\B.previous")
     if (@($residue | Where-Object { Test-CoreRecoveryEntry $_ }).Count -gt 0) {
         $script:UpdateExitCode=3
         'STATUS=recovery_required'

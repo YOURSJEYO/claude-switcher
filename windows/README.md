@@ -98,14 +98,15 @@ TUN 判定顺序：先看是否存在 `198.18.x.x` 假 IP（Clash 系 fake-ip）
 | IPv6 | 关闭的是所有网卡的 ms_tcpip6 绑定;要恢复: `Enable-NetAdapterBinding -ComponentID ms_tcpip6` |
 | SmartScreen | 首次运行可能弹"Windows 已保护你的电脑" → 点「更多信息」→「仍要运行」 |
 | 账号数据目录 | Windows 版在 `%APPDATA%\Claude`(与 macOS 路径不同,逻辑相同) |
-| 卸载 | 当前原生 Beta 禁止卸载；保留 `%USERPROFILE%\.claude-switcher`、账号快照和恢复材料，等待受支持的卸载流程 |
+| 卸载 | 从普通桌面会话运行开始菜单中的 Uninstall Claude Switcher；默认保留配置、快照和 Claude 登录数据 |
 
 ## 升级、卸载与数据保留（尚未验收）
 
 - 升级和卸载的验收要求是 **preserve** A/B 账号归档、地区/代理配置和其他用户数据。
-- 当前开发 Beta 保留新装入口，但检测到已有原生安装时会在文件变更前拒绝升级；卸载入口也会直接拒绝，不删除任务或程序文件。尚未实现覆盖整个文件变更阶段的持续锁，不能把这些拒绝行为视为已支持安全升级/卸载。
-- IPv6、时区等系统设置只有在明确请求卸载清理、且当前值仍与安装器写入值一致时才应恢复；不得覆盖后来由用户或其他软件设置的值。
-- 以上是源码设计与待验收要求，不代表已经在安装器或 Windows 10/11 上验证。卸载前仍建议自行备份 `%USERPROFILE%\.claude-switcher` 和 `%APPDATA%\Claude`。
+- 源码已接入同一路径升级/修复：新 Setup 检测旧安装后启动普通用户 maintenance broker，持续持有 `operation.lock` 和租约；关闭 Claude 与切换器后移除通过归属校验的任务，在受保护的 `%ProgramFiles%\ClaudeSwitcher.maintenance` 中保存校验过的旧载荷，再替换程序、用户模板和版本文件并恢复原有任务。`config.json`、`accounts` 与 `%APPDATA%\Claude` 保持不变。失败时先恢复程序载荷，再恢复用户模板和任务。
+- 卸载必须由普通用户入口启动：开始菜单 `Uninstall Claude Switcher` 或“已安装的应用”中的卸载入口。普通用户 broker 持锁，再启动提升后的 Inno 卸载器；默认保留 `%USERPROFILE%\.claude-switcher` 与 `%APPDATA%\Claude`。提示删除用户数据时选择 No 保留（默认）；Yes 后仍需再次确认，才会在用户权限下删除配置、全部快照和 Claude 登录数据。静默卸载始终保留数据。直接运行 `unins000.exe` 会拒绝并提示使用普通用户入口。
+- 维护时 Claude 必须完全退出。其他用户的保镖任务、未迁移的 `ClaudeBodyguard`、账号恢复残留、已有 maintenance 备份或失效租约会阻止操作。中断时保留 `installer-maintenance.json`、租约和受保护备份；不要手动删除恢复材料来绕过阻断。卸载不会自动改回时区或 IPv6，避免覆盖用户后续更改。
+- 以上升级/卸载实现仍需在 Windows 10/11 一次性 VM 中验证实际安装、UAC、回滚和数据保留；隔离回归与 CI 编译不等于 VM 验收。
 
 ## 旧版保镖任务迁移
 
@@ -145,7 +146,7 @@ powershell.exe -NoProfile -File scripts/package-windows.ps1 `
 
 ## 已知限制
 
-- **发布阻塞：** 覆盖文件变更全过程的核心 `operation.lock` 持续租约仍未实现。当前已禁止已有原生安装的升级和卸载，避免在持锁范围不足时替换/删除程序。需要解决原始用户、卸载身份和多用户协调，完成隔离 VM 验证后才能启用这些入口及发布安装包。
+- **验收边界：** 升级、修复与默认保留数据的卸载已接入源码和隔离测试。真实安装器、UAC、断电/进程中断回滚及 Windows 10/11 VM 验收仍需执行；未通过前不能视为稳定版。
 - Windows 原生版尚未完成 Windows 11/Windows 10 的独立 VM 验收，不能视为稳定版。
 - 本机没有 ISCC，未成功编译 Setup EXE；也没有安装器执行、UAC、升级/卸载、数据保留或 release readiness 证据。
 - 应用和 Setup EXE 均未签名，SmartScreen 拦截属于预期现象。
