@@ -1,10 +1,11 @@
-# Isolated registry rollback tests. No real registry hive is opened.
+﻿# Isolated registry rollback tests. No real registry hive is opened.
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 . (Join-Path $repo 'windows/helpers/InstallerPayload.ps1')
 
 $script:RegistryPath = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{85E9726B-98E3-4CB8-B055-7E8A854D777B}_is1'
 $script:MockKeys = @{}
+$script:MockSecurity = $null
 $script:Mutations = New-Object 'Collections.Generic.List[string]'
 $script:Passed = 0
 
@@ -27,10 +28,16 @@ function New-MockKey {
 function Reset-MockRegistry {
     $script:MockKeys = @{}
     $script:Mutations = New-Object 'Collections.Generic.List[string]'
+    $script:MockSecurity = $null
 }
 function New-MockRegistryAdapter {
     $adapter = New-InstallerRegistryAdapter `
-        -TestKey { param([string]$Path) $script:MockKeys.ContainsKey($Path) } `
+        -TestKey {
+            param([string]$Path)
+            $exists=$script:MockKeys.ContainsKey($Path)
+            if($exists -and $null -ne $script:MockSecurity){Assert-InstallerRegistrySecurity -Security $script:MockSecurity}
+            return $exists
+        } `
         -GetSubKeyNames { param([string]$Path) if (-not $script:MockKeys.ContainsKey($Path)) { return @() }; return @($script:MockKeys[$Path].SubKeys) } `
         -GetValues {
             param([string]$Path)
@@ -65,6 +72,23 @@ function Get-MockValue([string]$Name) {
     return $key.Values[$Name]
 }
 
+function New-TestRegistrySecurity {
+    param(
+        [Security.AccessControl.RegistryRights]$Rights=[Security.AccessControl.RegistryRights]::ReadKey,
+        [Security.AccessControl.PropagationFlags]$Propagation=[Security.AccessControl.PropagationFlags]::None,
+        [string]$Owner='S-1-5-32-544',
+        [Security.AccessControl.AccessControlType]$AccessType=[Security.AccessControl.AccessControlType]::Allow
+    )
+    $security=[Security.AccessControl.RegistrySecurity]::new()
+    $security.SetOwner([Security.Principal.SecurityIdentifier]::new($Owner))
+    $inheritance=[Security.AccessControl.InheritanceFlags]::None
+    if($Propagation -ne [Security.AccessControl.PropagationFlags]::None){$inheritance=[Security.AccessControl.InheritanceFlags]::ContainerInherit}
+    $rule=[Security.AccessControl.RegistryAccessRule]::new(
+        [Security.Principal.SecurityIdentifier]::new('S-1-5-32-545'),$Rights,$inheritance,$Propagation,$AccessType)
+    [void]$security.AddAccessRule($rule)
+    return $security
+}
+
 function Copy-Json($Value) {
     return ($Value | ConvertTo-Json -Depth 10 -Compress | ConvertFrom-Json)
 }
@@ -76,6 +100,59 @@ function Run-Test([string]$Name, [scriptblock]$Body) {
 }
 
 try {
+    Run-Test 'standard Users ReadKey permission does not block a rollback snapshot' {
+        # In-memory Windows RegistrySecurity, never an opened registry key.
+        $security=New-TestRegistrySecurity
+        Assert-InstallerRegistrySecurity -Security $security
+    }
+    Run-Test 'ReadPermissions and ExecuteKey remain read-only access' {
+        foreach($right in @([Security.AccessControl.RegistryRights]::ReadPermissions,[Security.AccessControl.RegistryRights]::ExecuteKey)) {
+            Assert-InstallerRegistrySecurity -Security (New-TestRegistrySecurity -Rights $right)
+        }
+    }
+    Run-Test 'every effective mutation grant still blocks the rollback snapshot' {
+        foreach($right in @('SetValue','CreateSubKey','Delete','ChangePermissions','TakeOwnership','WriteKey','FullControl')) {
+            $security=New-TestRegistrySecurity -Rights ([Security.AccessControl.RegistryRights]$right)
+            Assert-Throws {Assert-InstallerRegistrySecurity -Security $security} ('mutation grant must fail: '+$right)
+        }
+    }
+    Run-Test 'native key-create-link access remains a mutation' {
+        $security=New-TestRegistrySecurity -Rights ([Security.AccessControl.RegistryRights]0x20)
+        Assert-Throws {Assert-InstallerRegistrySecurity -Security $security} 'KEY_CREATE_LINK must fail'
+    }
+    Run-Test 'generic write and generic all grants remain blocked' {
+        foreach($right in @('GW','GA')) {
+            $security=[Security.AccessControl.RegistrySecurity]::new()
+            $security.SetSecurityDescriptorSddlForm(('O:BAG:BAD:P(A;;'+$right+';;;BU)'))
+            Assert-Throws {Assert-InstallerRegistrySecurity -Security $security} ('generic mutation must fail: '+$right)
+        }
+    }
+    Run-Test 'inherit-only grants do not apply to the protected key itself' {
+        $security=New-TestRegistrySecurity -Rights FullControl -Propagation InheritOnly
+        Assert-InstallerRegistrySecurity -Security $security
+    }
+    Run-Test 'denied write rights do not become an allow grant' {
+        $security=New-TestRegistrySecurity -Rights WriteKey -AccessType Deny
+        Assert-InstallerRegistrySecurity -Security $security
+    }
+    Run-Test 'an untrusted owner is rejected even with a read-only DACL' {
+        $security=New-TestRegistrySecurity -Owner 'S-1-5-21-1-2-3-1001'
+        Assert-Throws {Assert-InstallerRegistrySecurity -Security $security} 'untrusted owner must fail'
+    }
+    Run-Test 'rollback registry snapshot validates a real read-only descriptor before reading values' {
+        $adapter=New-MockRegistryAdapter
+        $script:MockSecurity=New-TestRegistrySecurity
+        $script:MockKeys[$script:RegistryPath]=New-MockKey -Values @{
+            DisplayVersion=[pscustomobject]@{Kind=[Microsoft.Win32.RegistryValueKind]::String;Value='1.2.3'}
+        }
+        $snapshot=Get-InstallerRegistrySnapshot -Path $script:RegistryPath -RegistryAdapter $adapter
+        Assert-True $snapshot.existed 'a protected read-only key must be snapshotted'
+        Assert-Equal '1.2.3' @($snapshot.values)[0].data 'version is preserved'
+        Assert-Equal 0 $script:Mutations.Count 'snapshot must not change the registry'
+        $script:MockSecurity=New-TestRegistrySecurity -Rights SetValue
+        Assert-Throws {Get-InstallerRegistrySnapshot -Path $script:RegistryPath -RegistryAdapter $adapter} 'a writable key must still fail before backup'
+        Assert-Equal 0 $script:Mutations.Count 'rejected snapshot must not change the registry'
+    }
     Run-Test 'absent key restore deletes a newly-created key' {
         $adapter = New-MockRegistryAdapter
         $snapshot = Get-InstallerRegistrySnapshot -Path $script:RegistryPath -RegistryAdapter $adapter

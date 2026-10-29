@@ -6,6 +6,7 @@ var
   MaintenanceComplete, CommitSent: Boolean;
   ContextDirectory, PayloadScript: String;
   ExpectedBrokerId: LongWord;
+  PayloadExitCode: Integer;
 
 function GetCurrentProcessId(): LongWord;
   external 'GetCurrentProcessId@kernel32.dll stdcall';
@@ -173,11 +174,17 @@ var
 begin
   // Pin embedded code also at uninstall time, before elevated execution.
   Result := False;
+  PayloadExitCode := -1;
   if CompareText(GetSHA256OfFile(PayloadScript), '{#PayloadScriptHash}') <> 0 then exit;
   Result := Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
     '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File ' + QuoteArg(PayloadScript) + ' -Mode ' + Mode,
     '', SW_HIDE, ewWaitUntilTerminated, ExitCode);
-  if Result then Result := ExitCode = 0;
+  if Result then
+  begin
+    PayloadExitCode := ExitCode;
+    Result := ExitCode = 0;
+  end;
+  if not Result then Log('Protected payload operation ' + Mode + ' failed; stage code ' + IntToStr(PayloadExitCode));
 end;
 
 function StartMaintenanceBroker(): Boolean;
@@ -259,7 +266,7 @@ begin
   end;
   if not RunPayload('Backup') then
   begin
-    Result := 'A verified rollback copy could not be created. No program files were changed.';
+    Result := 'A verified rollback copy could not be created (stage code ' + IntToStr(PayloadExitCode) + '). No program files were changed. Keep your existing data and review the Setup log.';
     RollbackMaintenance();
     exit;
   end;

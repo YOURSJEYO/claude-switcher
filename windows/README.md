@@ -107,6 +107,7 @@ TUN 判定顺序：先看是否存在 `198.18.x.x` 假 IP（Clash 系 fake-ip）
 - 卸载必须由普通用户入口启动：开始菜单 `Uninstall Claude Switcher` 或“已安装的应用”中的卸载入口。普通用户 broker 持锁，再启动提升后的 Inno 卸载器；默认保留 `%USERPROFILE%\.claude-switcher` 与 `%APPDATA%\Claude`。提示删除用户数据时选择 No 保留（默认）；Yes 后仍需再次确认，才会在用户权限下删除配置、全部快照和 Claude 登录数据。静默卸载始终保留数据。直接运行 `unins000.exe` 会拒绝并提示使用普通用户入口。
 - 维护时 Claude 必须完全退出。其他用户的保镖任务、未迁移的 `ClaudeBodyguard`、账号恢复残留、已有 maintenance 备份或失效租约会阻止操作。中断时保留 `installer-maintenance.json`、租约和受保护备份；不要手动删除恢复材料来绕过阻断。卸载不会自动改回时区或 IPv6，避免覆盖用户后续更改。
 - 以上升级/卸载实现仍需在 Windows 10/11 一次性 VM 中验证实际安装、UAC、回滚和数据保留；隔离回归与 CI 编译不等于 VM 验收。
+- 旧测试包 `0.0.0-ci.40859485103.1` 可能在升级备份阶段提示 `A verified rollback copy could not be created`：注册表 ACL 校验误把 `WriteKey` 中共用的读取权限算作写权限，正常 `Users: ReadKey` 因而被拒绝。修复后的构建只检查实际修改权限，仍拒绝可写 ACL 和异常所有者。新提示会附带阶段码：`20` 注册表快照/ACL，`21` 备份目录，`22` 原文件哈希，`23` 文件复制，`24` 复制校验，`25` 备份记录。遇到错误先取消并保留资料，不要删除账号目录或未知恢复材料。
 
 ## 旧版保镖任务迁移
 

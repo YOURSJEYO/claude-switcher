@@ -1,4 +1,4 @@
-# Elevated fixed-path payload operations used only by the embedded Inno installer.
+﻿# Elevated fixed-path payload operations used only by the embedded Inno installer.
 [CmdletBinding()]
 param([ValidateSet('Validate','Backup','Verify','Restore','Commit')][string]$Mode)
 $ErrorActionPreference = 'Stop'
@@ -296,6 +296,23 @@ function Restore-InstallerRegistrySnapshot {
     }
 }
 
+function Assert-InstallerRegistrySecurity {
+    param([Parameter(Mandatory=$true)][Security.AccessControl.RegistrySecurity]$Security)
+    $trusted = @('S-1-5-18','S-1-5-32-544','S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464')
+    $owner = $Security.GetOwner([Security.Principal.SecurityIdentifier]).Value
+    if ($trusted -notcontains $owner) { throw 'Registry key has an untrusted owner.' }
+    # WriteKey is a composite containing READ_CONTROL, which ReadKey also
+    # contains. Only actual mutations belong in this mask (KEY_CREATE_LINK=0x20).
+    $writeMask = [Security.AccessControl.RegistryRights]::SetValue -bor [Security.AccessControl.RegistryRights]::CreateSubKey -bor [Security.AccessControl.RegistryRights]::Delete -bor [Security.AccessControl.RegistryRights]::ChangePermissions -bor [Security.AccessControl.RegistryRights]::TakeOwnership -bor 0x20
+    foreach ($rule in $Security.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])) {
+        if ($rule.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly) { continue }
+        if ($rule.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and $trusted -notcontains $rule.IdentityReference.Value) {
+            $bits=[BitConverter]::ToUInt32([BitConverter]::GetBytes([int]$rule.RegistryRights),0)
+            if (($bits -band [uint32]$writeMask) -ne 0 -or ($bits -band [uint32]0x50000000) -ne 0) { throw 'Registry key is user writable.' }
+        }
+    }
+}
+
 function Assert-InstallerRegistryProtected {
     param([string]$Path)
     $canonical = Assert-InstallerRegistryPath $Path
@@ -304,15 +321,7 @@ function Assert-InstallerRegistryProtected {
     if ($null -eq $key) { return }
     try {
         $security = $key.GetAccessControl([Security.AccessControl.AccessControlSections]::Owner -bor [Security.AccessControl.AccessControlSections]::Access)
-        $trusted = @('S-1-5-18','S-1-5-32-544','S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464')
-        $owner = $security.GetOwner([Security.Principal.SecurityIdentifier]).Value
-        if ($trusted -notcontains $owner) { throw 'Registry key has an untrusted owner.' }
-        $writeMask = [Security.AccessControl.RegistryRights]::SetValue -bor [Security.AccessControl.RegistryRights]::CreateSubKey -bor [Security.AccessControl.RegistryRights]::Delete -bor [Security.AccessControl.RegistryRights]::ChangePermissions -bor [Security.AccessControl.RegistryRights]::TakeOwnership -bor [Security.AccessControl.RegistryRights]::WriteKey
-        foreach ($rule in $security.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])) {
-            if ($rule.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and $trusted -notcontains $rule.IdentityReference.Value) {
-                if (([int]$rule.RegistryRights -band [int]$writeMask) -ne 0) { throw 'Registry key is user writable.' }
-            }
-        }
+        Assert-InstallerRegistrySecurity -Security $security
     } finally { $key.Dispose() }
 }
 
@@ -386,6 +395,7 @@ function New-InstallerRealRegistryAdapter {
 }
 function Invoke-InstallerPayloadOperation {
     param([string]$Mode,[object]$RegistryAdapter=$null)
+    $script:InstallerPayloadFailureCode=10 # protected install preflight
     $programFiles = [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles)
     $root = Join-Path $programFiles 'ClaudeSwitcher'
     $backup = Join-Path $programFiles 'ClaudeSwitcher.maintenance'
@@ -404,19 +414,27 @@ function Invoke-InstallerPayloadOperation {
     }
     if ($Mode -eq 'Backup') {
         Invoke-InstallerPayloadOperation 'Validate'
+        $script:InstallerPayloadFailureCode=20 # registry snapshot/ACL
         if ($null -eq $RegistryAdapter) { $RegistryAdapter = New-InstallerRealRegistryAdapter }
         $registrySnapshot = Get-InstallerRegistrySnapshot -Path $registryPath -RegistryAdapter $RegistryAdapter
+        $script:InstallerPayloadFailureCode=21 # protected backup directory
         [void][IO.Directory]::CreateDirectory($backup)
         Assert-InstallerProtectedPath $backup $programFiles
+        $script:InstallerPayloadFailureCode=22 # installed payload hashing
         $record = [ordered]@{schemaVersion=1; files=@(Get-InstallerPayloadManifest $root); registry=$registrySnapshot}
+        $script:InstallerPayloadFailureCode=23 # payload copy
         Copy-InstallerPayload $root $payload
+        $script:InstallerPayloadFailureCode=24 # copied payload verification
         if (-not (Test-InstallerPayloadManifest $payload $record.files)) { throw 'Rollback copy did not match the installed payload.' }
+        $script:InstallerPayloadFailureCode=25 # durable backup receipt
         [IO.File]::WriteAllText($recordPath,($record | ConvertTo-Json -Depth 10 -Compress),[Text.UTF8Encoding]::new($false))
         return
     }
+    $script:InstallerPayloadFailureCode=30 # recovery payload validation
     Assert-InstallerProtectedPath $backup $programFiles
     foreach ($file in @(Get-InstallerPayloadFiles $backup)) { Assert-InstallerProtectedPath $file.FullName $backup }
     if ($Mode -eq 'Commit') {
+        $script:InstallerPayloadFailureCode=40 # committed backup cleanup
         Remove-Item -LiteralPath $backup -Recurse -Force -ErrorAction Stop
         return
     }
@@ -427,6 +445,7 @@ function Invoke-InstallerPayloadOperation {
     # Validate the registry receipt before touching the installed payload.
     $null = ConvertFrom-InstallerRegistrySnapshot $record.registry
     if($Mode -eq 'Verify'){return}
+    $script:InstallerPayloadFailureCode=31 # restore original program files
     if (Test-Path -LiteralPath $root) {
         Assert-InstallerProtectedPath $root $programFiles
         foreach ($file in @(Get-InstallerPayloadFiles $root)) { Assert-InstallerProtectedPath $file.FullName $root }
@@ -435,10 +454,15 @@ function Invoke-InstallerPayloadOperation {
     Copy-InstallerPayload $payload $root
     if (-not (Test-InstallerPayloadManifest $root @($record.files))) { throw 'Restored payload could not be verified.' }
     if ($null -eq $RegistryAdapter) { $RegistryAdapter = New-InstallerRealRegistryAdapter }
+    $script:InstallerPayloadFailureCode=32 # restore original registration
     Restore-InstallerRegistrySnapshot -Path $registryPath -Snapshot $record.registry -RegistryAdapter $RegistryAdapter
 }
 
 if ($MyInvocation.InvocationName -ne '.') {
     try { Invoke-InstallerPayloadOperation $Mode; exit 0 }
-    catch { Write-Error 'Protected installer payload operation failed; retain maintenance recovery material.'; exit 1 }
+    catch {
+        $failureCode=if($null -ne $script:InstallerPayloadFailureCode){[int]$script:InstallerPayloadFailureCode}else{1}
+        [Console]::Error.WriteLine(('Protected installer payload operation failed (stage code {0}); retain maintenance recovery material.' -f $failureCode))
+        exit $failureCode
+    }
 }
