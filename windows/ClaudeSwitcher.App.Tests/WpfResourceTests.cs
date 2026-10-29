@@ -6,8 +6,20 @@ using Xunit;
 
 namespace ClaudeSwitcher.App.Tests;
 
+[Collection("WPF core integration")]
 public sealed class WpfResourceTests
 {
+    [Fact]
+    public void ResourceChecksShareTheNonParallelWpfCollection()
+    {
+        var collection = Assert.Single(typeof(WpfResourceTests).CustomAttributes,
+            attribute => attribute.AttributeType == typeof(CollectionAttribute));
+        Assert.Equal("WPF core integration", collection.ConstructorArguments[0].Value);
+        var definition = Assert.IsType<CollectionDefinitionAttribute>(
+            Attribute.GetCustomAttribute(typeof(WpfCoreIntegrationCollection), typeof(CollectionDefinitionAttribute)));
+        Assert.True(definition.DisableParallelization);
+    }
+
     [Fact]
     public async Task CompiledResources_WireStartupAndBindStatusColorsWithoutLoadingWindow()
     {
