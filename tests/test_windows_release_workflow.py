@@ -75,6 +75,7 @@ class WindowsReleaseWorkflowContractTests(unittest.TestCase):
             "actions/setup-dotnet@v4",
             "10.0.403",
             "innosetup-6.7.3.exe",
+            "https://github.com/jrsoftware/issrc/releases/download/is-6_7_3/innosetup-6.7.3.exe",
             "Get-AuthenticodeSignature",
             "scripts/package-windows.ps1",
             "ClaudeSwitcher-$env:VERSION-windows-setup.exe",
@@ -184,6 +185,7 @@ class WindowsReleaseWorkflowContractTests(unittest.TestCase):
         windows_text = job_text(jobs["build-windows"])
         self.assertIn("scripts/package-windows.ps1", windows_text)
         self.assertIn("Jordan Russell|Pyrsys", windows_text)
+        self.assertIn("https://github.com/jrsoftware/issrc/releases/download/is-6_7_3/innosetup-6.7.3.exe", windows_text)
         self.assertIn("actions/upload-artifact@", windows_text)
         self.assertNotIn("gh release", windows_text)
 
