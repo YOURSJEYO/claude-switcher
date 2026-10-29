@@ -136,7 +136,7 @@ jobs:
           $installer = Join-Path $env:RUNNER_TEMP 'innosetup-6.7.3.exe'
           Invoke-WebRequest -Uri 'https://files.jrsoftware.org/is/6/innosetup-6.7.3.exe' -OutFile $installer
           $signature = Get-AuthenticodeSignature -LiteralPath $installer
-          if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'Jordan Russell') {
+          if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'Jordan Russell|Pyrsys') {
             throw "Inno Setup installer signature validation failed: $($signature.Status) $($signature.SignerCertificate.Subject)"
           }
           $process = Start-Process -FilePath $installer -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-' -Wait -PassThru

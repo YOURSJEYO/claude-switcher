@@ -142,6 +142,7 @@ class WindowsReleaseWorkflowContractTests(unittest.TestCase):
             "ClaudeSwitcher-",
             "-windows-setup.exe",
             "-windows.zip",
+            "Jordan Russell|Pyrsys",
         ):
             self.assertIn(required, text)
         self.assertNotIn("--no-restore", text)
@@ -182,6 +183,7 @@ class WindowsReleaseWorkflowContractTests(unittest.TestCase):
 
         windows_text = job_text(jobs["build-windows"])
         self.assertIn("scripts/package-windows.ps1", windows_text)
+        self.assertIn("Jordan Russell|Pyrsys", windows_text)
         self.assertIn("actions/upload-artifact@", windows_text)
         self.assertNotIn("gh release", windows_text)
 
