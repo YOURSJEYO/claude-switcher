@@ -227,10 +227,25 @@ function Bind-MaintenanceUninstallerChild {
     try {
         $process=Get-CimInstance Win32_Process -Filter ('ProcessId='+$ClientId) -ErrorAction Stop
         $image=[InstallerPipeClientIdentity]::Image($ClientId)
-        if(-not $image){return $false}
+        if(-not $image){$image=[string]$process.ExecutablePath}
         $hash='';$unavailable=$false
-        try{$hash=(Get-FileHash -LiteralPath $image -Algorithm SHA256 -ErrorAction Stop).Hash}
-        catch [UnauthorizedAccessException] {$unavailable=$true}
+        if(-not $image) {
+            # Cross-account UAC can hide both the image path and its private
+            # temp file. The exact trusted parent, kernel PID, instance token
+            # and WMI image name still attest the Inno-created second phase.
+            $image=[string]$process.Name
+            $unavailable=$true
+        } else {
+            try{$hash=(Get-FileHash -LiteralPath $image -Algorithm SHA256 -ErrorAction Stop).Hash}
+            catch {
+                $errorException=$_.Exception
+                while($null -ne $errorException) {
+                    if($errorException -is [UnauthorizedAccessException] -or $errorException -is [Security.SecurityException]){$unavailable=$true;break}
+                    $errorException=$errorException.InnerException
+                }
+                if(-not $unavailable){throw}
+            }
+        }
         $record=[pscustomobject]@{ParentId=$process.ParentProcessId;Image=$image;Hash=$hash;HashUnavailable=$unavailable}
         if(-not (Test-MaintenanceUninstallerChild $Channel.ExpectedParentId $Channel.UninstallerHash $record)){return $false}
         $Channel.ExpectedParentId=[int]$ClientId

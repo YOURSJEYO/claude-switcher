@@ -73,6 +73,10 @@ try {
         Assert (-not (Test-MaintenanceUninstallerChild 100 $hash $record)) 'changed executable is rejected'
         $record.Hash='';$record.HashUnavailable=$true
         Assert (Test-MaintenanceUninstallerChild 100 $hash $record) 'alternate-admin private temp relies on exact kernel parent and authenticated token'
+        $record.Image='_unins.tmp'
+        Assert (Test-MaintenanceUninstallerChild 100 $hash $record) 'WMI image name remains usable when the elevated image path is unavailable'
+        $record.Image='unknown.exe'
+        Assert (-not (Test-MaintenanceUninstallerChild 100 $hash $record)) 'an unrelated child image is always rejected'
     }
     Test 'uninstall stages its launcher only after holding the lock and removing the task' {
         $f=New-Fixture
