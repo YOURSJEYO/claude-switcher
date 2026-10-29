@@ -99,7 +99,7 @@ procedure CurPageChanged(CurPageID: Integer);
 begin
   if CurPageID = wpFinished then
     WizardForm.FinishedLabel.Caption := WizardForm.FinishedLabel.Caption +
-      #13#10#13#10 + 'Open Claude Switcher from your ordinary desktop session to complete configuration. If Setup was started from an elevated terminal, close it and use the Start menu shortcut.';
+      Chr(13) + Chr(10) + Chr(13) + Chr(10) + 'Open Claude Switcher from your ordinary desktop session to complete configuration. If Setup was started from an elevated terminal, close it and use the Start menu shortcut.';
 end;
 
 function InitializeUninstall(): Boolean;
