@@ -10,6 +10,9 @@ var
 function GetCurrentProcessId(): LongWord;
   external 'GetCurrentProcessId@kernel32.dll stdcall';
 
+function GetTickCount(): LongWord;
+  external 'GetTickCount@kernel32.dll stdcall';
+
 function GetFileAttributes(const Path: String): LongWord;
   external 'GetFileAttributesW@kernel32.dll stdcall';
 
