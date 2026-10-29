@@ -467,6 +467,7 @@ function Invoke-UserUninstall {
     Assert-InstallerProtectedPath $root (Split-Path $root -Parent)
     foreach($file in @(Get-InstallerPayloadFiles $root)){Assert-InstallerProtectedPath $file.FullName $root}
     $uninstallHash=(Get-FileHash -LiteralPath (Join-Path $root 'unins000.exe') -Algorithm SHA256).Hash
+    $launchState=@{Started=$false}
     $startUninstaller={
         param($operation)
         # Inno holds unins000.dat exclusively in its second phase. Snapshot it
@@ -480,7 +481,9 @@ function Invoke-UserUninstall {
         }
         $backup.Refresh()
         if($backup.ExitCode -ne 0){throw 'Protected uninstall backup failed.'}
-        Start-Process -FilePath (Join-Path $root 'unins000.exe') -ArgumentList $arguments -Verb RunAs -WindowStyle Hidden -PassThru
+        $started=Start-Process -FilePath (Join-Path $root 'unins000.exe') -ArgumentList $arguments -Verb RunAs -WindowStyle Hidden -PassThru
+        $launchState.Started=$true
+        return $started
     }
     $mutex=[Threading.Mutex]::new($false,'Global\ClaudeSwitcher.InstallerMaintenance')
     $owned=$false
@@ -488,7 +491,11 @@ function Invoke-UserUninstall {
         try{$owned=$mutex.WaitOne(0)}catch [Threading.AbandonedMutexException]{$owned=$true}
         if(-not $owned){throw 'Other installer maintenance is active.'}
         $identity=Get-InstallerMaintenanceIdentity
-        Invoke-MaintenanceSession -Action uninstall -InstalledRoot $root -BasePath (Join-Path $env:USERPROFILE '.claude-switcher') -ContextDirectory $ipc -Identity $identity -Parent ([Diagnostics.Process]::GetCurrentProcess()) -StartUninstaller $startUninstaller -UninstallerHash $uninstallHash -DeleteUserData:$delete
+        $outcome=Invoke-MaintenanceSession -Action uninstall -InstalledRoot $root -BasePath (Join-Path $env:USERPROFILE '.claude-switcher') -ContextDirectory $ipc -Identity $identity -Parent ([Diagnostics.Process]::GetCurrentProcess()) -StartUninstaller $startUninstaller -UninstallerHash $uninstallHash -DeleteUserData:$delete
+        if($outcome -ne 0 -and -not $launchState.Started -and -not $Quiet) {
+            [void][Windows.Forms.MessageBox]::Show('卸载准备未完成。请先完全退出 Claude 和切换器，确认没有旧版 ClaudeBodyguard、其他用户的保镖任务或待恢复操作。请保留配置与账号快照后再处理阻断项。','Claude Switcher',[Windows.Forms.MessageBoxButtons]::OK,[Windows.Forms.MessageBoxIcon]::Warning)
+        }
+        return $outcome
     } finally {if($owned){$mutex.ReleaseMutex()};$mutex.Dispose()}
 }
 

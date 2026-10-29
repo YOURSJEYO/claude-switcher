@@ -88,7 +88,7 @@
 
 - Core: PowerShell 5.1 / 7 each 188/188. Packaging regressions: each 22/22.
 - WPF: 199/199; Admin: 116/116. App/Admin self-contained directory publish succeeded.
-- User setup: 34/34; installer protocol: 22/22; maintenance: 9/9; registry: 7/7; upgrade finalization: 13/13 on both PowerShell hosts. One file-symlink case logs SKIP locally when symbolic-link privilege is unavailable. Directory junction rejection is exercised.
+- User setup: 34/34; installer protocol: 22/22; maintenance: 10/10; registry: 7/7; upgrade finalization: 13/13 on both PowerShell hosts. One file-symlink case logs SKIP locally when symbolic-link privilege is unavailable. Directory junction rejection is exercised.
 - Windows Python tests: 69/69.
 - Real Inno 6.7.3 compilation passes in hosted CI. Initial CI found a missing GetTickCount import, then a runner-role assumption in an isolated fixture; both have dedicated fixes. Final artifact confirmation is the remaining CI step.
 - No installation, uninstallation, UAC, or Windows VM acceptance was performed on the maintainer machine. Interrupted transactions retain recovery material; uncertain recovery stays blocked.

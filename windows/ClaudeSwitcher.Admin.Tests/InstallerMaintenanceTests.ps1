@@ -5,6 +5,15 @@ $repo=Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 . (Join-Path $repo 'windows/helpers/InstallerMaintenance.ps1')
 . (Join-Path $repo 'windows/helpers/InstallerPayload.ps1')
 $realSignal=(Get-Command Get-MaintenanceSignal).ScriptBlock
+Add-Type -TypeDefinition @'
+using System.IO.Pipes;
+using System.Threading.Tasks;
+public static class DelayedMaintenanceReplyReader {
+    public static Task<int> Read(PipeStream pipe, byte[] buffer) {
+        return Task.Run(async () => { await Task.Delay(250); return await pipe.ReadAsync(buffer,0,buffer.Length); });
+    }
+}
+'@
 $root=Join-Path ([IO.Path]::GetTempPath()) ('switcher-maintenance-tests-'+[guid]::NewGuid().ToString('N'))
 [void][IO.Directory]::CreateDirectory($root)
 $script:passed=0
@@ -62,6 +71,22 @@ try {
             $command=& $realSignal $f.Ipc $channel
             Assert (-not $command) 'unauthenticated commit must be ignored'
             Assert ($channel.State -eq 'starting') 'rejected client cannot advance the state'
+        } finally {$client.Dispose();$channel.Pipe.Dispose()}
+    }
+    Test 'maintenance acknowledgement survives a delayed installer read' {
+        $f=New-Fixture
+        $channel=New-MaintenanceChannel $f.Ipc
+        $client=[IO.Pipes.NamedPipeClientStream]::new('.',$channel.Name,[IO.Pipes.PipeDirection]::InOut,[IO.Pipes.PipeOptions]::Asynchronous)
+        try {
+            $client.Connect(2000)
+            $bytes=[Text.Encoding]::ASCII.GetBytes('prepare|'+$channel.Token)
+            $write=$client.WriteAsync($bytes,0,$bytes.Length)
+            $buffer=New-Object byte[] 4
+            $read=[DelayedMaintenanceReplyReader]::Read($client,$buffer)
+            for($i=0;$i -lt 30 -and -not $channel.Wait.IsCompleted;$i++){Start-Sleep -Milliseconds 50}
+            $command=& $realSignal $f.Ipc $channel
+            Assert ($command -eq 'prepare') 'command accepted'
+            Assert ($read.Wait(2500) -and $read.Result -eq 4 -and $buffer[0] -eq 100) 'installer must receive the full acknowledgement before disconnect'
         } finally {$client.Dispose();$channel.Pipe.Dispose()}
     }
     Test 'Inno second-phase identity requires exact parent and original executable hash' {
