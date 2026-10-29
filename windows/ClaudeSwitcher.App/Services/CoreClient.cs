@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.IO;
 using System.Diagnostics;
 using System.Text;
+using System.Text.RegularExpressions;
 using ClaudeSwitcher.App.Models;
 
 namespace ClaudeSwitcher.App.Services;
@@ -44,6 +45,9 @@ public sealed class CoreClient
 {
     private static readonly TimeSpan ProcessExitGrace = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan StatusTimeout = TimeSpan.FromSeconds(10);
+    private static readonly Regex LegacyStatusOutput = new(
+        @"\Acurrent=(?:none|A|B) hasA=[01] hasB=[01](?:\r?\n)?\z",
+        RegexOptions.CultureInvariant | RegexOptions.NonBacktracking);
 
     public CoreClient(
         string corePath,
@@ -180,10 +184,20 @@ public sealed class CoreClient
         }
 
         var exitCode = process.ExitCode;
+        var output = stdout.ToString();
+        // Legacy scripts ignore -Json and return a single text status line. This
+        // identifies a setup prerequisite, never a valid status or launch permit.
+        if (command == CoreCommand.Status && exitCode == 0 && LegacyStatusOutput.IsMatch(output))
+        {
+            throw new CoreClientException(
+                CoreClientError.SetupRequired,
+                "检测到不支持 JSON 协议的旧版脚本核心，需要通过配置向导更新。请保留已有账号快照和恢复材料。");
+        }
+
         CoreResult parsed;
         try
         {
-            parsed = CoreResultParser.Parse(stdout.ToString(), exitCode, command, operationId, target);
+            parsed = CoreResultParser.Parse(output, exitCode, command, operationId, target);
         }
         catch (CoreProtocolException exception) when (exitCode != 0 && exception.Error != CoreProtocolError.ProcessFailed)
         {

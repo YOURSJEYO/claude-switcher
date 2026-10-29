@@ -85,6 +85,75 @@ public sealed class CoreClientTests
         Assert.Empty(fixture.Invocations);
     }
 
+    [Theory]
+    [InlineData("current=none hasA=0 hasB=0\r\n")]
+    [InlineData("current=A hasA=1 hasB=0\r\n")]
+    [InlineData("current=B hasA=1 hasB=1\n")]
+    [InlineData("current=A hasA=0 hasB=1")]
+    public async Task RunAsync_LegacyTextStatusRequiresSetupInsteadOfJsonParsing(string output)
+    {
+        using var fixture = new CoreFixture();
+        fixture.WriteRaw(output, exitCode: 0);
+
+        var error = await Assert.ThrowsAsync<CoreClientException>(() =>
+            fixture.Client.RunAsync(CoreCommand.Status, null, OperationId, CancellationToken.None));
+
+        Assert.Equal(CoreClientError.SetupRequired, error.Error);
+        Assert.Contains("旧版脚本核心", error.Message, StringComparison.Ordinal);
+        Assert.Single(fixture.Invocations);
+        Assert.False(fixture.LastProcessKilled);
+        Assert.Equal(CoreProtocolError.InvalidJson, Assert.Throws<CoreProtocolException>(() =>
+            CoreResultParser.Parse(output, 0, CoreCommand.Status, OperationId)).Error);
+    }
+
+    [Theory]
+    [InlineData("warning\r\ncurrent=A hasA=1 hasB=1\r\n")]
+    [InlineData("current=A hasA=1 hasB=1\r\n{}")]
+    [InlineData("current=A hasA=1 hasB=1\r\ncurrent=A hasA=1 hasB=1\r\n")]
+    [InlineData("current=C hasA=1 hasB=1\r\n")]
+    [InlineData("current=A hasA=true hasB=1\r\n")]
+    [InlineData("not json")]
+    public async Task RunAsync_DoesNotMistakeOtherInvalidStatusOutputForLegacyCore(string output)
+    {
+        using var fixture = new CoreFixture();
+        fixture.WriteRaw(output, exitCode: 0);
+
+        var error = await Assert.ThrowsAsync<CoreProtocolException>(() =>
+            fixture.Client.RunAsync(CoreCommand.Status, null, OperationId, CancellationToken.None));
+
+        Assert.Equal(CoreProtocolError.InvalidJson, error.Error);
+        Assert.Null(error.PartialResult);
+    }
+
+    [Fact]
+    public async Task RunAsync_NonZeroLegacyTextStatusRemainsAProcessFailure()
+    {
+        using var fixture = new CoreFixture();
+        fixture.WriteRaw("current=A hasA=1 hasB=1\r\n", exitCode: 7);
+
+        var error = await Assert.ThrowsAsync<CoreProtocolException>(() =>
+            fixture.Client.RunAsync(CoreCommand.Status, null, OperationId, CancellationToken.None));
+
+        Assert.Equal(CoreProtocolError.ProcessFailed, error.Error);
+        Assert.Equal(7, error.ExitCode);
+    }
+
+    [Theory]
+    [InlineData(CoreCommand.CheckDetail, null)]
+    [InlineData(CoreCommand.Fix, null)]
+    [InlineData(CoreCommand.Switch, "A")]
+    public async Task RunAsync_LegacyDetectionIsRestrictedToReadOnlyStatus(CoreCommand command, string? target)
+    {
+        using var fixture = new CoreFixture();
+        fixture.WriteRaw("current=A hasA=1 hasB=1\r\n", exitCode: 0);
+
+        var error = await Assert.ThrowsAsync<CoreProtocolException>(() =>
+            fixture.Client.RunAsync(command, target, OperationId, CancellationToken.None));
+
+        Assert.Equal(CoreProtocolError.InvalidJson, error.Error);
+        Assert.Null(error.PartialResult);
+    }
+
     [Fact]
     public async Task RunAsync_DecodesUtf8ChineseOutput()
     {

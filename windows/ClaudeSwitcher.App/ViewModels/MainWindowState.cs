@@ -90,12 +90,12 @@ public sealed record MainWindowState(
 
     public bool CanConfigure => Status == UiStatus.SetupRequired || (CanFix && Status is not (UiStatus.Running or UiStatus.RecoveryRequired));
 
-    public MainWindowState SetupRequired() =>
+    public MainWindowState SetupRequired(string? reason = null) =>
         this with
         {
             Status = UiStatus.SetupRequired,
             StatusText = "尚未配置",
-            Banner = "本机尚未配置 Claude 切换器核心。请点击“配置安装”打开向导；本应用不会自动下载脚本或启动 Claude。",
+            Banner = (reason ?? "本机尚未配置 Claude 切换器核心。") + "请点击“配置安装”打开向导；本应用不会自动下载脚本或启动 Claude。",
             CurrentAccount = "—",
             ActiveOperationId = "—",
             TransactionPhase = "—",

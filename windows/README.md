@@ -36,6 +36,7 @@
 - `windows/install.ps1` 提供受控的 Preview/Apply 接口，包括 `-NonInteractive`、`-ProxyMode`、`-ProxyGroup`、`-Country`、`-TimeZoneId`、`-Culture`、`-Preview`、`-Json`、`-Initialize`、`-RemoveUserTask` 和 `-RequireNoOtherTasks`。配置流程先只读 Preview，再进入 Apply；不接受任意命令或脚本。
 - `ClaudeSwitcher-<version>-windows.zip` 是脚本兼容包，不是原生安装器。它不包含受保护的 Admin helper，也不安装受保护 helper；其 `install.ps1` 在缺少原生受保护载荷时会以 `protected_payload_required` 拒绝 Apply，不能提供完整安装或系统修复等价能力。**不要以管理员权限运行用户可写脚本。**
 - 原生安装写入 `%USERPROFILE%\.claude-switcher\config.json` 的 schemaVersion 1 JSON，保存 `proxyMode` / `proxyGroup` / `country` / `timeZoneId` / `culture`。核心把它当数据读取，不 dot-source；旧安装没有该文件时保留 `proxy-mode.txt` 或脚本头部配置的 legacy 路径。
+- **以前装过脚本版**：旧核心的 `status` 仍可能输出 `current=... hasA=... hasB=...` 文本，不支持原生界面的 JSON 协议。原生界面会提示旧版脚本核心需要配置，并只开放“配置安装”；点击后先预览，再确认应用配置，由安装包自带的受保护模板更新用户核心。识别旧核心本身不会自动覆盖脚本或删除账号快照、恢复材料，也不会继续执行旧版检查、修复或账号切换。如果使用较早的测试包看到 `Core output is not one valid JSON document.`，同样先点击“配置安装”，不要删除整个 `.claude-switcher` 目录。
 - 若在已具备受保护载荷的受控环境中运行兼容入口并遇到执行策略限制，可仅对当前用户执行 `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`；这不会把脚本兼容包变成原生安装器。
 
 ## 更新（仅限兼容脚本包）

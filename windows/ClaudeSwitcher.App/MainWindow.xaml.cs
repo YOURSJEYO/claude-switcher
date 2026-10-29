@@ -157,7 +157,7 @@ public partial class MainWindow : Window
         }
         catch (CoreClientException exception) when (exception.Error == CoreClientError.SetupRequired)
         {
-            _state = _state.SetupRequired();
+            _state = _state.SetupRequired(exception.Message);
         }
         catch (CoreClientException exception) when (exception.Error == CoreClientError.QueryTimedOut && statusResult is null)
         {
@@ -286,7 +286,7 @@ public partial class MainWindow : Window
         }
         catch (CoreClientException exception) when (exception.Error == CoreClientError.SetupRequired)
         {
-            _state = _state.SetupRequired();
+            _state = _state.SetupRequired(exception.Message);
         }
         catch (CoreProtocolException exception) when (exception.PartialResult?.Command == CoreCommand.Fix)
         {
