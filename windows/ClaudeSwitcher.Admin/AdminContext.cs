@@ -90,6 +90,11 @@ public sealed class AdminContext
                     var removePaths = BodyguardTaskPaths.Create(rootResult.RootPath, request.UserSid);
                     systemOperations.RemoveBodyguardTask(removePaths, request.UserSid);
                     break;
+                case AdminOperation.MigrateLegacyBodyguard:
+                    currentStage = "migrate-legacy-bodyguard";
+                    var migrationPaths = BodyguardTaskPaths.Create(rootResult.RootPath, request.UserSid);
+                    systemOperations.MigrateLegacyBodyguardTask(migrationPaths, request.UserSid, identity.SessionId);
+                    break;
                 default:
                     return AdminResult.Failure(AdminExitCode.InvalidArguments, "unsupported operation");
             }

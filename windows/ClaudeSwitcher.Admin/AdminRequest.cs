@@ -86,9 +86,9 @@ public sealed record AdminRequest(
             sessionId = parsedSession;
         }
 
-        if (operation is AdminOperation.RegisterBodyguardTask or AdminOperation.RepairSystem && !sessionId.HasValue)
+        if (operation is AdminOperation.RegisterBodyguardTask or AdminOperation.RepairSystem or AdminOperation.MigrateLegacyBodyguard && !sessionId.HasValue)
         {
-            error = "session-id is required for register-bodyguard-task and repair-system";
+            error = "session-id is required for register-bodyguard-task, repair-system, and migrate-legacy-bodyguard";
             return false;
         }
 

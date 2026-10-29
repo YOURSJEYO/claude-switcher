@@ -72,6 +72,57 @@ public sealed class SystemOperations : ISystemOperations
         }
     }
 
+    public void MigrateLegacyBodyguardTask(BodyguardTaskPaths paths, string userSid, int sessionId)
+    {
+        ArgumentNullException.ThrowIfNull(paths);
+        if (!AdminRequest.IsUserSid(userSid))
+        {
+            throw new ArgumentException("A valid user SID is required.", nameof(userSid));
+        }
+
+        if (sessionId <= 0) { throw new ArgumentException("Interactive session is required.", nameof(sessionId)); }
+
+        var profileRoot = LegacyBodyguardTaskPolicy.ResolveUserProfilePath(userSid);
+        dynamic service = ConnectScheduler();
+        dynamic folder = service.GetFolder("\\");
+        dynamic? legacyTask = FindTask(folder, LegacyBodyguardTaskPolicy.TaskName);
+        if (legacyTask is null)
+        {
+            throw new InvalidOperationException("The legacy ClaudeBodyguard task is no longer present.");
+        }
+
+        var originalXml = (string)legacyTask.Xml;
+        ValidateLegacyTask(originalXml, userSid, profileRoot);
+
+        // The protected task must be created or proven healthy before the legacy task is touched.
+        EnsureBodyguardTask(paths, userSid, sessionId);
+
+        dynamic? currentLegacyTask = FindTask(folder, LegacyBodyguardTaskPolicy.TaskName);
+        if (currentLegacyTask is null || !string.Equals((string)currentLegacyTask.Xml, originalXml, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("The legacy task changed during migration; it was not stopped or deleted.");
+        }
+
+        ValidateLegacyTask((string)currentLegacyTask.Xml, userSid, profileRoot);
+        if ((int)currentLegacyTask.State is 2 or 4)
+        {
+            currentLegacyTask.Stop(0);
+        }
+
+        folder.DeleteTask(LegacyBodyguardTaskPolicy.TaskName, 0);
+    }
+
+    private static void ValidateLegacyTask(string xml, string userSid, string profileRoot)
+    {
+        var validation = LegacyBodyguardTaskPolicy.ValidateTaskXml(xml, userSid, profileRoot);
+        if (!validation.IsValid || validation.ScriptPath is null)
+        {
+            throw new InvalidOperationException("The legacy task does not match the fixed migration contract: " + validation.Error);
+        }
+
+        LegacyBodyguardTaskPolicy.ValidateScriptFile(validation.ScriptPath, userSid, profileRoot);
+    }
+
     public void RemoveBodyguardTask(BodyguardTaskPaths paths, string userSid)
     {
         ArgumentNullException.ThrowIfNull(paths);

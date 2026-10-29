@@ -7,7 +7,8 @@ public enum AdminOperation
     FlushDns,
     RegisterBodyguardTask,
     RemoveBodyguardTask,
-    RepairSystem
+    RepairSystem,
+    MigrateLegacyBodyguard
 }
 
 public static class AdminOperationNames
@@ -22,8 +23,9 @@ public static class AdminOperationNames
             "register-bodyguard-task" => AdminOperation.RegisterBodyguardTask,
             "remove-bodyguard-task" => AdminOperation.RemoveBodyguardTask,
             "repair-system" => AdminOperation.RepairSystem,
+            "migrate-legacy-bodyguard" => AdminOperation.MigrateLegacyBodyguard,
             _ => default
         };
-        return value is "set-time-zone" or "disable-ipv6" or "flush-dns" or "register-bodyguard-task" or "remove-bodyguard-task" or "repair-system";
+        return value is "set-time-zone" or "disable-ipv6" or "flush-dns" or "register-bodyguard-task" or "remove-bodyguard-task" or "repair-system" or "migrate-legacy-bodyguard";
     }
 }

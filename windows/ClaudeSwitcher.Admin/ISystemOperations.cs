@@ -7,4 +7,5 @@ public interface ISystemOperations
     void FlushDns();
     void EnsureBodyguardTask(BodyguardTaskPaths paths, string userSid, int sessionId);
     void RemoveBodyguardTask(BodyguardTaskPaths paths, string userSid);
+    void MigrateLegacyBodyguardTask(BodyguardTaskPaths paths, string userSid, int sessionId);
 }

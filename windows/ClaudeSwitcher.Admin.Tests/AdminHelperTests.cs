@@ -21,6 +21,8 @@ public sealed class AdminHelperTests
         Assert.Equal(AdminOperation.RemoveBodyguardTask, remove);
         Assert.True(AdminOperationNames.TryParse("repair-system", out var repair));
         Assert.Equal(AdminOperation.RepairSystem, repair);
+        Assert.True(AdminOperationNames.TryParse("migrate-legacy-bodyguard", out var migrate));
+        Assert.Equal(AdminOperation.MigrateLegacyBodyguard, migrate);
         Assert.False(AdminOperationNames.TryParse("run-script", out _));
         Assert.False(AdminOperationNames.TryParse("Set-TimeZone", out _));
         Assert.False(AdminOperationNames.TryParse("", out _));
@@ -181,6 +183,62 @@ public sealed class AdminHelperTests
 
 
     [Fact]
+    public void Legacy_task_policy_accepts_only_the_exact_closed_contract()
+    {
+        var profile = Path.Combine(Path.GetTempPath(), "legacy-profile");
+        var result = LegacyBodyguardTaskPolicy.ValidateTaskXml(LegacyTaskXml(profile), ValidSid, profile);
+
+        Assert.True(result.IsValid, result.Error);
+        Assert.Equal(LegacyScriptPath(profile), result.ScriptPath);
+    }
+
+    [Fact]
+    public void Legacy_task_policy_allows_a_missing_trigger_user_but_rejects_other_users()
+    {
+        var profile = Path.Combine(Path.GetTempPath(), "legacy-profile");
+        Assert.True(LegacyBodyguardTaskPolicy.ValidateTaskXml(
+            LegacyTaskXml(profile, triggerUserId: ValidSid), ValidSid, profile).IsValid);
+        Assert.True(LegacyBodyguardTaskPolicy.ValidateTaskXml(
+            LegacyTaskXml(profile, triggerUserId: null), ValidSid, profile).IsValid);
+        Assert.False(LegacyBodyguardTaskPolicy.ValidateTaskXml(
+            LegacyTaskXml(profile, triggerUserId: OtherSid), ValidSid, profile).IsValid);
+        Assert.False(LegacyBodyguardTaskPolicy.ValidateTaskXml(
+            LegacyTaskXml(profile, principalSid: OtherSid), ValidSid, profile).IsValid);
+    }
+
+    [Fact]
+    public void Legacy_task_policy_rejects_duplicate_or_arbitrary_actions()
+    {
+        var profile = Path.Combine(Path.GetTempPath(), "legacy-profile");
+        var valid = LegacyTaskXml(profile);
+        var duplicate = valid.Replace(
+            "</Actions>",
+            "<Exec><Command>powershell.exe</Command><Arguments>-NoProfile</Arguments></Exec></Actions>",
+            StringComparison.Ordinal);
+        var arbitrary = valid.Replace("<Exec>", "<ComHandler>", StringComparison.Ordinal)
+            .Replace("</Exec>", "</ComHandler>", StringComparison.Ordinal);
+
+        Assert.False(LegacyBodyguardTaskPolicy.ValidateTaskXml(duplicate, ValidSid, profile).IsValid);
+        Assert.False(LegacyBodyguardTaskPolicy.ValidateTaskXml(arbitrary, ValidSid, profile).IsValid);
+    }
+
+    [Fact]
+    public void Legacy_task_policy_rejects_external_namespaces_and_caller_controlled_commands()
+    {
+        var profile = Path.Combine(Path.GetTempPath(), "legacy-profile");
+        var valid = LegacyTaskXml(profile);
+        var externalNamespace = valid.Replace(
+            "http://schemas.microsoft.com/windows/2004/02/mit/task",
+            "urn:attacker",
+            StringComparison.Ordinal);
+
+        Assert.False(LegacyBodyguardTaskPolicy.ValidateTaskXml(externalNamespace, ValidSid, profile).IsValid);
+        Assert.False(LegacyBodyguardTaskPolicy.ValidateTaskXml(
+            LegacyTaskXml(profile, command: "cmd.exe"), ValidSid, profile).IsValid);
+        Assert.False(LegacyBodyguardTaskPolicy.ValidateTaskXml(
+            LegacyTaskXml(profile, arguments: LegacyArguments(profile) + " -Command whoami"), ValidSid, profile).IsValid);
+    }
+    [Fact]
     public void Repair_system_is_part_of_the_closed_operation_enum()
     {
         Assert.True(AdminOperationNames.TryParse("repair-system", out var repair));
@@ -196,6 +254,33 @@ public sealed class AdminHelperTests
             out _,
             out var error));
         Assert.Contains("session-id", error, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Legacy_migration_requires_a_session_and_rejects_extra_arguments()
+    {
+        Assert.False(AdminRequest.TryParse(
+            new[] { "--operation", "migrate-legacy-bodyguard", "--user-sid", ValidSid },
+            out _, out var missingSession));
+        Assert.Contains("session-id", missingSession, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("migrate-legacy-bodyguard", missingSession, StringComparison.OrdinalIgnoreCase);
+
+        Assert.True(AdminRequest.TryParse(
+            new[] { "--operation", "migrate-legacy-bodyguard", "--user-sid", ValidSid, "--session-id", "2" },
+            out var request, out var error), error);
+        Assert.Equal(AdminOperation.MigrateLegacyBodyguard, request!.Operation);
+        Assert.Equal(2, request.SessionId);
+
+        Assert.False(AdminRequest.TryParse(
+            new[]
+            {
+                "--operation", "migrate-legacy-bodyguard",
+                "--user-sid", ValidSid,
+                "--session-id", "2",
+                "--time-zone-id", "Pacific Standard Time"
+            },
+            out _, out var extraArgument));
+        Assert.Contains("time-zone-id", extraArgument, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -246,6 +331,40 @@ public sealed class AdminHelperTests
         Assert.Equal(1, roots.CallCount);
         Assert.Equal("time-zone,ipv6,dns,task", operations.Sequence);
         Assert.Equal(4, operations.CallCount);
+    }
+
+    [Fact]
+    public void Legacy_migration_is_dispatched_only_after_identity_and_root_validation()
+    {
+        var operations = new RecordingSystemOperations();
+        var resolver = new FakeIdentityResolver(InteractiveIdentityResult.Success(ValidSid, 2));
+        var roots = new FakeInstallRootProvider(InstallRootResult.Success(Path.Combine(Path.GetTempPath(), "synthetic-root")));
+        var context = new AdminContext(resolver, roots, operations);
+
+        var result = context.Execute(Request(AdminOperation.MigrateLegacyBodyguard, ValidSid, sessionId: 2));
+
+        Assert.Equal(AdminExitCode.Success, result.ExitCode);
+        Assert.Equal(1, resolver.CallCount);
+        Assert.Equal(1, roots.CallCount);
+        Assert.Equal("migrate-legacy-bodyguard", operations.Sequence);
+        Assert.Equal(1, operations.MigrateCalls);
+        Assert.Equal("ClaudeSwitcher.Bodyguard." + ValidSid, operations.LastMigratedTaskName);
+    }
+
+    [Fact]
+    public void Legacy_migration_failure_reports_the_fixed_stage_without_claiming_success()
+    {
+        var operations = new RecordingSystemOperations { ThrowOnMigration = true };
+        var resolver = new FakeIdentityResolver(InteractiveIdentityResult.Success(ValidSid, 2));
+        var roots = new FakeInstallRootProvider(InstallRootResult.Success(Path.Combine(Path.GetTempPath(), "synthetic-root")));
+        var context = new AdminContext(resolver, roots, operations);
+
+        var result = context.Execute(Request(AdminOperation.MigrateLegacyBodyguard, ValidSid, sessionId: 2));
+
+        Assert.Equal(AdminExitCode.OperationFailed, result.ExitCode);
+        Assert.Contains("failed-stage=migrate-legacy-bodyguard", result.Error, StringComparison.Ordinal);
+        Assert.Contains("completed-stages=none", result.Error, StringComparison.Ordinal);
+        Assert.DoesNotContain("synthetic migration failure", result.Error, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -820,9 +939,40 @@ public sealed class AdminHelperTests
         AdminOperation.RegisterBodyguardTask => "register-bodyguard-task",
         AdminOperation.RemoveBodyguardTask => "remove-bodyguard-task",
         AdminOperation.RepairSystem => "repair-system",
+        AdminOperation.MigrateLegacyBodyguard => "migrate-legacy-bodyguard",
         _ => throw new ArgumentOutOfRangeException(nameof(operation))
     };
 
+    private static string LegacyScriptPath(string profileRoot) =>
+        Path.Combine(profileRoot, ".claude-switcher", "claude-bodyguard.ps1");
+
+    private static string LegacyArguments(string profileRoot) =>
+        $"-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File \"{LegacyScriptPath(profileRoot)}\"";
+
+    private static string LegacyTaskXml(
+        string profileRoot,
+        string? command = null,
+        string? arguments = null,
+        string? triggerUserId = null,
+        string? principalSid = null)
+    {
+        var escapedSid = System.Security.SecurityElement.Escape(principalSid ?? ValidSid);
+        var triggerUser = triggerUserId is null
+            ? string.Empty
+            : $"<UserId>{System.Security.SecurityElement.Escape(triggerUserId)}</UserId>";
+        var escapedCommand = System.Security.SecurityElement.Escape(command ?? "powershell.exe");
+        var escapedArguments = System.Security.SecurityElement.Escape(arguments ?? LegacyArguments(profileRoot));
+        return $"""
+            <?xml version="1.0" encoding="UTF-16"?>
+            <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+              <RegistrationInfo><Author>Legacy</Author></RegistrationInfo>
+              <Triggers><LogonTrigger><Enabled>true</Enabled>{triggerUser}</LogonTrigger></Triggers>
+              <Principals><Principal id="Author"><UserId>{escapedSid}</UserId><LogonType>Interactive</LogonType><RunLevel>Limited</RunLevel></Principal></Principals>
+              <Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><AllowStartOnDemand>true</AllowStartOnDemand><ExecutionTimeLimit>PT0S</ExecutionTimeLimit><Enabled>true</Enabled></Settings>
+              <Actions Context="Author"><Exec><Command>{escapedCommand}</Command><Arguments>{escapedArguments}</Arguments></Exec></Actions>
+            </Task>
+            """;
+    }
     private static string CanonicalSettingsXml() => """
       <Settings>
         <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
@@ -918,7 +1068,10 @@ public sealed class AdminHelperTests
         public int DnsCalls { get; private set; }
         public int RegisterCalls { get; private set; }
         public int RemoveCalls { get; private set; }
+        public int MigrateCalls { get; private set; }
+        public string? LastMigratedTaskName { get; private set; }
         public bool ThrowOnDns { get; init; }
+        public bool ThrowOnMigration { get; init; }
         public string Sequence => string.Join(",", sequence);
         private readonly List<string> sequence = new();
 
@@ -959,6 +1112,18 @@ public sealed class AdminHelperTests
             CallCount++;
             RemoveCalls++;
             sequence.Add("remove");
+        }
+
+        public void MigrateLegacyBodyguardTask(BodyguardTaskPaths paths, string userSid, int sessionId)
+        {
+            CallCount++;
+            MigrateCalls++;
+            LastMigratedTaskName = paths.TaskName;
+            sequence.Add("migrate-legacy-bodyguard");
+            if (ThrowOnMigration)
+            {
+                throw new InvalidOperationException("synthetic migration failure");
+            }
         }
     }
 }

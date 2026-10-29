@@ -123,6 +123,25 @@ function Get-ProtectedWindowsPayload([switch]$ForElevation) {
     return [pscustomobject]@{ Root=$root; Helper=$helper; Script=$bodyguard; PowerShell=(Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::System)) 'WindowsPowerShell\v1.0\powershell.exe') }
 }
 
+function Invoke-ProtectedBodyguardMigration {
+    try {
+        $payload=Get-ProtectedWindowsPayload -ForElevation
+        if ($null -eq $payload) { return 1 }
+        $caller=Get-CoreCallerIdentity
+        $arguments='--operation migrate-legacy-bodyguard --user-sid '+$caller.Sid+' --session-id '+$caller.SessionId
+        $helper=Start-Process -FilePath $payload.Helper -Verb RunAs -WindowStyle Hidden -Wait -PassThru -ArgumentList $arguments -ErrorAction Stop
+        if ($helper.ExitCode -eq 0) { return 0 }
+        return 1
+    } catch {
+        $errorObject=$_.Exception
+        while ($errorObject) {
+            if ($errorObject -is [ComponentModel.Win32Exception] -and $errorObject.NativeErrorCode -eq 1223) { return 4 }
+            $errorObject=$errorObject.InnerException
+        }
+        return 1
+    }
+}
+
 function Invoke-ProtectedSystemRepair {
     try {
         $payload=Get-ProtectedWindowsPayload -ForElevation
@@ -1093,13 +1112,22 @@ function Invoke-Fix {
     $script:FixExitCode=0
     if (-not (Import-CoreConfiguration)) { $script:FixExitCode=1; 'FIX:用户配置无效，请重新配置；未执行修复'; return }
     $assessment=Get-BodyguardTaskAssessment
-    if ($assessment.Kind -cin @('Legacy','LegacyMigration')) {
-        $script:FixExitCode=5
-        if ($assessment.Kind -eq 'Legacy') {
-            'FIX:检测到旧版 ClaudeBodyguard；当前构建不支持自动迁移，也不会停止或删除旧任务。请先按兼容迁移指引处理旧任务/进程，再配置受保护任务。'
-        } else {
-            'FIX:检测到旧版 ClaudeBodyguard，但任务归属、触发、设置或运行实例无法完整验证；当前构建不支持自动迁移，也不会停止或删除旧任务。请先按兼容迁移指引处理旧任务/进程，再配置受保护任务。'
+    if ($assessment.Kind -eq 'Legacy') {
+        'FIX:检测到可迁移的旧版 ClaudeBodyguard；正在通过受保护助手完成迁移...'
+        $migrationResult=Invoke-ProtectedBodyguardMigration
+        if ($migrationResult -ne 0) {
+            $script:FixExitCode=if ($migrationResult -eq 4) { 4 } else { 5 }
+            if ($migrationResult -eq 4) {
+                'FIX:旧版 ClaudeBodyguard 迁移需要管理员授权；授权已取消，不会停止或删除旧任务'
+            } else {
+                'FIX:旧版 ClaudeBodyguard 迁移失败；不会停止或删除旧任务，也不会执行旧脚本或导入旧配置。请重新运行修复并检查迁移校验结果。'
+            }
+            return
         }
+        'FIX:旧版 ClaudeBodyguard 迁移完成，继续执行常规修复检查'
+    } elseif ($assessment.Kind -eq 'LegacyMigration') {
+        $script:FixExitCode=5
+        'FIX:检测到旧版 ClaudeBodyguard，但任务归属、触发、设置或运行实例无法完整验证；当前构建不支持自动迁移，也不会停止或删除旧任务。请先按兼容迁移指引处理旧任务/进程，再配置受保护任务。'
         return
     }
     "FIX:开始一键修复"
@@ -1797,7 +1825,7 @@ function Invoke-CoreRequest([string]$Command, [string]$Target, [string]$Operatio
             $fixOutput=@(Invoke-FixCommand -OperationId $id *>&1); $script:ProtocolExitCode=$script:CoreExitCode; $result.success=$script:ProtocolExitCode -eq 0
             if(-not $result.success){
                 if($script:ProtocolExitCode -eq 4){$result.code='cancelled'; $result.message='修复未完成或授权取消；请重新检查实际状态'}
-                elseif($script:ProtocolExitCode -eq 5){$result.code='migration-required'; $result.message='检测到旧版 ClaudeBodyguard；当前构建不支持自动迁移，也不会停止或删除旧任务。请先按兼容迁移指引处理旧任务/进程，再配置受保护任务。'}
+                elseif($script:ProtocolExitCode -eq 5){$result.code='migration-required'; $result.message='旧版 ClaudeBodyguard 迁移未完成；旧任务保持不变。请重新运行修复并检查管理员授权与迁移校验结果。'}
                 elseif($script:ProtocolExitCode -eq 2){$result.code='busy'; $result.message='修复未完成或授权取消；请重新检查实际状态'}
                 else{
                     $result.code='fix-failed'; $result.message='修复未完成或授权取消；请重新检查实际状态'

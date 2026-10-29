@@ -174,7 +174,7 @@ function Set-LegacyTaskMocks {
     }
 }
 
-Add-CoreTest -Tag AdminIntegration -Name 'valid legacy bodyguard passes health but fix requests protected migration' {
+Add-CoreTest -Tag AdminIntegration -Name 'valid legacy bodyguard migrates then continues normal repair checks' {
     New-AdminTestWorkspace | Out-Null
     New-LegacyBodyguardFixture
     . (Set-LegacyTaskMocks)
@@ -182,15 +182,42 @@ Add-CoreTest -Tag AdminIntegration -Name 'valid legacy bodyguard passes health b
     function Get-ProtectedWindowsPayload { $null }
     function Get-Acl { param($LiteralPath,$Path) New-TestAcl $script:LegacySid }
     [IO.File]::WriteAllText($script:LegacyScript,'# synthetic legacy bodyguard')
-    $script:SideEffects=0
-    function Test-ProxyAlive { $script:SideEffects++; throw 'proxy must not run' }
-    function Invoke-ProtectedSystemRepair { $script:SideEffects++; throw 'helper must not run' }
-    function Start-Process { $script:SideEffects++; throw 'process must not run' }
+    $script:PROXY_MODE='other'
+    $script:MigrationCalls=0; $script:EgressCalls=0
+    function Invoke-ProtectedBodyguardMigration { $script:MigrationCalls++; return 0 }
+    function Test-ProxyAlive { $true }
+    function Test-TunUp { $true }
+    function Get-ProxyName { 'synthetic' }
+    function Test-SystemRepairRequired { $false }
+    function Get-Egress { $script:EgressCalls++; [pscustomobject]@{loc=$script:COUNTRY_TARGET;ip='203.0.113.10'} }
+    function Start-Sleep { param($Seconds) }
+    function Start-Process { throw 'no process may be launched after migration' }
     Assert-True (Test-BodyguardHealth) 'strict legacy task with correlated process is healthy'
     Assert-Equal 'Legacy' (Get-BodyguardTaskAssessment).Kind 'valid legacy is recognized narrowly'
     Invoke-Fix | Out-Null
-    Assert-Equal 5 $script:FixExitCode 'valid legacy fix returns migration-required'
-    Assert-Equal 0 $script:SideEffects 'fix does not start proxy, UAC, helper, or system changes'
+    Assert-Equal 0 $script:FixExitCode 'successful migration no longer forces migration-required'
+    Assert-Equal 1 $script:MigrationCalls 'migration runs exactly once'
+    Assert-Equal 1 $script:EgressCalls 'normal post-migration repair checks continue'
+    $script:PROXY_MODE='clash-verge'
+}
+
+Add-CoreTest -Tag AdminIntegration -Name 'legacy migration helper failure remains migration-required and preserves the old task' {
+    New-AdminTestWorkspace | Out-Null
+    New-LegacyBodyguardFixture
+    . (Set-LegacyTaskMocks)
+    function Get-CoreCallerIdentity { [pscustomobject]@{ Sid=$script:LegacySid; SessionId=2 } }
+    function Get-ProtectedWindowsPayload { $null }
+    function Get-Acl { param($LiteralPath,$Path) New-TestAcl $script:LegacySid }
+    [IO.File]::WriteAllText($script:LegacyScript,'# synthetic legacy bodyguard')
+    $originalArguments=$script:LegacyTask.Actions[0].Arguments
+    function Invoke-ProtectedBodyguardMigration { return 1 }
+    function Test-ProxyAlive { throw 'normal repair must not run after migration failure' }
+    function Invoke-ProtectedSystemRepair { throw 'system repair must not run after migration failure' }
+    $output=@(Invoke-Fix)
+    Assert-Equal 5 $script:FixExitCode 'failed migration is not reported as success'
+    Assert-Match '迁移失败' ($output -join "`n") 'failure is reported as migration failure'
+    Assert-Match '不会停止或删除旧任务' ($output -join "`n") 'failure states the old task is preserved'
+    Assert-Equal $originalArguments $script:LegacyTask.Actions[0].Arguments 'failure does not rewrite the old task'
 }
 
 Add-CoreTest -Tag AdminIntegration -Name 'invalid legacy fix reports unsupported migration without mutating state' {
@@ -216,6 +243,32 @@ Add-CoreTest -Tag AdminIntegration -Name 'invalid legacy fix reports unsupported
     Assert-Match '不会停止或删除旧任务' ($output -join "`n") 'guidance states legacy task is preserved'
 }
 
+Add-CoreTest -Tag AdminIntegration -Name 'verified legacy migration uses only the protected fixed helper' {
+    New-AdminTestWorkspace | Out-Null
+    function Get-CoreCallerIdentity { [pscustomobject]@{ Sid='S-1-5-21-1-2-3-1001'; SessionId=2 } }
+    function Get-ProtectedWindowsPayload { [pscustomobject]@{ Helper='C:\Program Files\ClaudeSwitcher\helpers\ClaudeSwitcher.Admin.exe' } }
+    $script:AdminLaunch=$null
+    function Start-Process { param($FilePath,$Verb,$ArgumentList,[switch]$Wait,[switch]$PassThru,$ErrorAction,$WindowStyle) $script:AdminLaunch=[pscustomobject]@{File=$FilePath;Verb=$Verb;Arguments=$ArgumentList;Wait=$Wait;Style=$WindowStyle}; [pscustomobject]@{ExitCode=0} }
+    Assert-Equal 0 (Invoke-ProtectedBodyguardMigration) 'protected migration success propagates'
+    Assert-Equal 'RunAs' $script:AdminLaunch.Verb 'migration requires UAC'
+    Assert-Match '--operation migrate-legacy-bodyguard --user-sid S-1-5-21-1-2-3-1001 --session-id 2' ($script:AdminLaunch.Arguments -join ' ') 'migration uses the closed scalar helper contract'
+    Assert-False (($script:AdminLaunch.Arguments -join ' ') -match '(?i)claude-bodyguard\.ps1|Invoke-Expression|--command|--path') 'migration does not pass user-controlled paths or code'
+}
+
+Add-CoreTest -Tag AdminIntegration -Name 'legacy migration helper has closed failure codes' {
+    New-AdminTestWorkspace | Out-Null
+    function Get-CoreCallerIdentity { [pscustomobject]@{ Sid='S-1-5-21-1-2-3-1001'; SessionId=2 } }
+    function Get-ProtectedWindowsPayload { $null }
+    function Start-Process { throw 'missing payload must not elevate' }
+    Assert-Equal 1 (Invoke-ProtectedBodyguardMigration) 'missing helper is a stable failure'
+
+    function Get-ProtectedWindowsPayload { [pscustomobject]@{ Helper='C:\Program Files\ClaudeSwitcher\helpers\ClaudeSwitcher.Admin.exe' } }
+    function Start-Process { throw (New-Object ComponentModel.Win32Exception 1223) }
+    Assert-Equal 4 (Invoke-ProtectedBodyguardMigration) 'UAC cancellation is distinct'
+
+    function Start-Process { [pscustomobject]@{ ExitCode=7 } }
+    Assert-Equal 1 (Invoke-ProtectedBodyguardMigration) 'helper failure is not success'
+}
 Add-CoreTest -Tag AdminIntegration -Name 'native configuration never falls back to a legacy task' {
     New-AdminTestWorkspace | Out-Null
     New-LegacyBodyguardFixture
