@@ -91,6 +91,8 @@ class WindowsReleaseWorkflowContractTests(unittest.TestCase):
     def test_checks_are_read_only_and_preserve_existing_macos_coverage(self) -> None:
         _, workflow = load_yaml(".github/workflows/checks.yml")
         self.assertEqual(workflow.get("permissions"), {"contents": "read"})
+        push_branches = trigger(workflow).get("push", {}).get("branches", [])
+        self.assertIn("codex/windows-native-exe-publish", push_branches)
         jobs = workflow.get("jobs", {})
         mac_jobs = [job for job in jobs.values() if str(job.get("runs-on", "")).startswith("macos-")]
         self.assertTrue(mac_jobs, "macOS checks job is missing")

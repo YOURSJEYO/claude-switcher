@@ -3,7 +3,9 @@ name: checks
 on:
   pull_request:
   push:
-    branches: [main]
+    branches:
+      - main
+      - codex/windows-native-exe-publish
   workflow_dispatch:
 
 permissions:
