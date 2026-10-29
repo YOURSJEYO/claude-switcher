@@ -320,6 +320,17 @@ Add-CoreTest -Tag Packaging -Name 'missing required tool fails explicitly' {
     Assert-False (@($process.State.Calls | Where-Object { $_.Arguments -contains 'test' }).Count -gt 0) 'tool discovery precedes tests'
 }
 
+Add-CoreTest -Tag Packaging -Name 'tool discovery falls back to a later command candidate' {
+    $fixture = New-PackageFixture
+    function Get-Command {
+        param([string]$Name, [string]$ErrorAction)
+        if ($Name -eq 'dotnet.exe') { return [pscustomobject]@{ CommandType='Application'; Source='C:\synthetic\dotnet.exe' } }
+        return $null
+    }
+    $resolved = Resolve-PackageTool '' $fixture.Root @('build/tools/dotnet/dotnet.exe', 'dotnet.exe') '.NET SDK'
+    Assert-Equal 'C:\synthetic\dotnet.exe' $resolved 'tool discovery must try later command candidates after missing repo-local tools'
+}
+
 Add-CoreTest -Tag Packaging -Name 'missing admin project fails clearly' {
     $fixture = New-PackageFixture
     Remove-Item -LiteralPath (Join-Path $fixture.Root 'windows/ClaudeSwitcher.Admin') -Recurse -Force

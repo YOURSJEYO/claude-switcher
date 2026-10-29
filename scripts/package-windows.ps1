@@ -158,9 +158,10 @@ function Resolve-PackageTool {
         $path = Get-CanonicalFullPath $candidate $RepoRoot
         if (Test-Path -LiteralPath $path -PathType Leaf) { return $path }
     }
-    $command = Get-Command $Candidates[0] -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($command -and $command.CommandType -ne 'Application') { $command = $null }
-    if ($command) { return $command.Source }
+    foreach ($candidate in $Candidates) {
+        $command = Get-Command $candidate -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($command -and $command.CommandType -eq 'Application') { return $command.Source }
+    }
     throw (New-PackageFailure "$Label tool not found. Pass its fixed executable path explicitly.")
 }
 
