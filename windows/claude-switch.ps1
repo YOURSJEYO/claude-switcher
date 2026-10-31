@@ -12,9 +12,7 @@ $PROXY_GROUP = "GLOBAL"                # Clash 代理组名
 # =======================================================
 
 $BASE = Join-Path $env:USERPROFILE ".claude-switcher"
-function Find-ClaudeDataPath {
-    $legacy = Join-Path $env:APPDATA "Claude"
-    if (Test-Path -LiteralPath $legacy) { return $legacy }
+function Find-ClaudeMsixDataPath {
     $msixRoot = Join-Path $env:LOCALAPPDATA "Claude-Data"
     try {
         $pkg = Get-AppxPackage -Name 'Claude' -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -24,6 +22,13 @@ function Find-ClaudeDataPath {
     } catch {}
     $candidates = @(Get-ChildItem -LiteralPath $msixRoot -Directory -Filter 'claude_*' -ErrorAction SilentlyContinue)
     if ($candidates.Count -eq 1) { return $candidates[0].FullName }
+    return $null
+}
+function Find-ClaudeDataPath {
+    $legacy = Join-Path $env:APPDATA "Claude"
+    if (Test-Path -LiteralPath $legacy) { return $legacy }
+    $msix = Find-ClaudeMsixDataPath
+    if ($msix) { return $msix }
     return $legacy
 }
 $DATA = Find-ClaudeDataPath
@@ -1072,16 +1077,28 @@ function Invoke-CheckDetail {
 
     Get-RulesStatus
 
-    # 客户端语言:Windows 版读不到 Claude 内部语言设置,只能比对系统 UI 语言;不一致时告警，不再无条件报 ok
+    # Claude 的语言设置独立于 Windows 显示语言，使用当前数据目录中的配置。
     if (Test-CheckDisabled '客户端语言') {
         Format-OptionalResult '客户端语言' 'ok'
     } else {
-        $uiLang = [string]([System.Globalization.CultureInfo]::CurrentUICulture.Name)
+        $clientLang = ''
+        $clientConfig = Join-Path $DATA 'config.json'
+        # MSIX 版可能在旧目录仅保留 MCP 配置，而实际设置已迁移到 Claude-Data。
+        if (-not (Test-Path -LiteralPath $clientConfig)) {
+            $msix = Find-ClaudeMsixDataPath
+            if ($msix) { $clientConfig = Join-Path $msix 'config.json' }
+        }
+        try {
+            $locale = (Get-Content -LiteralPath $clientConfig -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop).locale
+            if ($locale -is [string] -and $locale -match '^[a-z]{2,3}(?:-[a-z0-9]{2,8})*\z') { $clientLang = $locale }
+        } catch {}
         $wantLang = ([string]$LOCALE_TARGET -split '-')[0].ToLowerInvariant()
-        if ($uiLang -and (($uiLang -split '-')[0].ToLowerInvariant()) -eq $wantLang) {
-            Format-OptionalResult '客户端语言' 'ok' "系统UI=$uiLang"
+        if (-not $clientLang) {
+            Format-OptionalResult '客户端语言' 'warn' '未能读取 Claude 的语言设置'
+        } elseif ((($clientLang -split '-')[0].ToLowerInvariant()) -eq $wantLang) {
+            Format-OptionalResult '客户端语言' 'ok' "Claude=$clientLang"
         } else {
-            Format-OptionalResult '客户端语言' 'warn' "系统UI=$(if ($uiLang) { $uiLang } else { '未知' }),期望 $wantLang 前缀;Windows 版不读取客户端内部设置"
+            Format-OptionalResult '客户端语言' 'warn' "Claude=$clientLang,期望 $wantLang 前缀"
         }
     }
 
@@ -1089,10 +1106,27 @@ function Invoke-CheckDetail {
         Format-OptionalResult 'ASN属性' 'ok'
     } else {
         $org = ''
-        try { $org = ((& curl.exe -s --max-time 6 "https://ipinfo.io/json" 2>$null) | ConvertFrom-Json).org } catch {}
+        $asnType = ''
+        if ($e.ip) {
+            try {
+                $ipInfoResponse = (& curl.exe -s --max-time 6 "https://ipinfo.io/$([Uri]::EscapeDataString([string]$e.ip))/json" 2>$null) -join "`n"
+                $ipInfo = $ipInfoResponse | ConvertFrom-Json -ErrorAction Stop
+                if ([string]$ipInfo.ip -eq [string]$e.ip) { $org = [string]$ipInfo.org }
+            } catch {}
+        }
+        if ($org -match '^AS(\d+)\s') {
+            $asn = $Matches[1]
+            try {
+                $networkResponse = (& curl.exe -s --max-time 6 "https://www.peeringdb.com/api/net?asn=$asn&fields=asn,info_type" 2>$null) -join "`n"
+                $network = ($networkResponse | ConvertFrom-Json -ErrorAction Stop).data |
+                    Where-Object { [string]$_.asn -eq $asn } | Select-Object -First 1
+                $asnType = [string]$network.info_type
+            } catch {}
+        }
         if (-not $org) { Format-OptionalResult 'ASN属性' 'warn' '未获取' }
-        elseif ($org -match 'Comcast|AT&T|Verizon|Spectrum|Charter|Cox|T-Mobile|Cable|esidential') { Format-OptionalResult 'ASN属性' 'ok' $org }
-        else { Format-OptionalResult 'ASN属性' 'warn' "疑似机房($org)" }
+        elseif ($asnType -eq 'Cable/DSL/ISP') { Format-OptionalResult 'ASN属性' 'ok' "ISP($org);具体 IP 的住宅属性未验证" }
+        elseif ($asnType) { Format-OptionalResult 'ASN属性' 'warn' "$asnType($org);不代表具体 IP 用途" }
+        else { Format-OptionalResult 'ASN属性' 'warn' "网络类型未确认($org)" }
     }
 
     if (Test-CheckDisabled '生态可达性') {
