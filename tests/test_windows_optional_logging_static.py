@@ -50,6 +50,12 @@ class WindowsOptionalLoggingStaticTests(unittest.TestCase):
         self.assertIn("export-diagnostics", self.ui)
         self.assertIn("set-check-config", self.ui)
 
+    def test_invoke_core_quotes_json_for_windows_powershell(self):
+        start = self.ui.index("function Invoke-Core")
+        body = self.ui[start:self.ui.index("function Quote-UiArgument", start)]
+        self.assertIn("Quote-UiArgument", body)
+        self.assertIn("@quotedArgs", body)
+
     def test_skip_is_explicitly_accepted_by_both_uis(self):
         self.assertRegex(self.ui, r"'skip'\s*\{")
         swift = (ROOT / "app/main.swift").read_text(encoding="utf-8")

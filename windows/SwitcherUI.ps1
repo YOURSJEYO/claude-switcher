@@ -175,7 +175,8 @@ function Set-Busy([bool]$busy) {
 }
 function Invoke-Core([string[]]$coreArgs) {
     $script:lastCoreExit = 1
-    $out = & powershell -NoProfile -ExecutionPolicy Bypass -File $CORE @coreArgs 2>$null
+    $quotedArgs = @($coreArgs | ForEach-Object { Quote-UiArgument ([string]$_) })
+    $out = & powershell -NoProfile -ExecutionPolicy Bypass -File $CORE @quotedArgs 2>$null
     $script:lastCoreExit = $LASTEXITCODE
     return ($out | Out-String).Trim()
 }

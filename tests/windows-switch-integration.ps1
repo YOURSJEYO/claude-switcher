@@ -162,6 +162,20 @@ try {
     Assert '不明旧目录内容不删除' ((Read-Text "$base\staging\Claude.old\only-copy.txt") -eq 'preserve')
     Assert '不明残留时 current 不变' ((Read-Text "$base\current.txt") -eq 'A')
     Microsoft.PowerShell.Management\Remove-Item -LiteralPath "$base\staging\Claude.old" -Recurse -Force
+
+    # 10. 设置界面的同步核心调用必须让 Windows PowerShell 5.1 收到完整 JSON
+    $uiPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'windows\SwitcherUI.ps1'
+    $uiText = Get-Content -LiteralPath $uiPath -Raw -Encoding UTF8
+    foreach ($functionName in @('Quote-UiArgument','Invoke-Core')) {
+        $match = [regex]::Match($uiText, "(?ms)^function $functionName.*?\n\}")
+        Assert "提取界面函数 $functionName" $match.Success
+        if ($match.Success) { Invoke-Expression $match.Value }
+    }
+    $settingsJson = '{"disabled":["DNS"],"allowOptionalFailures":false,"logging":true}'
+    $saveOutput = Invoke-Core @('set-check-config', $settingsJson)
+    Assert '同步调用保存 DNS 跳过设置' ($script:lastCoreExit -eq 0 -and $saveOutput -match '(?m)^OK:') "输出=$saveOutput"
+    $savedConfig = Get-Content -LiteralPath "$base\checks.json" -Raw -Encoding UTF8 | ConvertFrom-Json
+    Assert '保存结果包含 DNS 禁用项' (@($savedConfig.disabled) -contains 'DNS')
 } finally {
     $ErrorActionPreference = $scriptErrorPreference
     Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
