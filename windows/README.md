@@ -118,6 +118,14 @@ claude-switch.ps1 set-check-config '{"disabled":["DNS"],"allowOptionalFailures":
 
 脱敏客户端日志默认开启，位于 `%USERPROFILE%\.claude-switcher\logs\client.log`，达到 512 KiB 后轮转为 `client.log.1`。日志只记录命令、退出码、耗时和检查状态，不记录公网/住宅/代理 IP、Bearer/token/session/cookie、账号内容或 Clash 配置。点击主窗口「导出诊断」可生成 zip；也可以运行 `claude-switch.ps1 export-diagnostics <文件路径>`。诊断包只含客户端日志、检查设置和脱敏环境/状态摘要，不包含账号快照、`lastip`、`iphistory` 或原始 `last-check.txt`。
 
+### 客户端语言与 ASN 检查
+
+「客户端语言」读取 Claude 数据目录中 `config.json` 的 `locale`，与目标地区的语言前缀比较，不再用 Windows 显示语言代替。传统版通常位于 `%APPDATA%\Claude`；该目录没有 `config.json` 时，会尝试已发现的 MSIX 数据目录 `%LOCALAPPDATA%\Claude-Data\<PackageFamilyName>`。配置缺失、损坏、语言未设置或不匹配时显示警告；读取配置不等于已验证运行中的 `navigator.language`。
+
+「ASN属性」按已检测出口 IP 查询 IPinfo 的 AS 号，再查询 PeeringDB 的网络类型；`Cable/DSL/ISP` 显示 ISP，通过仅表示 ASN 类型已确认，**不证明具体 IP 属于真实住宅宽带，也不认证其代理信誉**。其他网络类型如实显示为警告；查询失败或记录不完整时显示类型未确认，不再因运营商不在名称短名单中就推断为机房。此检查会将出口 IP 发送给 IPinfo，并将公开 AS 号发送给 PeeringDB；禁用该检查后不会发送这两项查询。
+
+隔离回归：`tests\windows-client-language-integration.ps1` 与 `tests\windows-asn-integration.ps1`，均在 Windows PowerShell 5.1 和 PowerShell 7 下执行，不读取真实账号或请求外网。回滚时恢复修复前的核心脚本即可，修复不修改 Claude 配置、账号存档或系统语言。
+
 ## 四账号与跨身份保留
 
 主窗口支持 A–D 四个账号卡片，显示当前账号、已建档状态、快照大小和归档日期。每次切换前会重新完成 14 项审计；输出不完整、硬性项失败或另一操作仍在进行时不会切换。`status` 与 `switch A|B|C|D` 也可在命令行使用，`check` 提供静默总检。启用 `IP一致` 时会维护最近 48 小时出口历史，不同出口达到 3 个会给出警告；禁用该项后不记录这段历史。

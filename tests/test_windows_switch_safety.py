@@ -3,7 +3,7 @@
 覆盖四类回归：
 1. 切换不再先删当前数据目录（暂存 + 换位 + 回滚）
 2. STUN 无响应不再被当成「零暴露」
-3. 客户端语言不再无条件报 ok
+3. 客户端语言不再无条件报 ok，也不把 Windows UI 语言当作客户端语言
 4. Claude 由 Appx/AUMID 兜底启动，失败时明确告警
 
 这些用例只读 windows/ 下脚本的文本与字节，不执行 PowerShell，也不接触真实账号数据。
@@ -91,7 +91,7 @@ class WindowsSwitchSafetyTests(unittest.TestCase):
     def test_client_language_is_not_hardcoded_ok(self):
         self.assertNotIn("客户端语言=ok:跟随系统", self.core)
         self.assertIn("Format-OptionalResult '客户端语言' 'warn'", self.core)
-        self.assertIn("CurrentUICulture", self.core)
+        self.assertNotIn("CurrentUICulture", self.core)
 
     def test_claude_launch_falls_back_to_appx_aumid(self):
         self.assertIn("function Find-ClaudeAumid", self.core)

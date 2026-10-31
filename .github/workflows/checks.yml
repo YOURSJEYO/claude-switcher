@@ -67,6 +67,22 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Client language and ASN checks (Windows PowerShell 5.1)
+        shell: powershell
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File tests\windows-client-language-integration.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          powershell -NoProfile -ExecutionPolicy Bypass -File tests\windows-asn-integration.ps1
+          exit $LASTEXITCODE
+
+      - name: Client language and ASN checks (pwsh 7)
+        shell: pwsh
+        run: |
+          pwsh -NoProfile -File tests\windows-client-language-integration.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pwsh -NoProfile -File tests\windows-asn-integration.ps1
+          exit $LASTEXITCODE
+
       # windows/ 下的两个隔离集成回归此前只写在 AGENTS.md 里，CI 从不执行，
       # 导致加密快照在 PS 5.1 下整体不可用仍能合入 main。两个 shell 都跑：
       # 5.1 是 Windows 用户的实际默认环境，7 是开发机常见环境。
