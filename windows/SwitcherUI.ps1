@@ -175,6 +175,7 @@ function Set-Busy([bool]$busy) {
 }
 function Invoke-Core([string[]]$coreArgs) {
     $script:lastCoreExit = 1
+    if ($PSVersionTable.PSVersion.Major -ge 7) { $PSNativeCommandArgumentPassing = 'Legacy' }
     $quotedArgs = @($coreArgs | ForEach-Object { Quote-UiArgument ([string]$_) })
     $out = & powershell -NoProfile -ExecutionPolicy Bypass -File $CORE @quotedArgs 2>$null
     $script:lastCoreExit = $LASTEXITCODE

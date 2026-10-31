@@ -55,6 +55,7 @@ class WindowsOptionalLoggingStaticTests(unittest.TestCase):
         body = self.ui[start:self.ui.index("function Quote-UiArgument", start)]
         self.assertIn("Quote-UiArgument", body)
         self.assertIn("@quotedArgs", body)
+        self.assertIn("$PSNativeCommandArgumentPassing = 'Legacy'", body)
 
     def test_skip_is_explicitly_accepted_by_both_uis(self):
         self.assertRegex(self.ui, r"'skip'\s*\{")
