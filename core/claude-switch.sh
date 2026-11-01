@@ -579,14 +579,23 @@ def controller_config(clash_dir):
             if not os.path.isabs(unix_path):
                 fail("Clash Unix socket 路径必须为绝对路径")
             # 生成的配置可能记着已失效的临时 socket(Clash Verge 重启后路径会变);
-            # 依次尝试配置路径与服务实际使用的用户级 socket,都存在才继续走 TCP 分支
+            # 依次探测配置路径与服务实际使用的用户级 socket,跳过已失效的残留文件
             candidates = [unix_path]
             if hasattr(os, "getuid"):
                 candidates.append(
                     "/var/run/clash-verge-service/users/%d/verge-mihomo.sock" % os.getuid())
             for candidate in candidates:
-                if os.path.isabs(candidate) and Path(candidate).exists():
-                    return ("unix", candidate, None), secret
+                if not os.path.isabs(candidate) or not Path(candidate).exists():
+                    continue
+                probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                try:
+                    probe.settimeout(0.2)
+                    probe.connect(candidate)
+                except OSError:
+                    continue
+                finally:
+                    probe.close()
+                return ("unix", candidate, None), secret
         endpoint = read_yaml_scalar(path, "external-controller")
         if endpoint:
             if not endpoint.startswith(("http://", "https://")):

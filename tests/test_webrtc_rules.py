@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -85,15 +86,20 @@ class WebRTCRulesTests(unittest.TestCase):
             f'external-controller: "127.0.0.1:{self.server.server_port}"\n'
             'secret: "fixture-secret"\n', encoding="utf-8")
 
-    def run_helper(self, action="verify", policy="", *extra):
+    def run_helper(self, action="verify", policy="", *extra, service_sock=None):
         text = SOURCE.read_text(encoding="utf-8")
         match = re.search(r"<<'PY_CLASH_RULES'\n(.*?)\nPY_CLASH_RULES", text, re.S)
         self.assertIsNotNone(match, "core must provide runtime rule verification")
+        code = match.group(1)
+        if service_sock:
+            code = code.replace(
+                '"/var/run/clash-verge-service/users/%d/verge-mihomo.sock" % os.getuid()',
+                repr(service_sock))
         env = dict(os.environ, PYTHONUTF8="1", HTTP_PROXY="http://unselected.invalid:9",
                    HTTPS_PROXY="http://unselected.invalid:9", NO_PROXY="")
         run = subprocess.run(
             [sys.executable, "-", action, str(self.clash), str(self.base), self.group, policy, *extra],
-            input=match.group(1), text=True, encoding="utf-8", capture_output=True,
+            input=code, text=True, encoding="utf-8", capture_output=True,
             env=env, timeout=12)
         self.assertNotIn("fixture-secret", run.stdout + run.stderr)
         return run
@@ -272,6 +278,45 @@ class WebRTCRulesTests(unittest.TestCase):
         self.assertNotEqual(self.run_helper("policy").returncode, 0)
         self.assertEqual(self.run_helper("policy", "proxy").stdout.strip(), "proxy")
         self.assertEqual(self.requests, [])
+
+    @unittest.skipUnless(hasattr(socket, "AF_UNIX"), "requires Unix sockets")
+    def test_stale_unix_socket_falls_back_to_live_service_socket(self):
+        stale = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        stale.bind(str(self.folder / "stale.sock"))
+        stale.close()
+        live = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        live_path = self.folder / "live.sock"
+        live.bind(str(live_path))
+        live.listen()
+        live.settimeout(0.2)
+        stop = threading.Event()
+        self.addCleanup(live.close)
+        self.addCleanup(stop.set)
+
+        def serve():
+            while not stop.is_set():
+                try:
+                    connection, _ = live.accept()
+                except socket.timeout:
+                    continue
+                except OSError:
+                    break
+                with connection:
+                    request = connection.recv(65536)
+                    if not request:
+                        continue
+                    path = request.split(b" ", 2)[1].decode("ascii")
+                    body = json.dumps(self.responses[path]).encode()
+                    connection.sendall(
+                        b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                        + f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n".encode()
+                        + body)
+
+        threading.Thread(target=serve, daemon=True).start()
+        self.config.write_text(f"external-controller-unix: {self.folder / 'stale.sock'}\n",
+                               encoding="utf-8")
+        run = self.run_helper(service_sock=str(live_path))
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
 
     def test_remote_controller_is_rejected_before_sending_secret(self):
         self.config.write_text('external-controller: "untrusted.invalid:9090"\nsecret: fixture-secret\n', encoding="utf-8")
