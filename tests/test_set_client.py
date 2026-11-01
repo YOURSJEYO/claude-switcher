@@ -74,6 +74,104 @@ class SetClientTests(unittest.TestCase):
         self.assertFalse((self.root / "pkill-called").exists(),
                          "FlClash 在线时保镖不得按 Clash Verge 进程误杀 Claude")
 
+    def install_guard(self, mode):
+        guard = (ROOT / "daemons" / "claude-bodyguard.sh").read_text(encoding="utf-8")
+        guard = guard.replace("__HOME__", str(self.root)).replace("__PROXY_MODE__", mode)
+        script = self.root / "installed-bodyguard.sh"
+        script.write_text(guard, encoding="utf-8")
+        (self.root / "Library" / "Logs").mkdir(parents=True)
+        return script
+
+    def stub(self, name, body):
+        path = self.fakebin / name
+        path.write_text(body, encoding="utf-8")
+        path.chmod(0o755)
+
+    def run_guard(self, script):
+        env = dict(os.environ, HOME=str(self.root), CLAUDE_SWITCHER_TEST_ROOT=str(self.root),
+                   PATH=f"{self.fakebin}:/usr/bin:/bin")
+        # enable -n kill: 让脚本的 kill 走 PATH 桩而不是内建,便于断言目标 PID
+        return subprocess.run(["/bin/bash", "-c", 'enable -n kill\n. "$1"', "guard", str(script)],
+                              env=env, capture_output=True, text=True, timeout=5)
+
+    def test_bodyguard_offline_kills_only_install_user_cli(self):
+        script = self.install_guard("clash-verge")
+        self.stub("ifconfig", "#!/bin/sh\necho 'inet 192.168.1.2'\n")
+        self.stub("pgrep", "#!/bin/sh\nexit 1\n")
+        self.stub("pkill", "#!/bin/sh\ntouch \"$CLAUDE_SWITCHER_TEST_ROOT/pkill-called\"\n")
+        self.stub("id", "#!/bin/sh\necho 0\n")  # 模拟 root 守护
+        self.stub("stat", "#!/bin/sh\necho 4242\n")  # __HOME__ 属主 → 安装用户 UID
+        self.stub("kill", "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$CLAUDE_SWITCHER_TEST_ROOT/kill-args\"\n")
+        self.stub("ps", "#!/bin/sh\ncat <<'EOF'\n"
+                        "  101  4242 claude          /usr/local/bin/claude --continue\n"
+                        "  102  4242 node            node /usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js\n"
+                        "  103  4242 bun             bun /Users/u/.bun/install/global/node_modules/@anthropic-ai/claude-code/cli.js\n"
+                        "  104  4242 claude.exe      /Users/u/wine/drive_c/claude.exe\n"
+                        "  105  4242 node            /Users/u/project/server.js\n"
+                        "  110  4242 node            node /Users/u/project/server.js /usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js\n"
+                        "  106  4242 ClaudeSwitcher  /Applications/ClaudeSwitcher.app/Contents/MacOS/ClaudeSwitcher\n"
+                        "  107     0 claude          /usr/local/bin/claude\n"
+                        "  108  1050 node            /usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js\n"
+                        "  109  4242 bash            /Library/Application Support/claude-switcher/claude-bodyguard.sh\n"
+                        "EOF\n")
+        run = self.run_guard(script)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        kill_args = (self.root / "kill-args").read_text(encoding="utf-8").strip()
+        self.assertEqual(kill_args, "-TERM 101 102 103 104",
+                         "只许终止安装用户的 native/npm/bun CLI,不得波及他人、无关 node 或切换器自身")
+        self.assertFalse((self.root / "pkill-called").exists(), "桌面版未在运行时不应调用 pkill")
+        log = (self.root / "Library" / "Logs" / "claude-bodyguard.log").read_text(encoding="utf-8")
+        self.assertIn("Claude Code CLI", log)
+
+    def test_bodyguard_online_never_kills_cli(self):
+        script = self.install_guard("clash-verge")
+        self.stub("ifconfig", "#!/bin/sh\necho 'inet 198.18.0.1'\n")
+        self.stub("pgrep", "#!/bin/sh\ncase \"$*\" in *Claude.app*) exit 1 ;; *) exit 0 ;; esac\n")
+        self.stub("pkill", "#!/bin/sh\ntouch \"$CLAUDE_SWITCHER_TEST_ROOT/pkill-called\"\n")
+        self.stub("id", "#!/bin/sh\necho 0\n")
+        self.stub("stat", "#!/bin/sh\necho 4242\n")
+        self.stub("kill", "#!/bin/sh\ntouch \"$CLAUDE_SWITCHER_TEST_ROOT/kill-called\"\n")
+        self.stub("ps", "#!/bin/sh\ncat <<'EOF'\n"
+                        "  101  4242 claude          /usr/local/bin/claude --continue\n"
+                        "  102  4242 node            /usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js\n"
+                        "EOF\n")
+        run = self.run_guard(script)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertFalse((self.root / "kill-called").exists(), "代理在线时不得终止 CLI")
+        self.assertFalse((self.root / "pkill-called").exists(), "代理在线时不得终止桌面版")
+
+    def test_bodyguard_non_root_uses_own_uid(self):
+        script = self.install_guard("clash-verge")
+        self.stub("ifconfig", "#!/bin/sh\necho 'inet 192.168.1.2'\n")
+        self.stub("pgrep", "#!/bin/sh\nexit 1\n")
+        self.stub("id", "#!/bin/sh\necho 502\n")
+        self.stub("stat", "#!/bin/sh\necho 9999\n")  # 非 root 下被采用即说明推导错了
+        self.stub("kill", "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$CLAUDE_SWITCHER_TEST_ROOT/kill-args\"\n")
+        self.stub("ps", "#!/bin/sh\ncat <<'EOF'\n"
+                        "  201   502 claude          /usr/local/bin/claude\n"
+                        "  202  9999 claude          /usr/local/bin/claude\n"
+                        "  203   502 node            node /usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js\n"
+                        "  204   502 bash            /Library/Application Support/claude-switcher/claude-bodyguard.sh\n"
+                        "EOF\n")
+        run = self.run_guard(script)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        kill_args = (self.root / "kill-args").read_text(encoding="utf-8").strip()
+        self.assertEqual(kill_args, "-TERM 201 203", "非 root 下应以自身 UID 过滤,而非 __HOME__ 属主")
+
+    def test_bodyguard_offline_still_kills_desktop_claude(self):
+        script = self.install_guard("clash-verge")
+        self.stub("ifconfig", "#!/bin/sh\necho 'inet 192.168.1.2'\n")
+        self.stub("pgrep", "#!/bin/sh\ncase \"$*\" in *Claude.app*) exit 0 ;; *) exit 1 ;; esac\n")
+        self.stub("pkill", "#!/bin/sh\ntouch \"$CLAUDE_SWITCHER_TEST_ROOT/pkill-called\"\n")
+        self.stub("id", "#!/bin/sh\necho 502\n")
+        self.stub("kill", "#!/bin/sh\ntouch \"$CLAUDE_SWITCHER_TEST_ROOT/kill-called\"\n")
+        self.stub("ps", "#!/bin/sh\ncat <<'EOF'\n"
+                        "  301   502 node            /Users/u/project/server.js\n"
+                        "EOF\n")
+        run = self.run_guard(script)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertTrue((self.root / "pkill-called").exists(), "代理离线时仍须关闭桌面版 Claude")
+        self.assertFalse((self.root / "kill-called").exists(), "没有 CLI 进程时不得调用 kill")
 
     def test_warns_when_installed_bodyguard_mode_stale(self):
         result = self.run_set("shadowrocket")

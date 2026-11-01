@@ -2142,6 +2142,98 @@ quit_claude() {
     return 1
 }
 
+cli_config_dir() {
+    case "${1:-}" in
+        A) printf '%s\n' "$HOME/.claude" ;;
+        B|C|D) printf '%s\n' "$BASE/cli-accounts/$1" ;;
+        *) return 1 ;;
+    esac
+}
+
+cli_pids() {
+    local uid="${1:-$(id -u)}"
+    ps -axo pid=,uid=,comm=,args= | awk -v uid="$uid" '
+        $2 == uid && ($3 ~ /(^|\/)(claude|claude\.exe)$/ ||
+        ($3 ~ /(^|\/)(node|bun)$/ && $5 ~ /(^|\/)@anthropic-ai\/claude-code\/(bin\/claude(\.exe)?|cli\.js)$/)) { print $1 }'
+}
+
+quit_cli() {
+    local uid="${1:-$(id -u)}" pids i
+    pids=$(cli_pids "$uid")
+    [ -z "$pids" ] && return 0
+    kill -TERM $pids 2>/dev/null || true
+    for i in $(seq 1 10); do
+        pids=$(cli_pids "$uid")
+        [ -z "$pids" ] && return 0
+        sleep 1
+    done
+    return 1
+}
+
+cli_lock_acquire() {
+    [ "${CLI_LOCK_HELD:-0}" -eq 1 ] && return 0
+    if mkdir "$BASE/cli-operation.lock" 2>/dev/null; then
+        CLI_LOCK_HELD=1
+        trap cli_lock_release EXIT
+        return 0
+    fi
+    echo "FAIL:另一个 CLI 启动或账号切换正在进行，请稍后重试"
+    return 1
+}
+
+cli_lock_release() {
+    if [ "${CLI_LOCK_HELD:-0}" -eq 1 ]; then
+        rmdir "$BASE/cli-operation.lock" 2>/dev/null || true
+        CLI_LOCK_HELD=0
+    fi
+}
+
+run_cli() {
+    local cur dir cli_path audit var pid
+    cli_lock_acquire || return 1
+    [ -f "$BASE/current" ] || { echo "FAIL:请先在桌面切换器中初始化账号"; return 1; }
+    cur=$(cat "$BASE/current")
+    dir=$(cli_config_dir "$cur") || { echo "FAIL:当前账号无效，请先重新切换账号"; return 1; }
+    for var in ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CLAUDE_CODE_OAUTH_TOKEN \
+        CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_USE_VERTEX CLAUDE_CODE_USE_FOUNDRY ANTHROPIC_PROFILE; do
+        if [ -n "${!var-}" ]; then
+            echo "FAIL:检测到认证环境变量 $var，无法保证账号隔离，已拒绝启动"
+            return 1
+        fi
+    done
+    if [ -n "${CLAUDE_CONFIG_DIR:-}" ] && [ "$CLAUDE_CONFIG_DIR" != "$dir" ]; then
+        echo "FAIL:CLAUDE_CONFIG_DIR 与当前账号不一致，请修正后重试"
+        return 1
+    fi
+    cli_path=$(command -v claude) || { echo "FAIL:未找到 Claude Code CLI"; return 1; }
+    case "$cli_path" in
+        /*) ;;
+        *) echo "FAIL:无法解析 Claude Code CLI 的真实路径"; return 1 ;;
+    esac
+    audit=$(check) || { printf '%s\n' "$audit" >&2; echo "FAIL:环境审计未通过，已阻止启动 Claude Code"; return 1; }
+    [ "$(cat "$BASE/current")" = "$cur" ] || { echo "FAIL:审计期间账号已变化，请重新启动 Claude Code"; return 1; }
+    if [ "$cur" != "A" ]; then
+        if [ -L "$BASE/cli-accounts" ] || [ -L "$dir" ]; then
+            echo "FAIL:CLI 账号目录不能是符号链接"
+            return 1
+        fi
+        mkdir -p "$BASE/cli-accounts" "$dir" || { echo "FAIL:无法创建 CLI 账号目录"; return 1; }
+        chmod 700 "$BASE/cli-accounts" "$dir" || { echo "FAIL:无法保护 CLI 账号目录"; return 1; }
+    fi
+    CLAUDE_CONFIG_DIR="$dir" "$cli_path" "$@" &
+    pid=$!
+    cli_lock_release
+    wait "$pid"
+}
+
+cli_current() {
+    local cur dir
+    [ -f "$BASE/current" ] || { echo "FAIL:请先在桌面切换器中初始化账号"; return 1; }
+    cur=$(cat "$BASE/current")
+    dir=$(cli_config_dir "$cur") || { echo "FAIL:当前账号无效"; return 1; }
+    echo "current=$cur config=$dir"
+}
+
 archive_current() {
     local cur="$1"
     local t0 staged current previous moved=0 had_old=0
@@ -2298,7 +2390,9 @@ switch_to() {
 
     # 首次运行:把当前登录中的状态收编为账号A
     if [ "$cur" = "none" ] && [ -d "$DATA" ] && [ -n "$(ls -A "$DATA" 2>/dev/null)" ]; then
+        cli_lock_acquire || return 1
         quit_claude || { echo "FAIL:Claude 未能退出，请手动退出后重试"; return 1; }
+        quit_cli || { echo "FAIL:Claude Code 未能退出，请手动退出后重试"; return 1; }
         if [ -s "$BASE/keep-in-workspace.txt" ]; then
             stage_keep_paths || { echo "FAIL:跨身份保留暂存失败，已停止切换"; return 1; }
         fi
@@ -2331,7 +2425,9 @@ switch_to() {
         return 0
     fi
 
+    cli_lock_acquire || return 1
     quit_claude || { echo "FAIL:Claude 未能退出，请手动退出后重试"; return 1; }
+    quit_cli || { echo "FAIL:Claude Code 未能退出，请手动退出后重试"; return 1; }
 
     if [ "$just_archived" = "0" ] && [ "$cur" != "none" ] && [ -d "$DATA" ]; then
         if [ -s "$BASE/keep-in-workspace.txt" ]; then
@@ -2406,6 +2502,8 @@ case "$operation" in
     update-check) self_update --check ;;  # 只读检查;独立入口,避免旧版核心把 --check 当成真实更新
     open-safe) open_safe "${2:-}" ;;
     cli-info) cli_info ;;
+    cli) run_cli "${@:2}" ;;
+    cli-current) cli_current ;;
     snapshot-export) snapshot_export "${2:-}" "${3:-}" "${4:-}" ;;
     snapshot-import) snapshot_import "${2:-}" "${3:-}" "${4:-}" ;;
     export-diagnostics) "$0" _support export-diagnostics "${2:-}" ;;
@@ -2413,7 +2511,7 @@ case "$operation" in
     set-check-config) "$0" _support config-set "${2:-}" ;;
     write-merge-rules) write_merge_rules ;;  # 隐藏入口:供安装器调用,保证两处合并逻辑一致
     fingerprint) fingerprint ;;
-    *) echo "用法: claude-switch.sh check|checkdetail|fix|status|switch A|B|C|D|set-region|set-client <mode>|update [--check|--auto]|update-check|fingerprint|snapshot-export <A|B|C|D> <file>|snapshot-import <file> <A|B|C|D>|open-safe <url>|cli-info|export-diagnostics <file>|get-check-config|set-check-config <json>|diagnose-proxy [--proxy URL|--config FILE]"; exit 2 ;;
+    *) echo "用法: claude-switch.sh check|checkdetail|fix|status|switch A|B|C|D|set-region|set-client <mode>|update [--check|--auto]|update-check|fingerprint|snapshot-export <A|B|C|D> <file>|snapshot-import <file> <A|B|C|D>|open-safe <url>|cli-info|cli [args...]|cli-current|export-diagnostics <file>|get-check-config|set-check-config <json>|diagnose-proxy [--proxy URL|--config FILE]"; exit 2 ;;
 esac
 rc=$?
 case "$operation" in

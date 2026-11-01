@@ -22,6 +22,8 @@ FUNCTIONS = (
     "keep_path_safe",
     "stage_keep_paths",
     "restore_keep_paths",
+    "cli_lock_acquire",
+    "cli_lock_release",
     "archive_current",
     "switch_to",
 )
@@ -86,6 +88,11 @@ copy_tree() {
     mkdir -p "$2" && cp -R "$1/." "$2/"
 }
 quit_claude() { return 0; }
+quit_cli() {
+    if [ "$INJECT" = "cli_error" ]; then return 1; fi
+    printf 'called' > "$FIXTURE/cli-quit"
+    return 0
+}
 open() { printf 'called' > "$FIXTURE/launched"; }
 ditto() {
     if [ "$INJECT" = "stage_error" ]; then
@@ -166,6 +173,31 @@ ditto() {
             (self.base / "accounts" / "B" / "marker").read_text(), "saved-B"
         )
         self.assertFalse((self.data / "marker").exists())
+        self.assertTrue((self.fixture / "cli-quit").exists())
+
+    def test_switch_stops_when_cli_cannot_exit(self):
+        self.account("A").joinpath("marker").write_text("old-A", encoding="utf-8")
+        (self.base / "current").write_text("A", encoding="utf-8")
+        (self.data / "marker").write_text("live-A", encoding="utf-8")
+
+        result = self.run_shell("switch_to B", injection="cli_error")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Claude Code", result.stdout)
+        self.assertEqual((self.base / "current").read_text().strip(), "A")
+        self.assertEqual((self.data / "marker").read_text(), "live-A")
+        self.assertFalse((self.fixture / "launched").exists())
+
+    def test_switch_stops_when_cli_launch_holds_operation_lock(self):
+        self.account("A").joinpath("marker").write_text("old-A", encoding="utf-8")
+        (self.base / "current").write_text("A", encoding="utf-8")
+        (self.base / "cli-operation.lock").mkdir()
+        (self.data / "marker").write_text("live-A", encoding="utf-8")
+
+        result = self.run_shell("switch_to B")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual((self.base / "current").read_text().strip(), "A")
+        self.assertEqual((self.data / "marker").read_text(), "live-A")
+        self.assertFalse((self.fixture / "launched").exists())
 
     def test_switch_rejects_unknown_account(self):
         self.account("A").joinpath("marker").write_text("old-A", encoding="utf-8")
