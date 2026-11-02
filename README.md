@@ -448,9 +448,9 @@ WEBRTC_POLICY=proxy ~/.local/bin/claude-switch.sh fix
 
 欢迎 Fork / PR。Issue 区接受场景补充——你遇到的每一个真实泄漏场景，都可能成为下一个检查项。
 
-## 微信联系
+## 微信交流群
 
-扫码添加维护者 **JEYO** 的个人微信，交流安装配置、使用心得和问题排查。添加好友时请备注 `claude-switcher`：
+由于微信交流群人数已超过 200 人，目前只能通过邀请加入。请扫描下方二维码添加维护者 **JEYO** 的个人微信，并备注 `claude-switcher`，我会邀请你进群。
 
 ![JEYO 微信二维码](assets/wechat-personal.jpg)
 
