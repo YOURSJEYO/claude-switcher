@@ -1,0 +1,152 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-11-02T13:33:04Z",
+  "title": "Design System: Claude 切换器 · Windows",
+  "extensions": {
+    "colorMeta": {
+      "window-bg": { "role": "neutral", "displayName": "窗口深海蓝", "canonical": "#0B1120", "tonalRamp": ["oklch(15% 0.035 265)", "oklch(25% 0.04 265)", "oklch(36% 0.045 265)", "oklch(47% 0.045 265)", "oklch(58% 0.04 265)", "oklch(69% 0.035 265)", "oklch(82% 0.025 265)", "oklch(95% 0.01 265)"] },
+      "sidebar-bg": { "role": "neutral", "displayName": "侧栏深蓝", "canonical": "#0F172A", "tonalRamp": ["oklch(15% 0.04 265)", "oklch(25% 0.045 265)", "oklch(36% 0.05 265)", "oklch(47% 0.05 265)", "oklch(58% 0.045 265)", "oklch(69% 0.035 265)", "oklch(82% 0.025 265)", "oklch(95% 0.01 265)"] },
+      "dialog-bg": { "role": "neutral", "displayName": "弹窗深灰蓝", "canonical": "#12141D", "tonalRamp": ["oklch(15% 0.02 275)", "oklch(25% 0.025 275)", "oklch(36% 0.03 275)", "oklch(47% 0.03 275)", "oklch(58% 0.025 275)", "oklch(69% 0.02 275)", "oklch(82% 0.015 275)", "oklch(95% 0.008 275)"] },
+      "card-bg": { "role": "neutral", "displayName": "卡片蓝灰", "canonical": "#131E31", "tonalRamp": ["oklch(15% 0.035 260)", "oklch(25% 0.04 260)", "oklch(36% 0.045 260)", "oklch(47% 0.045 260)", "oklch(58% 0.04 260)", "oklch(69% 0.03 260)", "oklch(82% 0.02 260)", "oklch(95% 0.01 260)"] },
+      "control-bg": { "role": "neutral", "displayName": "控件蓝灰", "canonical": "#162238", "tonalRamp": ["oklch(15% 0.04 260)", "oklch(25% 0.045 260)", "oklch(36% 0.05 260)", "oklch(47% 0.05 260)", "oklch(58% 0.045 260)", "oklch(69% 0.035 260)", "oklch(82% 0.025 260)", "oklch(95% 0.01 260)"] },
+      "control-hover-bg": { "role": "neutral", "displayName": "悬停蓝灰", "canonical": "#1D2C46", "tonalRamp": ["oklch(15% 0.045 260)", "oklch(25% 0.05 260)", "oklch(36% 0.055 260)", "oklch(47% 0.055 260)", "oklch(58% 0.05 260)", "oklch(69% 0.04 260)", "oklch(82% 0.025 260)", "oklch(95% 0.01 260)"] },
+      "control-pressed-bg": { "role": "neutral", "displayName": "按下深蓝灰", "canonical": "#101B2D", "tonalRamp": ["oklch(15% 0.035 260)", "oklch(25% 0.04 260)", "oklch(36% 0.045 260)", "oklch(47% 0.045 260)", "oklch(58% 0.04 260)", "oklch(69% 0.03 260)", "oklch(82% 0.02 260)", "oklch(95% 0.01 260)"] },
+      "guard-bg": { "role": "neutral", "displayName": "防护卡蓝", "canonical": "#122438", "tonalRamp": ["oklch(15% 0.045 250)", "oklch(25% 0.05 250)", "oklch(36% 0.055 250)", "oklch(47% 0.055 250)", "oklch(58% 0.05 250)", "oklch(69% 0.04 250)", "oklch(82% 0.025 250)", "oklch(95% 0.01 250)"] },
+      "update-bg": { "role": "neutral", "displayName": "更新提示蓝", "canonical": "#172F51", "tonalRamp": ["oklch(15% 0.055 255)", "oklch(25% 0.065 255)", "oklch(36% 0.075 255)", "oklch(47% 0.075 255)", "oklch(58% 0.065 255)", "oklch(69% 0.05 255)", "oklch(82% 0.035 255)", "oklch(95% 0.015 255)"] },
+      "accent": { "role": "primary", "displayName": "操作蓝", "canonical": "#2563EB", "tonalRamp": ["oklch(15% 0.07 262)", "oklch(25% 0.11 262)", "oklch(36% 0.16 262)", "oklch(48% 0.21 262)", "oklch(58% 0.2 262)", "oklch(69% 0.15 262)", "oklch(82% 0.09 262)", "oklch(95% 0.03 262)"] },
+      "accent-border": { "role": "primary", "displayName": "操作蓝描边", "canonical": "#3B82F6", "tonalRamp": ["oklch(15% 0.065 258)", "oklch(25% 0.1 258)", "oklch(36% 0.15 258)", "oklch(48% 0.19 258)", "oklch(60% 0.19 258)", "oklch(70% 0.14 258)", "oklch(82% 0.085 258)", "oklch(95% 0.03 258)"] },
+      "accent-hover": { "role": "primary", "displayName": "导航亮蓝", "canonical": "#60A5FA", "tonalRamp": ["oklch(15% 0.055 255)", "oklch(25% 0.09 255)", "oklch(36% 0.13 255)", "oklch(48% 0.16 255)", "oklch(62% 0.17 255)", "oklch(72% 0.13 255)", "oklch(83% 0.075 255)", "oklch(95% 0.025 255)"] },
+      "accent-soft-text": { "role": "primary", "displayName": "状态浅蓝", "canonical": "#93C5FD", "tonalRamp": ["oklch(15% 0.045 250)", "oklch(25% 0.075 250)", "oklch(36% 0.11 250)", "oklch(48% 0.14 250)", "oklch(62% 0.15 250)", "oklch(74% 0.12 250)", "oklch(85% 0.07 250)", "oklch(95% 0.025 250)"] },
+      "text-primary": { "role": "neutral", "displayName": "主文字冷白", "canonical": "#F4F7FB", "tonalRamp": ["oklch(15% 0.015 250)", "oklch(25% 0.02 250)", "oklch(36% 0.02 250)", "oklch(47% 0.02 250)", "oklch(58% 0.018 250)", "oklch(69% 0.015 250)", "oklch(82% 0.01 250)", "oklch(96% 0.006 250)"] },
+      "text-control": { "role": "neutral", "displayName": "控件文字浅灰", "canonical": "#E6EDF7", "tonalRamp": ["oklch(15% 0.02 250)", "oklch(25% 0.025 250)", "oklch(36% 0.025 250)", "oklch(47% 0.025 250)", "oklch(58% 0.022 250)", "oklch(69% 0.018 250)", "oklch(82% 0.012 250)", "oklch(94% 0.008 250)"] },
+      "text-muted": { "role": "neutral", "displayName": "辅助灰蓝", "canonical": "#9AA9BF", "tonalRamp": ["oklch(15% 0.025 255)", "oklch(25% 0.03 255)", "oklch(36% 0.035 255)", "oklch(47% 0.035 255)", "oklch(58% 0.032 255)", "oklch(70% 0.028 255)", "oklch(82% 0.02 255)", "oklch(95% 0.008 255)"] },
+      "text-subtle": { "role": "neutral", "displayName": "次级灰蓝", "canonical": "#7F93AD", "tonalRamp": ["oklch(15% 0.03 255)", "oklch(25% 0.035 255)", "oklch(36% 0.04 255)", "oklch(47% 0.04 255)", "oklch(60% 0.038 255)", "oklch(71% 0.03 255)", "oklch(83% 0.02 255)", "oklch(95% 0.008 255)"] },
+      "text-faint": { "role": "neutral", "displayName": "低优先灰蓝", "canonical": "#64748B", "tonalRamp": ["oklch(15% 0.025 255)", "oklch(25% 0.03 255)", "oklch(36% 0.035 255)", "oklch(50% 0.035 255)", "oklch(61% 0.03 255)", "oklch(72% 0.025 255)", "oklch(83% 0.018 255)", "oklch(95% 0.008 255)"] },
+      "border": { "role": "neutral", "displayName": "结构描边", "canonical": "#2A3952", "tonalRamp": ["oklch(15% 0.03 255)", "oklch(25% 0.035 255)", "oklch(36% 0.04 255)", "oklch(47% 0.04 255)", "oklch(58% 0.035 255)", "oklch(69% 0.03 255)", "oklch(82% 0.02 255)", "oklch(95% 0.008 255)"] },
+      "border-sidebar": { "role": "neutral", "displayName": "侧栏描边", "canonical": "#22304A", "tonalRamp": ["oklch(15% 0.035 260)", "oklch(25% 0.04 260)", "oklch(36% 0.045 260)", "oklch(47% 0.045 260)", "oklch(58% 0.04 260)", "oklch(69% 0.03 260)", "oklch(82% 0.02 260)", "oklch(95% 0.01 260)"] },
+      "border-row": { "role": "neutral", "displayName": "检查行分隔线", "canonical": "#223049", "tonalRamp": ["oklch(15% 0.035 260)", "oklch(25% 0.04 260)", "oklch(36% 0.045 260)", "oklch(47% 0.045 260)", "oklch(58% 0.04 260)", "oklch(69% 0.03 260)", "oklch(82% 0.02 260)", "oklch(95% 0.01 260)"] },
+      "border-guard": { "role": "neutral", "displayName": "防护卡描边", "canonical": "#24415E", "tonalRamp": ["oklch(15% 0.04 250)", "oklch(25% 0.045 250)", "oklch(36% 0.05 250)", "oklch(47% 0.05 250)", "oklch(58% 0.045 250)", "oklch(69% 0.035 250)", "oklch(82% 0.025 250)", "oklch(95% 0.01 250)"] },
+      "focus": { "role": "tertiary", "displayName": "键盘焦点黄", "canonical": "#FBBE24", "tonalRamp": ["oklch(15% 0.04 85)", "oklch(25% 0.07 85)", "oklch(36% 0.1 85)", "oklch(48% 0.13 85)", "oklch(62% 0.16 85)", "oklch(80% 0.17 85)", "oklch(88% 0.12 85)", "oklch(96% 0.04 85)"] },
+      "success": { "role": "secondary", "displayName": "通过绿", "canonical": "#22C55E", "tonalRamp": ["oklch(15% 0.04 150)", "oklch(25% 0.07 150)", "oklch(36% 0.11 150)", "oklch(48% 0.15 150)", "oklch(65% 0.19 150)", "oklch(75% 0.16 150)", "oklch(85% 0.11 150)", "oklch(95% 0.04 150)"] },
+      "success-soft": { "role": "secondary", "displayName": "状态浅绿", "canonical": "#34D399", "tonalRamp": ["oklch(15% 0.035 160)", "oklch(25% 0.06 160)", "oklch(36% 0.09 160)", "oklch(48% 0.12 160)", "oklch(64% 0.15 160)", "oklch(77% 0.14 160)", "oklch(86% 0.1 160)", "oklch(95% 0.035 160)"] },
+      "warning": { "role": "tertiary", "displayName": "等待与注意黄", "canonical": "#FBBE24", "tonalRamp": ["oklch(15% 0.04 85)", "oklch(25% 0.07 85)", "oklch(36% 0.1 85)", "oklch(48% 0.13 85)", "oklch(62% 0.16 85)", "oklch(80% 0.17 85)", "oklch(88% 0.12 85)", "oklch(96% 0.04 85)"] },
+      "warning-row": { "role": "tertiary", "displayName": "检查警告黄", "canonical": "#FACC15", "tonalRamp": ["oklch(15% 0.04 95)", "oklch(25% 0.07 95)", "oklch(36% 0.1 95)", "oklch(48% 0.13 95)", "oklch(62% 0.16 95)", "oklch(82% 0.18 95)", "oklch(89% 0.12 95)", "oklch(96% 0.04 95)"] },
+      "error": { "role": "tertiary", "displayName": "失败红", "canonical": "#F87171", "tonalRamp": ["oklch(15% 0.04 25)", "oklch(25% 0.07 25)", "oklch(36% 0.1 25)", "oklch(48% 0.14 25)", "oklch(62% 0.18 25)", "oklch(72% 0.17 25)", "oklch(83% 0.11 25)", "oklch(95% 0.035 25)"] },
+      "waiting": { "role": "neutral", "displayName": "等待灰", "canonical": "#6B7280", "tonalRamp": ["oklch(15% 0.015 260)", "oklch(25% 0.02 260)", "oklch(36% 0.025 260)", "oklch(52% 0.025 260)", "oklch(62% 0.022 260)", "oklch(72% 0.018 260)", "oklch(83% 0.012 260)", "oklch(95% 0.005 260)"] },
+      "account-icon-bg": { "role": "neutral", "displayName": "账号标记蓝灰", "canonical": "#22324C", "tonalRamp": ["oklch(15% 0.04 260)", "oklch(25% 0.045 260)", "oklch(36% 0.05 260)", "oklch(47% 0.05 260)", "oklch(58% 0.045 260)", "oklch(69% 0.035 260)", "oklch(82% 0.025 260)", "oklch(95% 0.01 260)"] },
+      "account-icon-text": { "role": "neutral", "displayName": "账号标记浅蓝灰", "canonical": "#C8D7EE", "tonalRamp": ["oklch(15% 0.025 250)", "oklch(25% 0.03 250)", "oklch(36% 0.035 250)", "oklch(47% 0.035 250)", "oklch(58% 0.03 250)", "oklch(69% 0.025 250)", "oklch(85% 0.025 250)", "oklch(95% 0.01 250)"] },
+      "field-bg": { "role": "neutral", "displayName": "输入框透明白", "canonical": "#FFFFFF14", "tonalRamp": ["oklch(15% 0 0 / 8%)", "oklch(25% 0 0 / 8%)", "oklch(36% 0 0 / 8%)", "oklch(47% 0 0 / 8%)", "oklch(58% 0 0 / 8%)", "oklch(69% 0 0 / 8%)", "oklch(82% 0 0 / 8%)", "oklch(95% 0 0 / 8%)"] },
+      "field-border": { "role": "neutral", "displayName": "输入框透明描边", "canonical": "#FFFFFF33", "tonalRamp": ["oklch(15% 0 0 / 20%)", "oklch(25% 0 0 / 20%)", "oklch(36% 0 0 / 20%)", "oklch(47% 0 0 / 20%)", "oklch(58% 0 0 / 20%)", "oklch(69% 0 0 / 20%)", "oklch(82% 0 0 / 20%)", "oklch(95% 0 0 / 20%)"] }
+    },
+    "typographyMeta": {
+      "display": { "displayName": "Display", "purpose": "主窗口账号与环境标题。" },
+      "headline": { "displayName": "Headline", "purpose": "维护工具弹窗标题。" },
+      "title": { "displayName": "Title", "purpose": "卡片标题、环境结论与账号分区标题。" },
+      "body": { "displayName": "Body", "purpose": "正文、检查项与操作说明。" },
+      "label": { "displayName": "Label", "purpose": "眉题、辅助元信息、状态标签与底部操作。" },
+      "mono": { "displayName": "Mono", "purpose": "只读体检和工具输出。" }
+    },
+    "shadows": [],
+    "breakpoints": [
+      { "name": "compact", "value": "960px", "purpose": "侧栏收窄为 78px，双栏变单栏，账号卡四列变两列。" },
+      { "name": "tiny", "value": "720px", "purpose": "隐藏侧栏，页头操作移至标题下方。" }
+    ]
+  },
+  "components": [
+    {
+      "name": "Secondary Button",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "默认操作按钮；包含实现中的悬停、按下、键盘焦点与禁用状态。",
+      "html": "<button class=\"ds-btn-secondary\">重新检查</button>",
+      "css": ".ds-btn-secondary { background: #162238; color: #E6EDF7; border: 1px solid #2A3952; border-radius: 8px; padding: 9px 14px; min-height: 38px; font-family: 'Segoe UI', sans-serif; font-weight: 600; cursor: pointer; } .ds-btn-secondary:hover { background: #1D2C46; border-color: #60A5FA; } .ds-btn-secondary:active { background: #101B2D; } .ds-btn-secondary:focus-visible { border: 3px solid #FBBE24; outline: none; } .ds-btn-secondary:disabled { opacity: 0.55; }"
+    },
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "主要操作按钮，使用操作蓝并继承通用按钮状态。",
+      "html": "<button class=\"ds-btn-primary\">一键修复</button>",
+      "css": ".ds-btn-primary { background: #2563EB; color: #FFFFFF; border: 1px solid #3B82F6; border-radius: 8px; padding: 9px 14px; min-height: 38px; font-family: 'Segoe UI', sans-serif; font-weight: 600; cursor: pointer; } .ds-btn-primary:hover { background: #1D2C46; border-color: #60A5FA; } .ds-btn-primary:active { background: #101B2D; } .ds-btn-primary:focus-visible { border: 3px solid #FBBE24; outline: none; } .ds-btn-primary:disabled { opacity: 0.55; }"
+    },
+    {
+      "name": "Active Navigation",
+      "kind": "nav",
+      "description": "当前导航项使用 tonal 表面与 3px 左侧亮蓝边线。",
+      "html": "<nav class=\"ds-nav-active\"><span>账号与环境</span></nav>",
+      "css": ".ds-nav-active { background: #1D2C46; color: #F4F7FB; border-left: 3px solid #60A5FA; border-radius: 8px; padding: 11px 13px; font-family: 'Segoe UI', sans-serif; font-weight: 600; }"
+    },
+    {
+      "name": "Account Card",
+      "kind": "card",
+      "refersTo": "account-card",
+      "description": "A–D 账号卡默认态，包含字母标记和真实状态副标题位置。",
+      "html": "<button class=\"ds-account-card\"><span class=\"ds-account-mark\">A</span><strong>账号 A</strong><small>未初始化</small></button>",
+      "css": ".ds-account-card { display: flex; flex-direction: column; align-items: flex-start; background: #131E31; color: #E6EDF7; border: 1px solid #2A3952; border-radius: 8px; padding: 14px; min-height: 126px; font-family: 'Segoe UI', sans-serif; text-align: left; } .ds-account-card:hover { background: #1D2C46; border-color: #60A5FA; } .ds-account-card:active { background: #101B2D; } .ds-account-card:focus-visible { border: 3px solid #FBBE24; outline: none; } .ds-account-card:disabled { opacity: 0.55; } .ds-account-mark { display: grid; place-items: center; width: 32px; height: 32px; margin-bottom: 13px; border-radius: 9px; background: #22324C; color: #C8D7EE; font-weight: 700; } .ds-account-card strong { font-size: 14px; } .ds-account-card small { margin-top: 4px; color: #9AA9BF; font-size: 10px; }"
+    },
+    {
+      "name": "Current Account Card",
+      "kind": "card",
+      "refersTo": "account-card-current",
+      "description": "当前账号卡以操作蓝底与“当前”副标题共同标记。",
+      "html": "<button class=\"ds-account-current\"><span class=\"ds-account-mark\">A</span><strong>账号 A</strong><small>当前</small></button>",
+      "css": ".ds-account-current { display: flex; flex-direction: column; align-items: flex-start; background: #2563EB; color: #E6EDF7; border: 1px solid #2A3952; border-radius: 8px; padding: 14px; min-height: 126px; font-family: 'Segoe UI', sans-serif; text-align: left; } .ds-account-current:hover { background: #1D2C46; border-color: #60A5FA; } .ds-account-current:focus-visible { border: 3px solid #FBBE24; outline: none; } .ds-account-mark { display: grid; place-items: center; width: 32px; height: 32px; margin-bottom: 13px; border-radius: 9px; background: #22324C; color: #C8D7EE; font-weight: 700; } .ds-account-current strong { font-size: 14px; } .ds-account-current small { margin-top: 4px; color: #9AA9BF; font-size: 10px; }"
+    },
+    {
+      "name": "Overview Card",
+      "kind": "card",
+      "refersTo": "card",
+      "description": "环境与工具总览使用的无边影圆角卡片。",
+      "html": "<section class=\"ds-overview-card\"><h3>维护工具</h3><p>设备指纹体检 · Claude Code CLI 体检</p><small>从左侧「维护工具」进入</small></section>",
+      "css": ".ds-overview-card { background: #131E31; color: #F4F7FB; border: 1px solid #2A3952; border-radius: 14px; padding: 18px; font-family: 'Segoe UI', sans-serif; } .ds-overview-card h3 { margin: 0; font-size: 15px; font-weight: 600; } .ds-overview-card p { margin: 12px 0 0; color: #C4D0E1; font-size: 11px; } .ds-overview-card small { display: block; margin-top: 12px; color: #9AA9BF; font-size: 10px; }"
+    },
+    {
+      "name": "Waiting Status Pill",
+      "kind": "chip",
+      "description": "等待检查的状态胶囊；其他语义态沿用相同几何并替换状态色。",
+      "html": "<span class=\"ds-status-waiting\">等待检查</span>",
+      "css": ".ds-status-waiting { display: inline-block; background: #F59E0B33; color: #FBBE24; border-radius: 12px; padding: 5px 10px; font-family: 'Segoe UI', sans-serif; font-size: 11px; font-weight: 700; }"
+    },
+    {
+      "name": "Text Field",
+      "kind": "input",
+      "refersTo": "field",
+      "description": "弹窗文本输入的透明表面、边框与文字选择样式。",
+      "html": "<input class=\"ds-field\" type=\"text\" value=\"https://example.com\" aria-label=\"安全链接\" />",
+      "css": ".ds-field { background: #FFFFFF14; color: #FFFFFF; caret-color: #FFFFFF; border: 1px solid #FFFFFF33; padding: 8px 10px; font-family: 'Segoe UI', sans-serif; } .ds-field::selection { background: #2563EB; }"
+    },
+    {
+      "name": "Environment Check Row",
+      "kind": "custom",
+      "description": "三列检查行：名称、可省略详情和带文字的语义状态。",
+      "html": "<div class=\"ds-check-row\"><span>代理内核</span><span class=\"ds-check-detail\">核心运行中</span><strong class=\"ds-check-success\">通过</strong></div>",
+      "css": ".ds-check-row { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 10px; border-bottom: 1px solid #223049; padding: 7px 3px; background: transparent; color: #E6EDF7; font-family: 'Segoe UI', sans-serif; font-size: 11px; } .ds-check-detail { overflow: hidden; color: #9AA9BF; font-size: 10px; text-align: right; text-overflow: ellipsis; white-space: nowrap; } .ds-check-success { min-width: 30px; color: #22C55E; font-size: 10px; text-align: right; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "安全操作台",
+    "overview": "Windows 界面是一座以判断与操作为中心的安全操作台：当前账号、环境结论和主要动作首先可读，账号快照、14 项检查与维护工具按任务层级展开。整体采用专业深色、卡片式总览和紧凑但可扫描的信息密度。\n\n蓝色只承担主要操作、当前账号和导航定位；成功、警告、失败与等待状态同时使用文字、符号和颜色。界面不以装饰制造安全感，状态始终来自现有核心输出。",
+    "keyCharacteristics": [
+      "专业深色与清晰状态层级",
+      "克制蓝色强调与卡片式账号、环境总览",
+      "边框和 tonal layering 建立深度，不使用阴影",
+      "颜色与文字共同表达安全状态"
+    ],
+    "rules": [
+      { "name": "The Status Has Words Rule", "body": "状态必须保留“通过 / 警告 / 跳过 / 失败”等文字或状态符号，颜色不能成为唯一信息载体。", "section": "colors" },
+      { "name": "The Border Before Shadow Rule", "body": "需要区分层级时，先使用既有表面色与描边，不以投影制造浮起效果。", "section": "elevation" }
+    ],
+    "dos": [
+      "Do 让当前账号、环境状态和主要操作先于维护工具被读到。",
+      "Do 使用文字或符号与颜色共同表达检查状态。",
+      "Do 用既有表面色和 1px 边框建立卡片与区域层级。",
+      "Do 在窄窗口使用已实现的 960px 与 720px 布局变化。"
+    ],
+    "donts": [
+      "Don't 新增阴影或把装饰性蓝光当作状态反馈。",
+      "Don't 将灰色“跳过”呈现为绿色“通过”，或虚构环境安全结论。",
+      "Don't 让次要维护工具使用比主要修复动作更强的视觉权重。",
+      "Don't 将本文的静态实现记录当作 Windows/WPF 真机渲染与交互验收。"
+    ]
+  }
+}

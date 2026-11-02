@@ -121,13 +121,15 @@ def ps1_balance_error(text):
 
 
 class WindowsUpdateStaticTests(unittest.TestCase):
-    def test_ps1_files_keep_utf8_bom(self):
+    def test_ps1_files_keep_utf8_bom_and_lf(self):
         for path in PS1_FILES:
             with self.subTest(path=path.name):
+                content = path.read_bytes()
                 self.assertTrue(
-                    path.read_bytes().startswith(b"\xef\xbb\xbf"),
+                    content.startswith(b"\xef\xbb\xbf"),
                     f"{path.name} 必须保持 UTF-8 with BOM",
                 )
+                self.assertNotIn(b"\r\n", content, f"{path.name} 必须使用 LF 换行")
 
     def test_core_exposes_version_and_update_commands(self):
         text = read(CORE)
@@ -242,6 +244,20 @@ class WindowsUpdateStaticTests(unittest.TestCase):
         x_name = "{http://schemas.microsoft.com/winfx/2006/xaml}Name"
         names = [node.get(x_name) for node in root.iter() if node.get(x_name)]
         self.assertEqual(len(names), len(set(names)), "控件 x:Name 必须唯一")
+
+        def named(name):
+            return next(node for node in root.iter() if node.get(x_name) == name)
+
+        update_bar = named("UpdateBar")
+        self.assertEqual(update_bar.get("Visibility"), "Collapsed")
+        update_text = next(node for node in update_bar.iter() if node.get(x_name) == "UpdateText")
+        self.assertEqual(update_text.get("TextWrapping"), "Wrap")
+        for name in ("BtnUpdate", "BtnLater"):
+            with self.subTest(update_control=name):
+                button = next(node for node in update_bar.iter() if node.get(x_name) == name)
+                self.assertTrue(button.tag.endswith("Button"))
+                self.assertRegex(text, rf"\$win\.FindName\('{name}'\)\.Add_Click")
+        self.assertRegex(text, r"\$win\.FindName\('BtnCheckUpdate'\)\.Add_Click")
 
     def test_installer_writes_version_file(self):
         text = read(INSTALL)

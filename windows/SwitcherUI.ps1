@@ -9,20 +9,82 @@ $CORE = "$BASE\claude-switch.ps1"
 $xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Claude 账号切换器" Width="540" Height="860" MinWidth="480" MinHeight="640" ResizeMode="CanResize"
-        WindowStartupLocation="CenterScreen" Background="#FF12141D" Foreground="White" FontFamily="Segoe UI">
+        Title="Claude 账号切换器" Width="1100" Height="900" MinWidth="680" MinHeight="700" ResizeMode="CanResize"
+        WindowStartupLocation="CenterScreen" Background="#FF0B1120" Foreground="#FFF4F7FB" FontFamily="Segoe UI">
     <Window.Resources>
+        <!-- 已批准方向：专业深色、224px 侧栏、卡片式账号与环境总览。 -->
+        <SolidColorBrush x:Key="CardBrush" Color="#FF131E31"/>
+        <SolidColorBrush x:Key="LineBrush" Color="#FF2A3952"/>
+        <SolidColorBrush x:Key="MutedBrush" Color="#FF9AA9BF"/>
+        <Style x:Key="CardStyle" TargetType="Border">
+            <Setter Property="Background" Value="{StaticResource CardBrush}"/>
+            <Setter Property="BorderBrush" Value="{StaticResource LineBrush}"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="CornerRadius" Value="14"/>
+        </Style>
         <Style TargetType="Button">
-            <Setter Property="Foreground" Value="White"/><Setter Property="Background" Value="#1AFFFFFF"/>
-            <Setter Property="BorderThickness" Value="0"/><Setter Property="Padding" Value="14,8"/>
-            <Setter Property="Cursor" Value="Hand"/><Setter Property="MinHeight" Value="36"/>
+            <Setter Property="Foreground" Value="#FFE6EDF7"/>
+            <Setter Property="Background" Value="#FF162238"/>
+            <Setter Property="BorderBrush" Value="#FF2A3952"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Padding" Value="14,9"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="MinHeight" Value="38"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="ButtonBorder" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="8" Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" VerticalAlignment="{TemplateBinding VerticalContentAlignment}"
+                                              RecognizesAccessKey="True"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="ButtonBorder" Property="BorderBrush" Value="#FF60A5FA"/>
+                                <Setter TargetName="ButtonBorder" Property="Background" Value="#FF1D2C46"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="ButtonBorder" Property="Background" Value="#FF101B2D"/>
+                            </Trigger>
+                            <Trigger Property="IsKeyboardFocused" Value="True">
+                                <Setter TargetName="ButtonBorder" Property="BorderBrush" Value="#FFFBBE24"/>
+                                <Setter TargetName="ButtonBorder" Property="BorderThickness" Value="3"/>
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter TargetName="ButtonBorder" Property="Opacity" Value="0.55"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
         </Style>
         <Style x:Key="AccentButton" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
-            <Setter Property="Background" Value="#FF6366F1"/><Setter Property="FontWeight" Value="Bold"/>
+            <Setter Property="Background" Value="#FF2563EB"/>
+            <Setter Property="BorderBrush" Value="#FF3B82F6"/>
+            <Setter Property="Foreground" Value="White"/>
+        </Style>
+        <Style x:Key="NavButton" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="BorderBrush" Value="Transparent"/>
+            <Setter Property="Foreground" Value="#FF9AA9BF"/>
+            <Setter Property="HorizontalContentAlignment" Value="Left"/>
+            <Setter Property="Padding" Value="13,10"/>
+        </Style>
+        <Style x:Key="AccountButton" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+            <Setter Property="Background" Value="#FF131E31"/>
+            <Setter Property="BorderBrush" Value="#FF2A3952"/>
+            <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+            <Setter Property="Padding" Value="14"/>
+            <Setter Property="MinHeight" Value="126"/>
         </Style>
         <Style TargetType="ListBoxItem">
             <Setter Property="HorizontalContentAlignment" Value="Stretch"/><Setter Property="Focusable" Value="False"/>
             <Setter Property="Padding" Value="0"/>
+        </Style>
+        <Style TargetType="ComboBox">
+            <Setter Property="Background" Value="#FF162238"/><Setter Property="Foreground" Value="#FFE6EDF7"/>
+            <Setter Property="BorderBrush" Value="#FF2A3952"/><Setter Property="Padding" Value="10,6"/>
         </Style>
         <Style TargetType="PasswordBox">
             <Setter Property="Background" Value="#14FFFFFF"/><Setter Property="Foreground" Value="White"/>
@@ -31,111 +93,207 @@ $xaml = @"
         <Style TargetType="TextBox">
             <Setter Property="Background" Value="#14FFFFFF"/><Setter Property="Foreground" Value="White"/>
             <Setter Property="BorderBrush" Value="#33FFFFFF"/><Setter Property="Padding" Value="10,8"/>
-            <Setter Property="CaretBrush" Value="White"/><Setter Property="SelectionBrush" Value="#FF6366F1"/>
+            <Setter Property="CaretBrush" Value="White"/><Setter Property="SelectionBrush" Value="#FF2563EB"/>
         </Style>
     </Window.Resources>
-    <Grid Margin="20">
-        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-        <Grid Grid.Row="0" Margin="0,0,0,18">
-            <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-            <Border Width="44" Height="44" CornerRadius="12" Background="#FF6366F1" VerticalAlignment="Center">
-                <TextBlock Text="CS" HorizontalAlignment="Center" VerticalAlignment="Center" FontSize="16" FontWeight="Bold" Foreground="White"/>
-            </Border>
-            <StackPanel Grid.Column="1" Margin="12,0" VerticalAlignment="Center">
-                <TextBlock Text="Claude 账号切换器" FontSize="19" FontWeight="Bold"/>
-                <TextBlock Text="安全检查 · 切换 · 启动" FontSize="11" Foreground="#B3FFFFFF" Margin="0,3,0,0"/>
-            </StackPanel>
-            <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
-                <Button x:Name="BtnTools" Content="工具" Padding="12,7" Margin="0,0,8,0" ToolTip="指纹体检、CLI 体检、安全链接与快照迁移"/>
-                <Button x:Name="BtnSettings" Content="设置" Padding="12,7" ToolTip="检查设置与脱敏诊断日志"/>
-            </StackPanel>
-        </Grid>
-        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-            <StackPanel>
-                <Grid Margin="0,0,0,8">
-                    <TextBlock Text="环境检查" FontSize="12" FontWeight="SemiBold" Foreground="#CCFFFFFF" VerticalAlignment="Center"/>
-                    <Border x:Name="StatusPill" HorizontalAlignment="Right" Padding="11,5" CornerRadius="12" Background="#33F59E0B">
-                        <TextBlock x:Name="StatusText" Text="等待检查" FontSize="11" FontWeight="Bold" Foreground="#FFFBBE24"/>
+    <Grid x:Name="MainLayout">
+        <Grid.ColumnDefinitions><ColumnDefinition Width="224"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+        <Border x:Name="Sidebar" Grid.Column="0" Background="#FF0F172A" BorderBrush="#FF22304A" BorderThickness="0,0,1,0">
+            <Grid Margin="18,26,18,22">
+                <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+                <Grid Grid.Row="0" Margin="6,0,0,30">
+                    <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                    <Border Width="42" Height="42" CornerRadius="12" Background="#FF1D4ED8">
+                        <TextBlock Text="CS" HorizontalAlignment="Center" VerticalAlignment="Center" FontSize="16" FontWeight="Bold"/>
                     </Border>
+                    <StackPanel x:Name="BrandDescription" Grid.Column="1" Margin="11,0,0,0" VerticalAlignment="Center">
+                        <TextBlock Text="Claude 切换器" FontSize="15" FontWeight="Bold"/>
+                        <TextBlock Text="Windows · 账号安全中心" FontSize="10" Foreground="{StaticResource MutedBrush}" Margin="0,3,0,0"/>
+                    </StackPanel>
                 </Grid>
-                <Border CornerRadius="12" Background="#0DFFFFFF" BorderBrush="#1FFFFFFF" BorderThickness="1" Padding="6">
-                    <ListBox x:Name="CheckList" Background="Transparent" BorderThickness="0" Foreground="#F2FFFFFF" FontSize="12">
-                        <ListBox.ItemTemplate>
-                            <DataTemplate>
-                                <Grid Margin="6,5">
-                                    <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                                    <TextBlock Text="{Binding Name}" VerticalAlignment="Center" Margin="0,0,12,0"/>
-                                    <TextBlock Grid.Column="1" Text="{Binding Detail}" VerticalAlignment="Center" HorizontalAlignment="Right" Foreground="#A6FFFFFF" FontSize="10" TextTrimming="CharacterEllipsis" ToolTip="{Binding Detail}" Margin="0,0,12,0"/>
-                                    <TextBlock Grid.Column="2" Text="{Binding StateText}" MinWidth="34" TextAlignment="Right" VerticalAlignment="Center" Foreground="{Binding Color}" FontSize="10" FontWeight="Bold"/>
-                                </Grid>
-                            </DataTemplate>
-                        </ListBox.ItemTemplate>
-                    </ListBox>
-                </Border>
-                <Border CornerRadius="12" Background="#0DFFFFFF" BorderBrush="#1FFFFFFF" BorderThickness="1" Padding="12,9" Margin="0,12,0,0">
-                    <Grid>
-                        <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                        <StackPanel VerticalAlignment="Center">
-                            <TextBlock Text="代理客户端" FontSize="12" FontWeight="SemiBold"/>
-                            <TextBlock Text="切换后自动重新检查" FontSize="10" Foreground="#99FFFFFF" Margin="0,2,0,0"/>
+                <StackPanel x:Name="NavigationPanel" Grid.Row="1">
+                    <Border Background="#FF1D2C46" BorderBrush="#FF60A5FA" BorderThickness="3,0,0,0" CornerRadius="8" Padding="13,11" Margin="0,0,0,6">
+                        <StackPanel>
+                            <TextBlock x:Name="ActiveNavLabel" Text="账号与环境" FontWeight="SemiBold"/>
+                            <TextBlock x:Name="ActiveNavCompactLabel" Text="账" FontWeight="SemiBold" Visibility="Collapsed" HorizontalAlignment="Center"/>
                         </StackPanel>
-                        <ComboBox x:Name="ProxyClient" Grid.Column="1" Width="180" MinHeight="34" IsEnabled="False" ToolTip="选择实际使用的代理客户端">
-                            <ComboBoxItem Content="Clash Verge" Tag="clash-verge"/><ComboBoxItem Content="FlClash" Tag="flclash"/>
-                            <ComboBoxItem Content="sing-box" Tag="sing-box"/><ComboBoxItem Content="ClashX" Tag="clashx"/>
-                            <ComboBoxItem Content="Surge" Tag="surge"/><ComboBoxItem Content="WireGuard" Tag="wireguard"/>
-                            <ComboBoxItem Content="其他 TUN 客户端" Tag="other"/><ComboBoxItem Content="自动识别" Tag="auto"/>
-                        </ComboBox>
-                    </Grid>
-                </Border>
-                <Border CornerRadius="12" Background="#0DFFFFFF" BorderBrush="#1FFFFFFF" BorderThickness="1" Padding="12" Margin="0,12,0,0">
+                    </Border>
+                    <Button x:Name="BtnTools" Style="{StaticResource NavButton}" HorizontalAlignment="Stretch" Margin="0,0,0,6" ToolTip="指纹体检、CLI 体检、安全链接与快照迁移">
+                        <StackPanel>
+                            <TextBlock x:Name="NavToolsLabel" Text="维护工具"/>
+                            <TextBlock x:Name="NavToolsCompactLabel" Text="工" Visibility="Collapsed" HorizontalAlignment="Center"/>
+                        </StackPanel>
+                    </Button>
+                    <Button x:Name="BtnSettings" Style="{StaticResource NavButton}" HorizontalAlignment="Stretch" ToolTip="检查设置与脱敏诊断日志">
+                        <StackPanel>
+                            <TextBlock x:Name="NavSettingsLabel" Text="检查设置"/>
+                            <TextBlock x:Name="NavSettingsCompactLabel" Text="设" Visibility="Collapsed" HorizontalAlignment="Center"/>
+                        </StackPanel>
+                    </Button>
+                </StackPanel>
+                <Border x:Name="GuardCard" Grid.Row="2" VerticalAlignment="Bottom" Background="#FF122438" BorderBrush="#FF24415E" BorderThickness="1" CornerRadius="12" Padding="14">
                     <StackPanel>
-                        <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
-                            <TextBlock Text="当前账号" FontSize="11" Foreground="#B3FFFFFF" VerticalAlignment="Center"/>
-                            <Border Margin="7,0,0,0" Padding="9,3" CornerRadius="10" Background="#4D6366F1">
-                                <TextBlock x:Name="CurrentAccount" Text="?" FontSize="11" FontWeight="Bold" Foreground="#FFA5B4FC"/>
-                            </Border>
+                        <StackPanel Orientation="Horizontal">
+                            <Ellipse x:Name="GuardStatusDot" Width="7" Height="7" Fill="#FFFBBE24" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                            <TextBlock Text="保镖与 Kill-Switch" FontSize="12" FontWeight="SemiBold"/>
                         </StackPanel>
-                        <Grid>
-                            <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="10"/><ColumnDefinition/></Grid.ColumnDefinitions>
-                            <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="10"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-                            <Button x:Name="BtnA" Grid.Column="0" Grid.Row="0" IsEnabled="False" ToolTip="切换或初始化账号 A">
-                                <StackPanel><TextBlock Text="账号 A" FontSize="15" FontWeight="Bold" HorizontalAlignment="Center"/><TextBlock x:Name="AccountASubtitle" Text="未初始化" FontSize="10" Foreground="#CCFFFFFF" HorizontalAlignment="Center" Margin="0,3,0,0"/></StackPanel>
-                            </Button>
-                            <Button x:Name="BtnB" Grid.Column="2" Grid.Row="0" IsEnabled="False" ToolTip="切换或初始化账号 B">
-                                <StackPanel><TextBlock Text="账号 B" FontSize="15" FontWeight="Bold" HorizontalAlignment="Center"/><TextBlock x:Name="AccountBSubtitle" Text="未初始化" FontSize="10" Foreground="#CCFFFFFF" HorizontalAlignment="Center" Margin="0,3,0,0"/></StackPanel>
-                            </Button>
-                            <Button x:Name="BtnC" Grid.Column="0" Grid.Row="2" IsEnabled="False" ToolTip="切换或初始化账号 C">
-                                <StackPanel><TextBlock Text="账号 C" FontSize="15" FontWeight="Bold" HorizontalAlignment="Center"/><TextBlock x:Name="AccountCSubtitle" Text="未初始化" FontSize="10" Foreground="#CCFFFFFF" HorizontalAlignment="Center" Margin="0,3,0,0"/></StackPanel>
-                            </Button>
-                            <Button x:Name="BtnD" Grid.Column="2" Grid.Row="2" IsEnabled="False" ToolTip="切换或初始化账号 D">
-                                <StackPanel><TextBlock Text="账号 D" FontSize="15" FontWeight="Bold" HorizontalAlignment="Center"/><TextBlock x:Name="AccountDSubtitle" Text="未初始化" FontSize="10" Foreground="#CCFFFFFF" HorizontalAlignment="Center" Margin="0,3,0,0"/></StackPanel>
-                            </Button>
-                        </Grid>
+                        <TextBlock Text="网络异常时自动终止受保护进程" FontSize="11" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" Margin="0,8,0,0"/>
+                        <TextBlock Text="运行状态以环境检查结果为准" FontSize="10" Foreground="#FF7F93AD" TextWrapping="Wrap" Margin="0,5,0,0"/>
                     </StackPanel>
                 </Border>
-                <Border x:Name="UpdateBar" Visibility="Collapsed" CornerRadius="10" Background="#1F6366F1" BorderBrush="#556366F1" BorderThickness="1" Padding="12,10" Margin="0,12,0,0">
-                    <Grid>
-                        <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                        <TextBlock x:Name="UpdateText" Grid.Column="0" Text="" FontSize="11" Foreground="#FFE0E7FF" TextWrapping="Wrap" VerticalAlignment="Center" Margin="0,0,8,0"/>
-                        <Button x:Name="BtnUpdate" Grid.Column="1" Content="一键更新" Padding="10,5" Margin="0,0,6,0" FontSize="11" Style="{StaticResource AccentButton}"/>
-                        <Button x:Name="BtnLater" Grid.Column="2" Content="稍后" Padding="10,5" FontSize="11"/>
-                    </Grid>
-                </Border>
-                <TextBlock x:Name="Banner" Text="" FontSize="12" Foreground="#FFF87171" Margin="0,12,0,0" TextWrapping="Wrap"/>
-                <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
-                    <Button x:Name="BtnFix" Content="一键修复" Style="{StaticResource AccentButton}" Margin="0,0,10,0" ToolTip="修复代理、时区、IPv6 与保镖，可能需要管理员授权"/>
-                    <Button x:Name="BtnRefresh" Content="重新检查" ToolTip="重新执行完整环境检查"/>
-                </StackPanel>
+            </Grid>
+        </Border>
+        <ScrollViewer Grid.Column="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+            <StackPanel Margin="30,28,30,24">
+                <Grid x:Name="HeaderGrid" Margin="0,0,0,24">
+                    <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                    <StackPanel x:Name="HeaderTitle" VerticalAlignment="Center" Margin="0,0,18,0">
+                        <TextBlock Text="ACCOUNT &amp; ENVIRONMENT" FontSize="10" FontWeight="Bold" Foreground="#FF60A5FA"/>
+                        <TextBlock Text="账号与环境" FontSize="26" FontWeight="Bold" Margin="0,5,0,0"/>
+                        <StackPanel Orientation="Horizontal" Margin="0,7,0,0">
+                            <TextBlock Text="当前账号" FontSize="12" Foreground="{StaticResource MutedBrush}"/>
+                            <TextBlock x:Name="CurrentAccount" Text="?" FontSize="12" FontWeight="Bold" Foreground="#FF93C5FD" Margin="6,0,0,0"/>
+                        </StackPanel>
+                    </StackPanel>
+                    <StackPanel x:Name="HeaderActions" Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                        <Button x:Name="BtnRefresh" Content="重新检查" Margin="0,0,10,0" ToolTip="重新执行完整环境检查"/>
+                        <Button x:Name="BtnFix" Content="一键修复" Style="{StaticResource AccentButton}" ToolTip="修复代理、时区、IPv6 与保镖，可能需要管理员授权"/>
+                    </StackPanel>
+                </Grid>
+                <Grid x:Name="HeroGrid" Margin="0,0,0,22">
+                    <Grid.ColumnDefinitions><ColumnDefinition Width="3*"/><ColumnDefinition Width="16"/><ColumnDefinition Width="2*"/></Grid.ColumnDefinitions>
+                    <Border x:Name="StatusCard" Grid.Column="0" Style="{StaticResource CardStyle}" Padding="20">
+                        <Grid>
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                            <Border x:Name="StatusIconBorder" Width="46" Height="46" CornerRadius="12" Background="#33F59E0B" VerticalAlignment="Center" Margin="0,0,14,0">
+                                <TextBlock x:Name="StatusIcon" Text="…" Foreground="#FFFBBE24" FontSize="23" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            </Border>
+                            <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="0,0,12,0">
+                                <TextBlock Text="环境安全状态" FontSize="16" FontWeight="SemiBold"/>
+                                <TextBlock Text="14 项检查 · 硬性项必须通过" FontSize="11" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" Margin="0,4,0,0"/>
+                            </StackPanel>
+                            <Border x:Name="StatusPill" Grid.Column="2" VerticalAlignment="Center" Padding="10,5" CornerRadius="12" Background="#33F59E0B">
+                                <TextBlock x:Name="StatusText" Text="等待检查" FontSize="11" FontWeight="Bold" Foreground="#FFFBBE24"/>
+                            </Border>
+                        </Grid>
+                    </Border>
+                    <Border x:Name="ProxyCard" Grid.Column="2" Style="{StaticResource CardStyle}" Padding="18">
+                        <StackPanel VerticalAlignment="Center">
+                            <TextBlock Text="代理客户端" FontSize="11" FontWeight="SemiBold" Foreground="{StaticResource MutedBrush}"/>
+                            <ComboBox x:Name="ProxyClient" MinHeight="36" Margin="0,9,0,0" IsEnabled="False" ToolTip="选择实际使用的代理客户端">
+                                <ComboBoxItem Content="Clash Verge" Tag="clash-verge"/><ComboBoxItem Content="FlClash" Tag="flclash"/>
+                                <ComboBoxItem Content="sing-box" Tag="sing-box"/><ComboBoxItem Content="ClashX" Tag="clashx"/>
+                                <ComboBoxItem Content="Surge" Tag="surge"/><ComboBoxItem Content="WireGuard" Tag="wireguard"/>
+                                <ComboBoxItem Content="其他 TUN 客户端" Tag="other"/><ComboBoxItem Content="自动识别" Tag="auto"/>
+                            </ComboBox>
+                            <TextBlock Text="切换后自动重新检查" FontSize="10" Foreground="{StaticResource MutedBrush}" Margin="0,8,0,0"/>
+                        </StackPanel>
+                    </Border>
+                </Grid>
+                <Grid Margin="0,0,0,12">
+                    <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                    <TextBlock Text="账号快照" FontSize="16" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                    <TextBlock Grid.Column="1" Text="切换前自动重新审计并归档当前身份" FontSize="11" Foreground="{StaticResource MutedBrush}" VerticalAlignment="Center"/>
+                </Grid>
+                <Grid x:Name="AccountGrid" Margin="0,0,0,10">
+                    <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition/><ColumnDefinition/><ColumnDefinition/></Grid.ColumnDefinitions>
+                    <Button x:Name="BtnA" Grid.Column="0" Style="{StaticResource AccountButton}" Margin="0,0,12,12" IsEnabled="False" ToolTip="切换或初始化账号 A">
+                        <StackPanel>
+                            <Border Width="32" Height="32" CornerRadius="9" Background="#FF22324C" HorizontalAlignment="Left" Margin="0,0,0,13">
+                                <TextBlock Text="A" FontWeight="Bold" Foreground="#FFC8D7EE" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            </Border>
+                            <TextBlock Text="账号 A" FontSize="14" FontWeight="SemiBold"/>
+                            <TextBlock x:Name="AccountASubtitle" Text="未初始化" FontSize="10" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" Margin="0,4,0,0"/>
+                        </StackPanel>
+                    </Button>
+                    <Button x:Name="BtnB" Grid.Column="1" Style="{StaticResource AccountButton}" Margin="0,0,12,12" IsEnabled="False" ToolTip="切换或初始化账号 B">
+                        <StackPanel>
+                            <Border Width="32" Height="32" CornerRadius="9" Background="#FF22324C" HorizontalAlignment="Left" Margin="0,0,0,13">
+                                <TextBlock Text="B" FontWeight="Bold" Foreground="#FFC8D7EE" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            </Border>
+                            <TextBlock Text="账号 B" FontSize="14" FontWeight="SemiBold"/>
+                            <TextBlock x:Name="AccountBSubtitle" Text="未初始化" FontSize="10" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" Margin="0,4,0,0"/>
+                        </StackPanel>
+                    </Button>
+                    <Button x:Name="BtnC" Grid.Column="2" Style="{StaticResource AccountButton}" Margin="0,0,12,12" IsEnabled="False" ToolTip="切换或初始化账号 C">
+                        <StackPanel>
+                            <Border Width="32" Height="32" CornerRadius="9" Background="#FF22324C" HorizontalAlignment="Left" Margin="0,0,0,13">
+                                <TextBlock Text="C" FontWeight="Bold" Foreground="#FFC8D7EE" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            </Border>
+                            <TextBlock Text="账号 C" FontSize="14" FontWeight="SemiBold"/>
+                            <TextBlock x:Name="AccountCSubtitle" Text="未初始化" FontSize="10" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" Margin="0,4,0,0"/>
+                        </StackPanel>
+                    </Button>
+                    <Button x:Name="BtnD" Grid.Column="3" Style="{StaticResource AccountButton}" Margin="0,0,12,12" IsEnabled="False" ToolTip="切换或初始化账号 D">
+                        <StackPanel>
+                            <Border Width="32" Height="32" CornerRadius="9" Background="#FF22324C" HorizontalAlignment="Left" Margin="0,0,0,13">
+                                <TextBlock Text="D" FontWeight="Bold" Foreground="#FFC8D7EE" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            </Border>
+                            <TextBlock Text="账号 D" FontSize="14" FontWeight="SemiBold"/>
+                            <TextBlock x:Name="AccountDSubtitle" Text="未初始化" FontSize="10" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" Margin="0,4,0,0"/>
+                        </StackPanel>
+                    </Button>
+                </Grid>
+                <Grid x:Name="BottomGrid">
+                    <Grid.ColumnDefinitions><ColumnDefinition Width="3*"/><ColumnDefinition Width="16"/><ColumnDefinition Width="2*"/></Grid.ColumnDefinitions>
+                    <Border Grid.Column="0" Background="{StaticResource CardBrush}" BorderBrush="{StaticResource LineBrush}" BorderThickness="1" CornerRadius="14" Padding="18,16">
+                        <StackPanel>
+                            <Grid Margin="0,0,0,8">
+                                <TextBlock Text="环境检查" FontSize="15" FontWeight="SemiBold"/>
+                                <TextBlock Text="全部 14 项" FontSize="10" Foreground="{StaticResource MutedBrush}" HorizontalAlignment="Right" VerticalAlignment="Center"/>
+                            </Grid>
+                            <ListBox x:Name="CheckList" Background="Transparent" BorderThickness="0" Foreground="#FFE6EDF7" FontSize="11">
+                                <ListBox.ItemTemplate>
+                                    <DataTemplate>
+                                        <Border BorderBrush="#FF223049" BorderThickness="0,0,0,1" Padding="3,7">
+                                            <Grid>
+                                                <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                                                <TextBlock Text="{Binding Name}" VerticalAlignment="Center" Margin="0,0,10,0"/>
+                                                <TextBlock Grid.Column="1" Text="{Binding Detail}" VerticalAlignment="Center" HorizontalAlignment="Right" Foreground="{StaticResource MutedBrush}" FontSize="10" TextTrimming="CharacterEllipsis" ToolTip="{Binding Detail}" Margin="0,0,10,0"/>
+                                                <TextBlock Grid.Column="2" Text="{Binding StateText}" MinWidth="30" TextAlignment="Right" VerticalAlignment="Center" Foreground="{Binding Color}" FontSize="10" FontWeight="Bold"/>
+                                            </Grid>
+                                        </Border>
+                                    </DataTemplate>
+                                </ListBox.ItemTemplate>
+                            </ListBox>
+                        </StackPanel>
+                    </Border>
+                    <StackPanel x:Name="BottomSidePanel" Grid.Column="2">
+                        <Border Background="{StaticResource CardBrush}" BorderBrush="{StaticResource LineBrush}" BorderThickness="1" CornerRadius="14" Padding="18" Margin="0,0,0,16">
+                            <StackPanel>
+                                <TextBlock Text="维护工具" FontSize="15" FontWeight="SemiBold"/>
+                                <TextBlock Text="设备指纹体检 · Claude Code CLI 体检" FontSize="11" Foreground="#FFC4D0E1" TextWrapping="Wrap" Margin="0,12,0,0"/>
+                                <TextBlock Text="隔离浏览器 · 出口地区适配 · 加密快照迁移" FontSize="11" Foreground="#FFC4D0E1" TextWrapping="Wrap" Margin="0,7,0,0"/>
+                                <TextBlock Text="从左侧「维护工具」进入" FontSize="10" Foreground="{StaticResource MutedBrush}" Margin="0,12,0,0"/>
+                            </StackPanel>
+                        </Border>
+                        <Border Background="{StaticResource CardBrush}" BorderBrush="{StaticResource LineBrush}" BorderThickness="1" CornerRadius="14" Padding="18">
+                            <StackPanel>
+                                <TextBlock Text="最近状态" FontSize="15" FontWeight="SemiBold"/>
+                                <TextBlock x:Name="Banner" Text="" FontSize="11" Foreground="#FF93C5FD" TextWrapping="Wrap" Margin="0,10,0,0"/>
+                                <Border x:Name="UpdateBar" Visibility="Collapsed" CornerRadius="8" Background="#FF172F51" BorderBrush="#FF27507F" BorderThickness="1" Padding="10" Margin="0,10,0,0">
+                                    <StackPanel>
+                                        <TextBlock x:Name="UpdateText" Text="" FontSize="11" Foreground="#FFE0E7FF" TextWrapping="Wrap"/>
+                                        <StackPanel Orientation="Horizontal" Margin="0,9,0,0">
+                                            <Button x:Name="BtnUpdate" Content="一键更新" Padding="10,5" Margin="0,0,6,0" FontSize="11" Style="{StaticResource AccentButton}"/>
+                                            <Button x:Name="BtnLater" Content="稍后" Padding="10,5" FontSize="11"/>
+                                        </StackPanel>
+                                    </StackPanel>
+                                </Border>
+                            </StackPanel>
+                        </Border>
+                    </StackPanel>
+                </Grid>
+                <Grid Margin="0,18,0,0">
+                    <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                        <Button x:Name="BtnDiagnostics" Content="导出诊断" Padding="10,6" FontSize="11" ToolTip="只导出脱敏日志和状态"/>
+                        <TextBlock Text="仅导出脱敏日志和状态" FontSize="10" Foreground="#FF64748B" VerticalAlignment="Center" Margin="10,0,0,0"/>
+                    </StackPanel>
+                    <Button x:Name="BtnCheckUpdate" Grid.Column="1" Content="检查更新" Padding="10,6" FontSize="11"/>
+                </Grid>
             </StackPanel>
         </ScrollViewer>
-        <Grid Grid.Row="2" Margin="0,16,0,0">
-            <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-            <StackPanel Orientation="Horizontal">
-                <Button x:Name="BtnDiagnostics" Content="导出诊断" Padding="10,6" FontSize="11" ToolTip="只导出脱敏日志和状态"/>
-                <TextBlock Text="硬性项必须通过" FontSize="10" Foreground="#99FFFFFF" VerticalAlignment="Center" Margin="10,0,0,0"/>
-            </StackPanel>
-            <Button x:Name="BtnCheckUpdate" Grid.Column="2" Content="检查更新" Padding="10,6" FontSize="11"/>
-        </Grid>
     </Grid>
 </Window>
 "@
@@ -160,6 +318,20 @@ $script:activeToolOutput = $null
 function Set-Status($text, $color) {
     $win.FindName('StatusText').Text = $text
     $win.FindName('StatusText').Foreground = New-Object System.Windows.Media.SolidColorBrush $color
+    if ($color.G -gt $color.R -and $color.G -ge $color.B) {
+        $icon = '✓'; $foreground = '#FF34D399'; $background = '#FF103A37'; $pill = '#3322C55E'
+    } elseif ($color.R -gt 0xC8 -and $color.G -ge 0x64 -and $color.G -lt 0xC8 -and $color.B -lt 0x64) {
+        $icon = '…'; $foreground = '#FFFBBE24'; $background = '#33F59E0B'; $pill = '#33F59E0B'
+    } elseif ($color.R -gt $color.G -and $color.R -gt $color.B) {
+        $icon = '!'; $foreground = '#FFF87171'; $background = '#33F87171'; $pill = '#33F87171'
+    } else {
+        $icon = '…'; $foreground = '#FF60A5FA'; $background = '#3360A5FA'; $pill = '#3360A5FA'
+    }
+    $win.FindName('StatusIcon').Text = $icon
+    $win.FindName('StatusIcon').Foreground = New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.ColorConverter]::ConvertFromString($foreground))
+    $win.FindName('StatusIconBorder').Background = New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.ColorConverter]::ConvertFromString($background))
+    $win.FindName('StatusPill').Background = New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.ColorConverter]::ConvertFromString($pill))
+    $win.FindName('GuardStatusDot').Fill = New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.ColorConverter]::ConvertFromString($foreground))
 }
 function Set-Banner([string]$text, [string]$kind = 'info') {
     $colors = @{ info = '#FF93C5FD'; success = '#FF4ADE80'; warn = '#FFFBBE24'; error = '#FFF87171' }
@@ -289,7 +461,7 @@ function Apply-StatusOutput([string]$Text) {
             elseif ($fields["acc$slot"] -match '^([^@]+)@(\d{4})-(\d{2})-(\d{2})$') { "已建档 · $($Matches[1]) · $($Matches[3])-$($Matches[4])" }
             else { '已建档' }
         $win.FindName("Account${slot}Subtitle").Text = $subtitle
-        $win.FindName("Btn$slot").Background = if ($current -eq $slot) { '#B96366F1' } else { '#1AFFFFFF' }
+        $win.FindName("Btn$slot").Background = if ($current -eq $slot) { '#FF2563EB' } else { '#FF131E31' }
     }
     return $true
 }
@@ -595,6 +767,65 @@ $win.FindName('BtnUpdate').Add_Click({
         } elseif ($kv['STATUS'] -eq 'latest') { $win.FindName('BtnUpdate').IsEnabled = $true; $win.FindName('BtnLater').IsEnabled = $true; $win.FindName('BtnCheckUpdate').IsEnabled = $true; Show-UpdateNote '已是最新版本' $false; Write-UpdateCache 'latest' ([string]$kv['LATEST']) }
         else { Set-UpdateText ("更新失败：" + $(if ($kv['MESSAGE']) { $kv['MESSAGE'] } else { '更新失败，请稍后重试' })) '#FFF87171'; $win.FindName('BtnUpdate').IsEnabled = $true; $win.FindName('BtnLater').IsEnabled = $true; $win.FindName('BtnCheckUpdate').IsEnabled = $true }
     }); $script:updateTimer.Start()
+})
+$win.Add_SizeChanged({
+    $compact = $win.ActualWidth -lt 960
+    $tiny = $win.ActualWidth -lt 720
+    $sidebarWidth = if ($tiny) { 0 } elseif ($compact) { 78 } else { 224 }
+    $win.FindName('MainLayout').ColumnDefinitions[0].Width = [Windows.GridLength]::new($sidebarWidth)
+    $win.FindName('Sidebar').Visibility = $(if ($tiny) { 'Collapsed' } else { 'Visible' })
+    foreach ($name in @('BrandDescription','GuardCard')) {
+        $win.FindName($name).Visibility = $(if ($compact) { 'Collapsed' } else { 'Visible' })
+    }
+    foreach ($pair in @(@('ActiveNavLabel','ActiveNavCompactLabel'), @('NavToolsLabel','NavToolsCompactLabel'), @('NavSettingsLabel','NavSettingsCompactLabel'))) {
+        $win.FindName($pair[0]).Visibility = $(if ($compact) { 'Collapsed' } else { 'Visible' })
+        $win.FindName($pair[1]).Visibility = $(if ($compact) { 'Visible' } else { 'Collapsed' })
+    }
+    $header = $win.FindName('HeaderGrid')
+    $headerColumns = if ($tiny) { 1 } else { 2 }
+    if ($header.ColumnDefinitions.Count -ne $headerColumns) {
+        $header.ColumnDefinitions.Clear(); $header.RowDefinitions.Clear()
+        $widths = if ($tiny) { @('*') } else { @('*','Auto') }
+        foreach ($width in $widths) {
+            $definition = New-Object System.Windows.Controls.ColumnDefinition
+            $definition.Width = (New-Object System.Windows.GridLengthConverter).ConvertFromString($width)
+            [void]$header.ColumnDefinitions.Add($definition)
+        }
+        for ($i = 0; $i -lt $headerColumns; $i++) { [void]$header.RowDefinitions.Add((New-Object System.Windows.Controls.RowDefinition)) }
+    }
+    $actions = $win.FindName('HeaderActions')
+    [Windows.Controls.Grid]::SetColumn($actions, $(if ($tiny) { 0 } else { 1 }))
+    [Windows.Controls.Grid]::SetRow($actions, $(if ($tiny) { 1 } else { 0 }))
+    $actions.Margin = [Windows.Thickness]::new(0, $(if ($tiny) { 16 } else { 0 }), 0, 0)
+    foreach ($pair in @(@('HeroGrid','ProxyCard'), @('BottomGrid','BottomSidePanel'))) {
+        $grid = $win.FindName($pair[0]); $second = $win.FindName($pair[1])
+        $desired = if ($compact) { 1 } else { 3 }
+        if ($grid.ColumnDefinitions.Count -ne $desired) {
+            $grid.ColumnDefinitions.Clear(); $grid.RowDefinitions.Clear()
+            $widths = if ($compact) { @('*') } else { @('3*','16','2*') }
+            foreach ($width in $widths) {
+                $definition = New-Object System.Windows.Controls.ColumnDefinition
+                $definition.Width = (New-Object System.Windows.GridLengthConverter).ConvertFromString($width)
+                [void]$grid.ColumnDefinitions.Add($definition)
+            }
+            if ($compact) { for ($i = 0; $i -lt 2; $i++) { [void]$grid.RowDefinitions.Add((New-Object System.Windows.Controls.RowDefinition)) } }
+        }
+        [Windows.Controls.Grid]::SetColumn($second, $(if ($compact) { 0 } else { 2 }))
+        [Windows.Controls.Grid]::SetRow($second, $(if ($compact) { 1 } else { 0 }))
+        $second.Margin = [Windows.Thickness]::new(0, $(if ($compact) { 16 } else { 0 }), 0, 0)
+    }
+    $accountGrid = $win.FindName('AccountGrid')
+    $columns = if ($compact) { 2 } else { 4 }
+    if ($accountGrid.ColumnDefinitions.Count -eq $columns) { return }
+    $accountGrid.ColumnDefinitions.Clear()
+    $accountGrid.RowDefinitions.Clear()
+    for ($i = 0; $i -lt $columns; $i++) { [void]$accountGrid.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition)) }
+    for ($i = 0; $i -lt [Math]::Ceiling(4 / $columns); $i++) { [void]$accountGrid.RowDefinitions.Add((New-Object System.Windows.Controls.RowDefinition)) }
+    foreach ($slot in @('A','B','C','D')) {
+        $index = [Array]::IndexOf(@('A','B','C','D'), $slot)
+        [Windows.Controls.Grid]::SetColumn($win.FindName("Btn$slot"), ($index % $columns))
+        [Windows.Controls.Grid]::SetRow($win.FindName("Btn$slot"), [Math]::Floor($index / $columns))
+    }
 })
 $win.Add_ContentRendered({ Start-UpdateCheck $false; Refresh-Checks })
 $win.Add_Closing({ if ($script:isBusy -or $script:updateRunning) { $_.Cancel = $true; Set-Banner '正在执行写入或切换操作，请等待完成后再关闭' 'warn' } })
