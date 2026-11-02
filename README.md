@@ -8,7 +8,7 @@
 
 > 🛠️ **本项目持续活跃更新中**——防护项随目标平台风控演进不断增加，见下方[路线图](#路线图)。
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![License: AGPL-3.0-only](https://img.shields.io/badge/License-AGPL--3.0--only-blue.svg)](LICENSE)
 [![Release](https://img.shields.io/github/v/release/YOURSJEYO/claude-switcher?label=release&color=blue)](https://github.com/YOURSJEYO/claude-switcher/releases/latest)
 [![Platform](https://img.shields.io/badge/Platform-macOS-blue.svg)]()
 [![Windows](https://img.shields.io/badge/Windows-Beta-lightgrey.svg)](windows/)
@@ -499,4 +499,6 @@ Bug 反馈和功能建议仍建议提交 Issue，便于跟踪与处理。
 
 ## License
 
-MIT © Claude Switcher Contributors
+AGPL-3.0-only © 2026 Claude Switcher Contributors
+
+> 自 2026 年 11 月 2 日起发布的新版本采用 AGPL-3.0-only。此前发布的 MIT 版本仍按 MIT 授权，已授予的权利不受影响。
