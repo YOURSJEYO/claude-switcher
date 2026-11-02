@@ -448,13 +448,13 @@ WEBRTC_POLICY=proxy ~/.local/bin/claude-switch.sh fix
 
 欢迎 Fork / PR。Issue 区接受场景补充——你遇到的每一个真实泄漏场景，都可能成为下一个检查项。
 
-## 微信交流群
+## 微信联系
 
-欢迎加入 **claude-switcher 交流群**，交流安装配置、使用心得和问题排查。使用微信扫描下方二维码即可入群：
+扫码添加维护者 **JEYO** 的个人微信，交流安装配置、使用心得和问题排查。添加好友时请备注 `claude-switcher`：
 
-![claude-switcher 微信交流群二维码](assets/wechat-group.png)
+![JEYO 微信二维码](assets/wechat-personal.jpg)
 
-> 当前二维码标注 **2026 年 11 月 2 日前有效**。若二维码过期或无法入群，请通过 [Issue](https://github.com/YOURSJEYO/claude-switcher/issues) 提醒维护者更新。
+> 若二维码失效，请通过 [Issue](https://github.com/YOURSJEYO/claude-switcher/issues) 提醒维护者更新。
 
 Bug 反馈和功能建议仍建议提交 Issue，便于跟踪与处理。
 
