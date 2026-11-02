@@ -406,14 +406,26 @@ def select_group(config, configured):
 
 
 def current_profile(home):
+    import subprocess
+
     path = home / "shared_preferences.json"
     try:
-        values = json.loads(path.read_text(encoding="utf-8"))
-        profile_id = values.get("flutter.currentProfileId")
+        if path.is_file():
+            values = json.loads(path.read_text(encoding="utf-8"))
+            profile_id = values.get("flutter.currentProfileId")
+        elif home.resolve() == (Path.home() / "Library/Application Support/com.follow.clash").resolve():
+            # macOS Flutter preferences use CFPreferences, not shared_preferences.json.
+            result = subprocess.run(
+                ["/usr/bin/defaults", "read", "com.follow.clash", "flutter.config"],
+                capture_output=True, text=True, timeout=5, check=True,
+            )
+            profile_id = json.loads(result.stdout).get("currentProfileId")
+        else:
+            fail("无法读取当前 Profile，已保留原配置")
         if type(profile_id) is not int or profile_id <= 0:
             fail("无法识别当前 Profile，已保留原配置")
         return profile_id
-    except (OSError, ValueError, TypeError):
+    except (OSError, ValueError, TypeError, AttributeError, subprocess.SubprocessError):
         fail("无法读取当前 Profile，已保留原配置")
 
 
@@ -426,7 +438,7 @@ def repair(home, configured):
         fail("缺少 FlClash 数据库或运行配置")
     profile_id = current_profile(home)
     config = config_path.read_text(encoding="utf-8")
-    if not re.search(r"enhanced-mode:\s*fake-ip\b|fake-ip:\s*true\b", config, re.I):
+    if not re.search(r"enhanced-mode:\s*[\"\']?fake-ip\b|fake-ip:\s*true\b", config, re.I):
         fail("请先在 FlClash 中启用 fake-IP，再执行修复")
     target = select_group(config, configured)
     backup = None
@@ -1592,7 +1604,7 @@ fix() {
     [ "$tz" != "/var/db/timezone/zoneinfo/$TZ_TARGET" ] && adminCmds="${adminCmds}/usr/sbin/systemsetup -settimezone $TZ_TARGET; "
     echo "$v6" | grep -qi 'off' || adminCmds="${adminCmds}networksetup -setv6off Wi-Fi; "
     if ! launchctl print system/local.claude-bodyguard >/dev/null 2>&1; then
-        adminCmds="${adminCmds}cp $HOME/.local/bin/local.claude-bodyguard.plist /Library/LaunchDaemons/ && chown root:wheel /Library/LaunchDaemons/local.claude-bodyguard.plist && launchctl bootstrap system /Library/LaunchDaemons/local.claude-bodyguard.plist; "
+        adminCmds="${adminCmds}cp -X $HOME/.local/bin/local.claude-bodyguard.plist /Library/LaunchDaemons/ || exit 1; /usr/bin/xattr -d com.apple.quarantine /Library/LaunchDaemons/local.claude-bodyguard.plist 2>/dev/null || true; chown root:wheel /Library/LaunchDaemons/local.claude-bodyguard.plist || exit 1; chmod 644 /Library/LaunchDaemons/local.claude-bodyguard.plist || exit 1; launchctl bootstrap system /Library/LaunchDaemons/local.claude-bodyguard.plist || exit 1; launchctl print system/local.claude-bodyguard >/dev/null 2>&1 || exit 1; "
     fi
     if [ -n "$adminCmds" ]; then
         adminCmds="${adminCmds}dscacheutil -flushcache; killall -HUP mDNSResponder"

@@ -101,8 +101,8 @@ restrictions.
 
 Local environment checks only inspect and configure this machine. They do not
 change server-side records and do not guarantee that an account will not be
-restricted. The software is provided as-is under the MIT license; you are
-responsible for how you use it.
+restricted. The software is provided as-is under the GNU Affero General Public
+License, version 3 only (AGPL-3.0-only); you are responsible for how you use it.
 
 ## Links
 
@@ -116,4 +116,6 @@ responsible for how you use it.
 
 ## License
 
-MIT © ClaudeSwitcher Contributors
+AGPL-3.0-only © 2026 Claude Switcher Contributors
+
+> New releases from November 2, 2026 are licensed under AGPL-3.0-only. Earlier releases remain available under the MIT license; rights already granted are unaffected.
