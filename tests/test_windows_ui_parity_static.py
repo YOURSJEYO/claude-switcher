@@ -30,6 +30,19 @@ def setter(style, property_name):
     )
 
 
+def implicit_style(root, target_type):
+    x_key = "{http://schemas.microsoft.com/winfx/2006/xaml}Key"
+    return next(
+        (
+            node for node in root.iter()
+            if local_name(node) == "Style"
+            and node.get("TargetType") == target_type
+            and node.get(x_key) is None
+        ),
+        None,
+    )
+
+
 def common_container(root, nodes):
     parents = {child: parent for parent in root.iter() for child in parent}
     candidate = parents[nodes[0]]
@@ -54,11 +67,14 @@ class WindowsUiParityStaticTests(unittest.TestCase):
     def setUpClass(cls):
         cls.ui = UI.read_text(encoding="utf-8-sig")
         cls.windows = {}
+        shared = re.search(r'\$comboBoxStyles = @"\n(.*?)\n"@', cls.ui, re.S)
+        combo_box_styles = shared.group(1) if shared else ""
         for variable in ("xaml", "toolsXaml", "inputXaml", "dialogXaml", "settingsXaml"):
             match = re.search(rf'\${variable} = @"\n(.*?)\n"@', cls.ui, re.S)
             if match is None:
                 raise AssertionError(f"missing {variable} XAML here-string")
-            cls.windows[variable] = ET.fromstring(match.group(1))
+            xaml = match.group(1).replace("$comboBoxStyles", combo_box_styles)
+            cls.windows[variable] = ET.fromstring(xaml)
         cls.xaml = re.search(r'\$xaml = @"\n(.*?)\n"@', cls.ui, re.S).group(1)
         cls.root = cls.windows["xaml"]
 
@@ -186,10 +202,68 @@ class WindowsUiParityStaticTests(unittest.TestCase):
         text = ET.tostring(template, encoding="unicode")
         self.assertIn("ControlTemplate", text)
         self.assertIn("#FF162238", text)
-        self.assertIn("#FFE6EDF7", text)
+        self.assertEqual(setter(combo, "Foreground").get("Value"), "#FFE6EDF7")
+        self.assertIn('TextElement.Foreground="{TemplateBinding Foreground}"', text)
         item = next(style for style in styles if style.get("TargetType") == "ComboBoxItem" and style.get(x_key) is None)
         self.assertEqual(setter(item, "Foreground").get("Value"), "#FFE6EDF7")
         self.assertEqual(setter(item, "Background").get("Value"), "#FF162238")
+
+    def test_combo_box_styles_cover_main_and_snapshot_windows(self):
+        for variable in ("xaml", "dialogXaml"):
+            with self.subTest(window=variable):
+                root = self.windows[variable]
+                combo = implicit_style(root, "ComboBox")
+                item = implicit_style(root, "ComboBoxItem")
+                self.assertIsNotNone(combo, "window-local resources must style ComboBox")
+                self.assertIsNotNone(item, "window-local resources must style ComboBoxItem")
+                self.assertEqual(setter(combo, "Background").get("Value"), "#FF162238")
+                self.assertEqual(setter(combo, "Foreground").get("Value"), "#FFE6EDF7")
+                self.assertEqual(setter(item, "Background").get("Value"), "#FF162238")
+                self.assertEqual(setter(item, "Foreground").get("Value"), "#FFE6EDF7")
+                self.assertIsNotNone(setter(combo, "Template"))
+                self.assertIsNotNone(setter(item, "Template"))
+
+    def test_combo_box_disabled_triggers_keep_input_bindings(self):
+        for variable in ("xaml", "dialogXaml"):
+            with self.subTest(window=variable):
+                root = self.windows[variable]
+                for target_type in ("ComboBox", "ComboBoxItem"):
+                    style = implicit_style(root, target_type)
+                    self.assertIsNotNone(style, f"{target_type} needs window-local styling")
+                    trigger = next(
+                        (
+                            node for node in style.iter()
+                            if local_name(node) == "Trigger"
+                            and node.get("Property") == "IsEnabled"
+                            and node.get("Value") == "False"
+                        ),
+                        None,
+                    )
+                    self.assertIsNotNone(trigger, f"{target_type} needs an explicit disabled trigger")
+                    values = {
+                        node.get("Property"): node.get("Value")
+                        for node in trigger
+                        if local_name(node) == "Setter"
+                    }
+                    self.assertEqual(values.get("Background"), "#FF101827")
+                    self.assertEqual(values.get("Foreground"), "#FF6B7280")
+
+                template = setter(implicit_style(root, "ComboBox"), "Template")
+                toggle = next(node for node in template.iter() if local_name(node) == "ToggleButton")
+                self.assertEqual(toggle.get("ClickMode"), "Press")
+                self.assertIn("IsDropDownOpen", toggle.get("IsChecked", ""))
+                self.assertIn("Mode=TwoWay", toggle.get("IsChecked", ""))
+                popup = next(node for node in template.iter() if local_name(node) == "Popup")
+                self.assertEqual(popup.get("IsOpen"), "{TemplateBinding IsDropDownOpen}")
+                selection = next(
+                    node for node in template.iter()
+                    if local_name(node) == "ContentPresenter"
+                    and node.get("Content") == "{TemplateBinding SelectionBoxItem}"
+                )
+                self.assertEqual(
+                    selection.get("TextElement.Foreground"),
+                    "{TemplateBinding Foreground}",
+                )
 
     def test_long_operations_are_serialized_and_audited(self):
         self.assertIn("Start-Job", self.ui)
