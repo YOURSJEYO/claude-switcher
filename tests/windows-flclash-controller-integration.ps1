@@ -5,10 +5,10 @@ $root = Split-Path -Parent $PSScriptRoot
 $core = Join-Path $root 'windows\claude-switch.ps1'
 $ui = Join-Path $root 'windows\SwitcherUI.ps1'
 
-function Import-Function([Management.Automation.Language.Ast]$Ast, [string]$Name) {
+function Get-FunctionDefinition([Management.Automation.Language.Ast]$Ast, [string]$Name) {
     $fn = $Ast.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $Name }, $true)
     if (-not $fn) { throw "找不到生产函数 $Name" }
-    Set-Item -Path "function:script:$Name" -Value ([scriptblock]::Create($fn.Body.Extent.Text))
+    return $fn
 }
 function Assert-Equal($Actual, $Expected, [string]$Name) {
     if ($Actual -ne $Expected) { throw "$Name : expected=[$Expected] actual=[$Actual]" }
@@ -19,7 +19,8 @@ $parseErrors = $null
 $coreAst = [Management.Automation.Language.Parser]::ParseFile($core, [ref]$null, [ref]$parseErrors)
 if ($parseErrors.Count) { throw $parseErrors[0].Message }
 foreach ($name in @('ConvertTo-LoopbackClashEndpoint','Get-FlClashApi','Get-ClashApi','Get-ClashMode')) {
-    Import-Function $coreAst $name
+    $fn = Get-FunctionDefinition $coreAst $name
+    . ([scriptblock]::Create($fn.Extent.Text))
 }
 $selector = $coreAst.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Test-FlClashClientSelected' }, $true)
 if ($selector) { . ([scriptblock]::Create($selector.Extent.Text)) }
@@ -73,7 +74,10 @@ Assert-Equal (Get-ClashMode) 'rule' 'auto 的 YAML 回退不得让旧 Verge 配�
 $uiParseErrors = $null
 $uiAst = [Management.Automation.Language.Parser]::ParseFile($ui, [ref]$null, [ref]$uiParseErrors)
 if ($uiParseErrors.Count) { throw $uiParseErrors[0].Message }
-foreach ($name in @('Set-Busy','Apply-FlClashPort')) { Import-Function $uiAst $name }
+foreach ($name in @('Set-Busy','Apply-FlClashPort')) {
+    $fn = Get-FunctionDefinition $uiAst $name
+    . ([scriptblock]::Create($fn.Extent.Text))
+}
 $lostFocus = $uiAst.Find({ param($node)
     $node -is [Management.Automation.Language.InvokeMemberExpressionAst] -and
     $node.Member -is [Management.Automation.Language.StringConstantExpressionAst] -and
