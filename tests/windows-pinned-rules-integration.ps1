@@ -32,6 +32,8 @@ $legacyPorts = @($CLAUDE_PORTS | ForEach-Object {
     [pscustomobject]@{ type = 'AND'; payload = "((Network,udp) && (DstPort,$_))" }
 })
 if (-not (Test-PinnedRules @($domains + $legacyPorts))) {
-    throw 'AND/DST-PORT 形式未被识别'
+    $sample = $legacyPorts[0].payload
+    $matchesPattern = $sample -match ('DST-PORT,(' + ($CLAUDE_PORTS -join '|') + ')(?:[,)]|$)')
+    throw "AND/DST-PORT 形式未被识别: sample=$sample regex=$matchesPattern"
 }
 'PASS AND/DST-PORT 兼容'
