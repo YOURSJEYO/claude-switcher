@@ -84,7 +84,7 @@ $lostFocus = $uiAst.Find({ param($node)
     $node.Member.Value -eq 'Add_LostFocus'
 }, $true)
 if (-not $lostFocus) { throw '找不到 FlClashPort LostFocus 生产处理器' }
-$onLostFocus = [scriptblock]::Create($lostFocus.Arguments[0].Extent.Text)
+$onLostFocus = $lostFocus.Arguments[0].ScriptBlock.GetScriptBlock()
 
 $script:box = [pscustomobject]@{ Text = ''; IsEnabled = $true }
 $win = [pscustomobject]@{}
