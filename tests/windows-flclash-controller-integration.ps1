@@ -8,7 +8,7 @@ $ui = Join-Path $root 'windows\SwitcherUI.ps1'
 function Import-Function([Management.Automation.Language.Ast]$Ast, [string]$Name) {
     $fn = $Ast.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $Name }, $true)
     if (-not $fn) { throw "找不到生产函数 $Name" }
-    . ([scriptblock]::Create($fn.Extent.Text))
+    Set-Item -Path "function:script:$Name" -Value ([scriptblock]::Create($fn.Body.Extent.Text))
 }
 function Assert-Equal($Actual, $Expected, [string]$Name) {
     if ($Actual -ne $Expected) { throw "$Name : expected=[$Expected] actual=[$Actual]" }
