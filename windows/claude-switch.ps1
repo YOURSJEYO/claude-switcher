@@ -704,15 +704,22 @@ function Get-FlClashListenCandidates {
     return $candidates
 }
 
+function Test-FlClashClientSelected {
+    if ($PROXY_MODE -eq 'flclash') { return $true }
+    if ($PROXY_MODE -ne 'auto') { return $false }
+    return [bool](Get-Process -Name 'FlClashCore','FlClash' -ErrorAction SilentlyContinue)
+}
+
 # FlClash 默认外部控制器是 127.0.0.1:9090。优先用户填写，其次它自己的 config.yaml，最后才探测默认端口和该进程的本机监听口。
 function Get-FlClashApi {
-    $override = Get-FlClashControllerOverride
-    if ($override) {
-        $chosen = ConvertTo-LoopbackClashEndpoint $override '' 'flclash-override'
-        if ($chosen) { return $chosen }
-    }
     $yaml = Get-FlClashConfigPath
     $secret = ''
+    if ($yaml) { $secret = Get-YamlScalar $yaml 'secret' }
+    $override = Get-FlClashControllerOverride
+    if ($override) {
+        $chosen = ConvertTo-LoopbackClashEndpoint $override $secret 'flclash-override'
+        if ($chosen) { return $chosen }
+    }
     if ($yaml) {
         $addr = Get-YamlScalar $yaml 'external-controller'
         $secret = Get-YamlScalar $yaml 'secret'
@@ -763,10 +770,7 @@ function Set-FlClashControllerSetting([string]$Value) {
 
 # 解析 Clash 控制接口;Windows 版不使用 unix socket
 function Get-ClashApi {
-    if ($PROXY_MODE -eq 'flclash') {
-        $flclash = Get-FlClashApi
-        if ($flclash) { return $flclash }
-    }
+    if (Test-FlClashClientSelected) { return Get-FlClashApi }
     foreach ($name in @('clash-verge.yaml', 'config.yaml', 'verge.yaml')) {
         $yaml = Join-Path $CLASH_DIR $name
         if (-not (Test-Path -LiteralPath $yaml)) { continue }
@@ -843,13 +847,15 @@ function Get-ClashMode {
             $m = ([string]$probe.data.mode).Trim().ToLowerInvariant()
             if ($m -eq 'global' -or $m -eq 'rule' -or $m -eq 'direct') { return $m }
         }
-        foreach ($name in @('clash-verge.yaml', 'config.yaml', 'verge.yaml')) {
-            $p = Join-Path $CLASH_DIR $name
-            if (-not (Test-Path -LiteralPath $p)) { continue }
-            foreach ($line in Get-Content -LiteralPath $p -Encoding UTF8 -ErrorAction SilentlyContinue) {
-                if ($line -match '(?m)^mode:\s*[''"]?(\w+)') {
-                    $m = $Matches[1].ToLowerInvariant()
-                    if ($m -eq 'global' -or $m -eq 'rule' -or $m -eq 'direct') { return $m }
+        if (-not (Test-FlClashClientSelected)) {
+            foreach ($name in @('clash-verge.yaml', 'config.yaml', 'verge.yaml')) {
+                $p = Join-Path $CLASH_DIR $name
+                if (-not (Test-Path -LiteralPath $p)) { continue }
+                foreach ($line in Get-Content -LiteralPath $p -Encoding UTF8 -ErrorAction SilentlyContinue) {
+                    if ($line -match '(?m)^mode:\s*[''"]?(\w+)') {
+                        $m = $Matches[1].ToLowerInvariant()
+                        if ($m -eq 'global' -or $m -eq 'rule' -or $m -eq 'direct') { return $m }
+                    }
                 }
             }
         }

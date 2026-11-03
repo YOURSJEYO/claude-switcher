@@ -347,6 +347,7 @@ function Set-Busy([bool]$busy) {
     foreach ($name in @('BtnFix','BtnRefresh','BtnTools','BtnSettings','BtnDiagnostics')) { $win.FindName($name).IsEnabled = -not $busy }
     foreach ($name in @('BtnA','BtnB','BtnC','BtnD')) { $win.FindName($name).IsEnabled = (-not $busy -and $script:environmentReady) }
     $win.FindName('ProxyClient').IsEnabled = (-not $busy -and [bool]$script:currentClient)
+    $win.FindName('FlClashPort').IsEnabled = -not $busy
     $win.FindName('BtnCheckUpdate').IsEnabled = (-not $busy -and -not $script:updateRunning)
 }
 function Invoke-Core([string[]]$coreArgs) {
@@ -445,6 +446,7 @@ function Apply-FlClashPort([string]$Text) {
     $value = ''
     foreach ($line in ($Text -split "`r?`n")) { if ($line -match '^port=(.*)$') { $value = $Matches[1] } }
     if ($value -eq 'auto') { $value = '' }
+    $script:savedFlClashPort = if ($value) { $value } else { 'auto' }
     $box = $win.FindName('FlClashPort')
     if (-not $box) { return }
     $script:suppressPortEvent = $true
@@ -764,7 +766,7 @@ $win.FindName('BtnRefresh').Add_Click({ Refresh-Checks })
 $win.FindName('BtnFix').Add_Click({ if (-not $script:isBusy) { Set-Status '修复中' ([System.Windows.Media.Color]::FromRgb(0xFB,0x92,0x3C)); Set-Banner '正在修复…（可能弹出管理员授权框）' 'info'; Start-CommandOperation 'fix' @('fix') } })
 foreach ($slot in @('A','B','C','D')) { $win.FindName("Btn$slot").Add_Click({ Switch-To $slot }.GetNewClosure()) }
 $win.FindName('ProxyClient').Add_SelectionChanged({ if ($script:suppressClientEvent -or $script:isBusy) { return }; $selected = $win.FindName('ProxyClient').SelectedItem; if (-not $selected) { return }; $mode = [string]$selected.Tag; if ($clientModes -contains $mode -and $mode -ne $script:currentClient) { Set-Banner "正在切换代理客户端为 $mode…" 'info'; Start-CommandOperation 'set-client' @('set-client',$mode) } })
-$win.FindName('FlClashPort').Add_LostFocus({ if ($script:suppressPortEvent -or $script:isBusy -or -not $script:portLoaded) { return }; $raw = ([string]$win.FindName('FlClashPort').Text).Trim(); if (-not $raw) { $raw = 'auto' }; Start-CommandOperation 'set-flclash-controller' @('set-flclash-controller',$raw) })
+$win.FindName('FlClashPort').Add_LostFocus({ if ($script:suppressPortEvent -or $script:isBusy -or -not $script:portLoaded) { return }; $raw = ([string]$win.FindName('FlClashPort').Text).Trim(); if (-not $raw) { $raw = 'auto' }; if ($raw -eq $script:savedFlClashPort) { return }; Start-CommandOperation 'set-flclash-controller' @('set-flclash-controller',$raw) })
 $win.FindName('BtnTools').Add_Click({ Show-ToolsWindow }); $win.FindName('BtnSettings').Add_Click({ Show-CheckSettings }); $win.FindName('BtnDiagnostics').Add_Click({ Export-DiagnosticLog })
 $win.FindName('BtnCheckUpdate').Add_Click({ if ($script:updateRunning -or $script:isBusy) { return }; Remove-Item -LiteralPath (Join-Path $BASE 'update-check.json') -Force -ErrorAction SilentlyContinue; Start-UpdateCheck $true })
 $win.FindName('BtnLater').Add_Click({ if ($script:checkJob) { Stop-Job $script:checkJob -ErrorAction SilentlyContinue; Remove-Job $script:checkJob -Force -ErrorAction SilentlyContinue; $script:checkJob = $null }; if ($script:checkTimer) { $script:checkTimer.Stop() }; $win.FindName('UpdateBar').Visibility = 'Collapsed'; Write-UpdateCache 'dismissed' $(if ($script:latestVersion) { [string]$script:latestVersion } else { '' }) })
