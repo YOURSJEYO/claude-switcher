@@ -51,6 +51,8 @@ function Get-Process {
 
 $script:override = '127.0.0.1:19090'
 $script:yamlValues[$script:flclashConfig + '|secret'] = 'isolated-secret'
+Assert-Equal (Get-FlClashConfigPath) $script:flclashConfig '隔离 config 路径桩'
+Assert-Equal (Get-YamlScalar $script:flclashConfig 'secret') 'isolated-secret' '隔离 secret 桩'
 $api = Get-FlClashApi
 Assert-Equal $api.headers.Authorization 'Bearer isolated-secret' 'override 保留 FlClash config secret'
 Assert-Equal $api.base 'http://127.0.0.1:19090' 'override 端口仍优先于 config'
