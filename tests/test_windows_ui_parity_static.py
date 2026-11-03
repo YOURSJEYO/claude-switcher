@@ -177,6 +177,20 @@ class WindowsUiParityStaticTests(unittest.TestCase):
         account_style = find_named(self.root, "BtnA").get("Style", "")
         self.assertIn("StaticResource", account_style)
 
+    def test_combo_box_template_uses_dark_surface(self):
+        styles = [node for node in self.root.iter() if local_name(node) == "Style"]
+        x_key = "{http://schemas.microsoft.com/winfx/2006/xaml}Key"
+        combo = next(style for style in styles if style.get("TargetType") == "ComboBox" and style.get(x_key) is None)
+        template = setter(combo, "Template")
+        self.assertIsNotNone(template)
+        text = ET.tostring(template, encoding="unicode")
+        self.assertIn("ControlTemplate", text)
+        self.assertIn("#FF162238", text)
+        self.assertIn("#FFE6EDF7", text)
+        item = next(style for style in styles if style.get("TargetType") == "ComboBoxItem" and style.get(x_key) is None)
+        self.assertEqual(setter(item, "Foreground").get("Value"), "#FFE6EDF7")
+        self.assertEqual(setter(item, "Background").get("Value"), "#FF162238")
+
     def test_long_operations_are_serialized_and_audited(self):
         self.assertIn("Start-Job", self.ui)
         self.assertIn("DispatcherTimer", self.ui)
