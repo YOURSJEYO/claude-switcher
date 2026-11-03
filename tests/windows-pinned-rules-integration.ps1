@@ -29,7 +29,7 @@ if (-not (Test-PinnedRules @($domains + $directPorts))) {
 }
 'PASS 直接 DstPort 兼容'
 $legacyPorts = @($CLAUDE_PORTS | ForEach-Object {
-    [pscustomobject]@{ type = 'AND'; payload = "((Network,udp) && (DstPort,$_))" }
+    [pscustomobject]@{ type = 'AND'; payload = "((Network,udp) && (DST-PORT,$_))" }
 })
 if (-not (Test-PinnedRules @($domains + $legacyPorts))) {
     $sample = $legacyPorts[0].payload
