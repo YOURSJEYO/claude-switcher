@@ -30,8 +30,26 @@ class WindowsFlClashControllerTests(unittest.TestCase):
         self.assertIn("flclash-controller.txt", self.text)
         api = self.text[self.text.index("function Get-ClashApi"): self.text.index("function Get-ClashApiError")]
         self.assertLess(api.index("Get-FlClashApi"), api.index("@('clash-verge.yaml', 'config.yaml', 'verge.yaml')"))
-        self.assertIn("$PROXY_MODE -eq 'flclash'", api)
+        self.assertIn("Test-FlClashClientSelected", api)
         self.assertIn("IsNullOrWhiteSpace($addr)", api)
+
+    def test_override_reuses_flclash_config_secret(self):
+        self.assertIn(
+            "ConvertTo-LoopbackClashEndpoint $override $secret 'flclash-override'",
+            self.text,
+        )
+
+    def test_flclash_never_falls_back_to_verge(self):
+        self.assertIn("function Test-FlClashClientSelected", self.text)
+        api = self.text[self.text.index("function Get-ClashApi"): self.text.index("function Get-ClashApiError")]
+        self.assertIn("if (Test-FlClashClientSelected) { return Get-FlClashApi }", api)
+        mode = self.text[self.text.index("function Get-ClashMode"): self.text.index("function Get-ClashRules")]
+        self.assertLess(mode.index("Test-FlClashClientSelected"), mode.index("@('clash-verge.yaml'"))
+
+    def test_port_lostfocus_only_saves_changes_and_disables_editor(self):
+        self.assertIn("$script:savedFlClashPort", self.ui)
+        self.assertIn("$raw -eq $script:savedFlClashPort", self.ui)
+        self.assertIn("$win.FindName('FlClashPort').IsEnabled = -not $busy", self.ui)
 
     def test_no_unrelated_port_sweep(self):
         self.assertNotIn("1..65535", self.text)

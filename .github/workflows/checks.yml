@@ -67,20 +67,24 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Client language and ASN checks (Windows PowerShell 5.1)
+      - name: FlClash controller, client language and ASN checks (Windows PowerShell 5.1)
         shell: powershell
         run: |
           powershell -NoProfile -ExecutionPolicy Bypass -File tests\windows-client-language-integration.ps1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           powershell -NoProfile -ExecutionPolicy Bypass -File tests\windows-asn-integration.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          powershell -NoProfile -ExecutionPolicy Bypass -File tests\windows-flclash-controller-integration.ps1
           exit $LASTEXITCODE
 
-      - name: Client language and ASN checks (pwsh 7)
+      - name: FlClash controller, client language and ASN checks (pwsh 7)
         shell: pwsh
         run: |
           pwsh -NoProfile -File tests\windows-client-language-integration.ps1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           pwsh -NoProfile -File tests\windows-asn-integration.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pwsh -NoProfile -File tests\windows-flclash-controller-integration.ps1
           exit $LASTEXITCODE
 
       # windows/ 下的两个隔离集成回归此前只写在 AGENTS.md 里，CI 从不执行，
