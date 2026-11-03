@@ -51,7 +51,7 @@ Windows 版启动时会静默检查 GitHub 最新 Release，有新版本时在�
 | 客户端 | `$PROXY_MODE` | 存活判定 | 说明 |
 |---|---|---|---|
 | Clash Verge | `clash-verge` | `verge-mihomo` 进程 + TUN | 按 Clash 模式自动配置规则（全局/直连跳过） |
-| FlClash | `flclash` | `FlClashCore` / `FlClash` 进程 + TUN | 置顶规则需自行配置 |
+| FlClash | `flclash` | `FlClashCore` / `FlClash` 进程 + TUN | 内核审查读取 `%APPDATA%\com.follow\clash\config.yaml` 的 `external-controller`；没有该地址时再探测 `127.0.0.1:9090` 和该进程自己的本机监听口。主窗口可填写本机端口，保存在 `flclash-controller.txt`。置顶规则仍需自行配置 |
 | sing-box | `sing-box` | `sing-box` 进程 + TUN | 置顶规则需自行配置 |
 | ClashX | `clashx` | `ClashX` 进程 + TUN | 置顶规则需自行配置 |
 | Surge | `surge` | `Surge` 进程 + TUN | 置顶规则需自行配置 |
@@ -62,6 +62,8 @@ Windows 版启动时会静默检查 GitHub 最新 Release，有新版本时在�
 TUN 判定顺序：先看是否存在 `198.18.x.x` 假 IP（Clash 系 fake-ip）；没有则回退到任意处于 `Up` 状态、描述匹配 `TAP/TUN/WireGuard/Wintun/VPN/Tailscale` 的虚拟网卡。198.18 命中时保持原来的 `TUN网卡=ok`；回退命中时显示 `TUN网卡=ok:通用虚拟网卡`。
 
 可在主窗口「代理客户端」下拉框切换，或运行 `claude-switch.ps1 set-client <模式>` / `get-client`。该操作会同时更新核心脚本和 `proxy-mode.txt`，保镖下一轮巡检即使用新模式；切换后自动重新执行完整审计。
+
+FlClash 的控制端口可以留空自动发现，也可以运行 `get-flclash-controller` / `set-flclash-controller 9090`（或 `127.0.0.1:9090`）。只接受本机地址；`auto` 或空值恢复自动发现。这只用于读取内核的 `/configs` 和 `/rules`，不会改写 FlClash 的配置。
 
 ## Clash 规则与全局模式
 
