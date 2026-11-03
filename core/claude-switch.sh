@@ -1315,6 +1315,16 @@ webrtc_status() {
     probe_rc=$?
     if [ "$PROXY_MODE" = "clash-verge" ]; then
         assessment=$(clash_rules assess "$1" "$result" "$probe_rc" 2>/dev/null)
+    elif [ "$PROXY_MODE" = "flclash" ]; then
+        # FlClash 规则由本工具写入，因此允许用户显式选择 reject；默认仍按 proxy 评估。
+        local flclash_policy="${WEBRTC_POLICY:-}"
+        if [ -z "$flclash_policy" ] && [ -r "$BASE/webrtc-policy" ]; then
+            flclash_policy=$(cat "$BASE/webrtc-policy" 2>/dev/null)
+        fi
+        case "$flclash_policy" in
+            reject) assessment=$(WEBRTC_POLICY=reject clash_rules assess "$1" "$result" "$probe_rc" 2>/dev/null) ;;
+            *) assessment=$(WEBRTC_POLICY=proxy clash_rules assess "$1" "$result" "$probe_rc" 2>/dev/null) ;;
+        esac
     else
         # 其他客户端的规则由用户管理，不能把 reject 的无响应视为已验证。
         assessment=$(WEBRTC_POLICY=proxy clash_rules assess "$1" "$result" "$probe_rc" 2>/dev/null)

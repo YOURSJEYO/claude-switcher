@@ -424,6 +424,7 @@ open() { echo repair-called >&2; exit 99; }
         code = r'''
 set -u
 PROXY_MODE="$PROXY_MODE"
+BASE="$PWD/claude-switcher-test"
 clash_rules() {
     case "$1" in
         verify) if [ "$VERIFY_RC" = 0 ]; then echo OK; else echo 'FAIL:runtime not verified' >&2; return 1; fi ;;

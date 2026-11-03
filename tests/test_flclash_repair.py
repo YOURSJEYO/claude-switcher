@@ -131,7 +131,7 @@ class FlClashRepairTests(unittest.TestCase):
         self.assertIn("if ! rollback_result=$(flclash_repair rollback", core)
         self.assertIn("回滚失败，请手动恢复备份", core)
 
-    def run_full_fix(self, stun="ok"): 
+    def run_full_fix(self, stun="ok", extra_env=None):
         home_dir = self.home.parents[2]
         core = home_dir / ".local/bin/claude-switch.sh"
         core.parent.mkdir(parents=True)
@@ -153,7 +153,7 @@ class FlClashRepairTests(unittest.TestCase):
             "launchctl": "#!/bin/sh\nexit 0\n",
             "defaults": "#!/bin/sh\ncase \"$*\" in *AppleLocale*) echo en_US ;; *) echo '(en-US)' ;; esac\n",
             "curl": "#!/bin/sh\ncase \"$*\" in *cdn-cgi/trace*) printf 'ip=203.0.113.1\\nloc=US\\n' ;; *ipinfo.io*) echo '{\"org\":\"Comcast\"}' ;; *api.anthropic.com*) echo 401 ;; *) echo 200 ;; esac\n",
-            "python3": "#!/bin/sh\ncase \"$1\" in *stun-probe.py) if [ \"$FLCLASH_TEST_STUN\" = leak ]; then echo 'RESULT:198.51.100.1'; else echo 'RESULT:203.0.113.1'; fi ;; *) exec " + repr(sys.executable) + " \"$@\" ;; esac\n",
+            "python3": "#!/bin/sh\ncase \"$1\" in *stun-probe.py) if [ \"$FLCLASH_TEST_STUN\" = leak ]; then echo 'RESULT:198.51.100.1'; elif [ \"$FLCLASH_TEST_STUN\" = none ]; then echo 'RESULT:NONE'; else echo 'RESULT:203.0.113.1'; fi ;; *) exec " + repr(sys.executable) + " \"$@\" ;; esac\n",
         }
         for name, content in scripts.items():
             path = fake_bin / name
@@ -161,6 +161,7 @@ class FlClashRepairTests(unittest.TestCase):
             path.chmod(0o755)
         env = dict(os.environ, HOME=str(home_dir), PATH=str(fake_bin) + os.pathsep + os.defpath,
                    FLCLASH_TEST_STATE=str(state), FLCLASH_TEST_STUN=stun)
+        env.update(extra_env or {})
         return subprocess.run(["/bin/bash", str(core), "fix"], env=env, text=True,
                               capture_output=True, timeout=30)
 
@@ -175,6 +176,12 @@ class FlClashRepairTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertEqual(self.rule_rows(), [])
         self.assertIn("验证失败，已回滚", result.stdout)
+
+    def test_full_fix_honors_reject_policy_for_flclash(self):
+        result = self.run_full_fix(stun="none", extra_env={"WEBRTC_POLICY": "reject"})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(len(self.rule_rows()), 16)
+        self.assertIn("FlClash 域名与 STUN 规则已生效", result.stdout)
 
 
 if __name__ == "__main__":
