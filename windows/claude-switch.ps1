@@ -1,5 +1,5 @@
 ﻿# Claude 账号切换器 - Windows 核心脚本
-# 用法: powershell -NoProfile -File claude-switch.ps1 check|checkdetail|status|switch A|B|C|D|fix|set-region|set-client|check-update|update-now
+# 用法: powershell -NoProfile -File claude-switch.ps1 check|checkdetail|status|switch A|B|C|D|fix|set-region|set-client|get-flclash-controller|set-flclash-controller|check-update|update-now
 $ErrorActionPreference = 'Continue'
 try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {}
 
@@ -634,8 +634,139 @@ function Get-YamlScalar([string]$path, [string]$key) {
     return $null
 }
 
+function Get-FlClashControllerFile {
+    return (Join-Path $BASE 'flclash-controller.txt')
+}
+
+function Get-FlClashControllerOverride {
+    $path = Get-FlClashControllerFile
+    if (-not (Test-Path -LiteralPath $path)) { return '' }
+    try { return ([System.IO.File]::ReadAllText($path)).Trim() } catch { return '' }
+}
+
+function Get-FlClashConfigPath {
+    foreach ($yaml in @(
+        (Join-Path $env:APPDATA 'com.follow\clash\config.yaml'),
+        (Join-Path $env:LOCALAPPDATA 'com.follow\clash\config.yaml')
+    )) {
+        if (Test-Path -LiteralPath $yaml) { return $yaml }
+    }
+    return $null
+}
+
+# 只接受回环地址。裸端口视为 127.0.0.1，0.0.0.0 改写到本机，其它主机拒绝。
+function ConvertTo-LoopbackClashEndpoint([string]$addr, [string]$secret, [string]$source) {
+    if ([string]::IsNullOrWhiteSpace($addr)) { return $null }
+    $addr = $addr.Trim()
+    if ($addr -match '^unix://' -or $addr -match '^/' -or $addr -match '^\\') { return $null }
+    if ($addr -match '^(?i)https://') { return $null }
+    if ($addr -match '^[0-9]{1,5}$') { $addr = '127.0.0.1:' + $addr }
+    $addr = $addr -replace '^0\.0\.0\.0:', '127.0.0.1:'
+    $addr = $addr -replace '^\[::\]:', '127.0.0.1:'
+    $addr = $addr -replace '^:', '127.0.0.1:'
+    if ($addr -notmatch '^https?://') { $addr = 'http://' + $addr }
+    $uri = $null
+    try { $uri = [Uri]$addr } catch { return $null }
+    if ($uri.Scheme -ne 'http') { return $null }
+    $hostName = $uri.Host.Trim('[]').ToLowerInvariant()
+    if ($hostName -ne '127.0.0.1' -and $hostName -ne 'localhost' -and $hostName -ne '::1') { return $null }
+    $port = [int]$uri.Port
+    if ($port -lt 1 -or $port -gt 65535) { return $null }
+    $headers = @{}
+    if (-not [string]::IsNullOrWhiteSpace($secret)) { $headers['Authorization'] = 'Bearer ' + $secret }
+    return @{ base = ('http://127.0.0.1:' + $port); headers = $headers; source = $source }
+}
+
+function Test-ClashVersionEndpoint($api) {
+    if (-not $api) { return $false }
+    try {
+        $params = @{ Uri = ($api.base + '/version'); TimeoutSec = 2; ErrorAction = 'Stop' }
+        if ($api.headers.Count -gt 0) { $params['Headers'] = $api.headers }
+        $version = Invoke-RestMethod @params
+        return [bool]($version -and $version.version)
+    } catch { return $false }
+}
+
+function Get-FlClashListenCandidates {
+    $candidates = @('127.0.0.1:9090')
+    try {
+        $procs = @(Get-Process -Name 'FlClash','FlClashCore' -ErrorAction SilentlyContinue)
+        if ($procs) {
+            $ids = @($procs | ForEach-Object { $_.Id })
+            $listen = @(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object {
+                ($ids -contains $_.OwningProcess) -and (@('127.0.0.1','::1','0.0.0.0','::') -contains $_.LocalAddress)
+            })
+            foreach ($port in @($listen | ForEach-Object { $_.LocalPort } | Sort-Object -Unique)) {
+                if ($port -and [int]$port -ne 9090) { $candidates += ('127.0.0.1:' + $port) }
+            }
+        }
+    } catch {}
+    return $candidates
+}
+
+# FlClash 默认外部控制器是 127.0.0.1:9090。优先用户填写，其次它自己的 config.yaml，最后才探测默认端口和该进程的本机监听口。
+function Get-FlClashApi {
+    $override = Get-FlClashControllerOverride
+    if ($override) {
+        $chosen = ConvertTo-LoopbackClashEndpoint $override '' 'flclash-override'
+        if ($chosen) { return $chosen }
+    }
+    $yaml = Get-FlClashConfigPath
+    $secret = ''
+    if ($yaml) {
+        $addr = Get-YamlScalar $yaml 'external-controller'
+        $secret = Get-YamlScalar $yaml 'secret'
+        if (-not [string]::IsNullOrWhiteSpace($addr)) {
+            $chosen = ConvertTo-LoopbackClashEndpoint $addr $secret 'flclash-config'
+            if ($chosen) { return $chosen }
+            return $null
+        }
+    }
+    foreach ($candidate in @(Get-FlClashListenCandidates)) {
+        $source = 'flclash-listen'
+        if ($candidate -eq '127.0.0.1:9090') { $source = 'flclash-9090' }
+        $chosen = ConvertTo-LoopbackClashEndpoint $candidate $secret $source
+        if ($chosen -and (Test-ClashVersionEndpoint $chosen)) { return $chosen }
+    }
+    return $null
+}
+
+function Get-FlClashControllerSetting {
+    $override = Get-FlClashControllerOverride
+    if ([string]::IsNullOrWhiteSpace($override)) { 'port=auto'; return }
+    $chosen = ConvertTo-LoopbackClashEndpoint $override '' 'flclash-override'
+    if ($chosen) { 'port=' + ($chosen.base -replace '^http://', ''); return }
+    'port=auto'
+}
+
+function Set-FlClashControllerSetting([string]$Value) {
+    $raw = ''
+    if ($null -ne $Value) { $raw = $Value.Trim() }
+    $path = Get-FlClashControllerFile
+    if ([string]::IsNullOrWhiteSpace($raw) -or $raw -eq 'auto') {
+        if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue }
+        'OK:FlClash 控制端口改为自动发现'
+        return
+    }
+    $chosen = ConvertTo-LoopbackClashEndpoint $raw '' 'flclash-override'
+    if (-not $chosen) {
+        $script:exitCode = 1
+        'FAIL:只接受本机端口，例如 9090 或 127.0.0.1:9090'
+        return
+    }
+    $stored = $chosen.base -replace '^http://', ''
+    $dir = Split-Path -Parent $path
+    if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
+    [System.IO.File]::WriteAllText($path, $stored, (New-Object System.Text.UTF8Encoding($false)))
+    "OK:FlClash 控制端口已设为 $stored"
+}
+
 # 解析 Clash 控制接口;Windows 版不使用 unix socket
 function Get-ClashApi {
+    if ($PROXY_MODE -eq 'flclash') {
+        $flclash = Get-FlClashApi
+        if ($flclash) { return $flclash }
+    }
     foreach ($name in @('clash-verge.yaml', 'config.yaml', 'verge.yaml')) {
         $yaml = Join-Path $CLASH_DIR $name
         if (-not (Test-Path -LiteralPath $yaml)) { continue }
@@ -651,6 +782,7 @@ function Get-ClashApi {
         if (-not [string]::IsNullOrWhiteSpace($secret)) { $headers['Authorization'] = 'Bearer ' + $secret }
         return @{ base = $base; headers = $headers; source = $name }
     }
+    if ($PROXY_MODE -eq 'auto') { return Get-FlClashApi }
     return $null
 }
 
@@ -687,9 +819,15 @@ function Invoke-ClashApi([string]$Path, [int]$TimeoutSec = 8) {
 }
 
 function Get-ClashApiHint([string]$reason) {
+    $noEndpoint = '控制接口未配置:检查 Clash Verge 的 external-controller'
+    $connectFailed = '控制接口拒绝连接:Verge 未开外部控制或端口不对'
+    if ($PROXY_MODE -eq 'flclash') {
+        $noEndpoint = '控制接口未配置:检查 FlClash 的 external-controller，或填写本机端口'
+        $connectFailed = '控制接口拒绝连接:FlClash 未开外部控制或端口不对'
+    }
     switch ($reason) {
-        'no-endpoint'    { return '控制接口未配置:检查 Clash Verge 的 external-controller' }
-        'connect-failed' { return '控制接口拒绝连接:Verge 未开外部控制或端口不对' }
+        'no-endpoint'    { return $noEndpoint }
+        'connect-failed' { return $connectFailed }
         'auth-failed'    { return '控制接口鉴权失败:secret 不匹配' }
         'timeout'        { return '控制接口超时:内核无响应或 /rules 过大' }
         ''               { return '控制接口不可用' }
@@ -712,6 +850,17 @@ function Get-ClashMode {
                 if ($line -match '(?m)^mode:\s*[''"]?(\w+)') {
                     $m = $Matches[1].ToLowerInvariant()
                     if ($m -eq 'global' -or $m -eq 'rule' -or $m -eq 'direct') { return $m }
+                }
+            }
+        }
+        if ($PROXY_MODE -eq 'flclash' -or $PROXY_MODE -eq 'auto') {
+            $flclashYaml = Get-FlClashConfigPath
+            if ($flclashYaml) {
+                foreach ($line in Get-Content -LiteralPath $flclashYaml -Encoding UTF8 -ErrorAction SilentlyContinue) {
+                    if ($line -match '(?m)^mode:\s*[''"]?(\w+)') {
+                        $m = $Matches[1].ToLowerInvariant()
+                        if ($m -eq 'global' -or $m -eq 'rule' -or $m -eq 'direct') { return $m }
+                    }
                 }
             }
         }
@@ -2414,7 +2563,8 @@ function Invoke-RulesStatus {
         $auth = if ($api.headers.Count -gt 0) { 'configured' } else { 'none' }
         "api=source=$($api.source) endpoint=$($api.base) auth=$auth"
     } else {
-        'api=未配置(检查 Clash Verge 的 external-controller)'
+        if ($PROXY_MODE -eq 'flclash') { 'api=未配置(填写 FlClash 本机端口，或确认 external-controller)' }
+        else { 'api=未配置(检查 Clash Verge 的 external-controller)' }
     }
     $cfg = Invoke-ClashApi '/configs' 5
     if ($cfg.ok) { "configs=ok mode=$(([string]$cfg.data.mode).ToLowerInvariant())" } else { "configs=fail:$($cfg.reason)" }
@@ -2469,6 +2619,8 @@ try {
         'set-region'   { Invoke-SetRegion }
         'set-client'   { Set-ClientMode $args[1] }
         'get-client'   { Get-Client }
+        'get-flclash-controller' { Get-FlClashControllerSetting }
+        'set-flclash-controller' { Set-FlClashControllerSetting $args[1] }
         'fingerprint'  { Get-Fingerprint }
         'cli-info'     { Get-CliInfo }
         'open-safe'    { Open-SafeUrl $args[1] }
@@ -2492,7 +2644,7 @@ try {
         'export-diagnostics' { Export-Diagnostics $args[1] }
         default        {
             $exitCode = 1
-            "用法: claude-switch.ps1 checkdetail|status|fix|switch A|B|set-region|check-update|update-now|rules-status|get-check-config|set-check-config|export-diagnostics|fingerprint|cli-info|open-safe|diagnose-proxy"
+            "用法: claude-switch.ps1 checkdetail|status|fix|switch A|B|set-region|check-update|update-now|rules-status|get-check-config|set-check-config|export-diagnostics|fingerprint|cli-info|open-safe|diagnose-proxy|get-flclash-controller|set-flclash-controller"
         }
     }
 } catch {

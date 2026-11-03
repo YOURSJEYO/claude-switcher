@@ -186,6 +186,8 @@ $xaml = @"
                                 <ComboBoxItem Content="Surge" Tag="surge"/><ComboBoxItem Content="WireGuard" Tag="wireguard"/>
                                 <ComboBoxItem Content="其他 TUN 客户端" Tag="other"/><ComboBoxItem Content="自动识别" Tag="auto"/>
                             </ComboBox>
+                            <TextBlock Text="FlClash 控制端口" FontSize="11" FontWeight="SemiBold" Foreground="{StaticResource MutedBrush}" Margin="0,12,0,0"/>
+                            <TextBox x:Name="FlClashPort" MinHeight="34" Margin="0,6,0,0" ToolTip="留空表示自动发现。可填 9090 或 127.0.0.1:9090，只接受本机地址"/>
                             <TextBlock Text="切换后自动重新检查" FontSize="10" Foreground="{StaticResource MutedBrush}" Margin="0,8,0,0"/>
                         </StackPanel>
                     </Border>
@@ -310,6 +312,8 @@ $script:currentClient = ''
 $script:currentAccount = 'none'
 $script:archivedAccounts = @()
 $script:suppressClientEvent = $false
+$script:suppressPortEvent = $false
+$script:portLoaded = $false
 $script:uiJob = $null
 $script:uiTimer = $null
 $script:uiOperation = ''
@@ -437,6 +441,17 @@ function Apply-ClientOutput([string]$Text) {
     $script:suppressClientEvent = $false
     return $true
 }
+function Apply-FlClashPort([string]$Text) {
+    $value = ''
+    foreach ($line in ($Text -split "`r?`n")) { if ($line -match '^port=(.*)$') { $value = $Matches[1] } }
+    if ($value -eq 'auto') { $value = '' }
+    $box = $win.FindName('FlClashPort')
+    if (-not $box) { return }
+    $script:suppressPortEvent = $true
+    $box.Text = $value
+    $script:suppressPortEvent = $false
+    $script:portLoaded = $true
+}
 function Apply-StatusOutput([string]$Text) {
     $fields = @{}
     foreach ($token in ($Text -split '\s+')) {
@@ -515,7 +530,8 @@ function Refresh-Checks {
         $checks = if (Test-Path "$base\last-check.txt") { (Get-Content "$base\last-check.txt" -Encoding UTF8) -join "`n" } else { '' }
         $status = (& powershell -NoProfile -ExecutionPolicy Bypass -File $core status 2>$null | Out-String).Trim(); $statusExit = $LASTEXITCODE
         $client = (& powershell -NoProfile -ExecutionPolicy Bypass -File $core get-client 2>$null | Out-String).Trim(); $clientExit = $LASTEXITCODE
-        [pscustomobject]@{ Checks = $checks; CheckExit = $checkExit; Status = $status; StatusExit = $statusExit; Client = $client; ClientExit = $clientExit }
+        $port = (& powershell -NoProfile -ExecutionPolicy Bypass -File $core get-flclash-controller 2>$null | Out-String).Trim()
+        [pscustomobject]@{ Checks = $checks; CheckExit = $checkExit; Status = $status; StatusExit = $statusExit; Client = $client; ClientExit = $clientExit; Port = $port }
     }
     Start-UiOperation 'refresh' $work @($CORE,$BASE)
 }
@@ -530,6 +546,7 @@ function Complete-UiOperation([string]$Operation, $Result) {
         if (-not $Result) { $script:pendingSwitch = ''; $script:environmentReady = $false; Set-Status '检查失败' ([System.Windows.Media.Color]::FromRgb(0xF8,0x71,0x71)); Set-Banner '核心脚本没有返回检查结果' 'error'; Set-Busy $false; return }
         $statusOk = $Result.StatusExit -eq 0 -and (Apply-StatusOutput $Result.Status)
         $clientOk = $Result.ClientExit -eq 0 -and (Apply-ClientOutput $Result.Client)
+        if ($Result.Port) { Apply-FlClashPort $Result.Port }
         $checksOk = Apply-CheckOutput $Result.Checks $Result.CheckExit
         $script:environmentReady = $checksOk -and $statusOk -and $clientOk
         if (-not $statusOk -or -not $clientOk) { $script:environmentReady = $false; Set-Status '状态异常' ([System.Windows.Media.Color]::FromRgb(0xF8,0x71,0x71)); Set-Banner '无法读取账号或代理客户端状态，请更新核心脚本后重试' 'error' }
@@ -555,7 +572,7 @@ function Complete-UiOperation([string]$Operation, $Result) {
         else { Set-Banner $(if ($text) { $text } else { '切换未返回成功结果，请重试' }) 'error' }
         Refresh-Checks; return
     }
-    if ($Operation -in @('set-client','set-region')) {
+    if ($Operation -in @('set-client','set-region','set-flclash-controller')) {
         if ($exit -eq 0 -and $text -match '(?m)^OK:') { Set-Banner ($text -split "`r?`n" | Select-Object -Last 1) 'success' }
         else { Set-Banner $(if ($text) { $text } else { '操作失败，请重试' }) 'error' }
         Refresh-Checks; return
@@ -747,6 +764,7 @@ $win.FindName('BtnRefresh').Add_Click({ Refresh-Checks })
 $win.FindName('BtnFix').Add_Click({ if (-not $script:isBusy) { Set-Status '修复中' ([System.Windows.Media.Color]::FromRgb(0xFB,0x92,0x3C)); Set-Banner '正在修复…（可能弹出管理员授权框）' 'info'; Start-CommandOperation 'fix' @('fix') } })
 foreach ($slot in @('A','B','C','D')) { $win.FindName("Btn$slot").Add_Click({ Switch-To $slot }.GetNewClosure()) }
 $win.FindName('ProxyClient').Add_SelectionChanged({ if ($script:suppressClientEvent -or $script:isBusy) { return }; $selected = $win.FindName('ProxyClient').SelectedItem; if (-not $selected) { return }; $mode = [string]$selected.Tag; if ($clientModes -contains $mode -and $mode -ne $script:currentClient) { Set-Banner "正在切换代理客户端为 $mode…" 'info'; Start-CommandOperation 'set-client' @('set-client',$mode) } })
+$win.FindName('FlClashPort').Add_LostFocus({ if ($script:suppressPortEvent -or $script:isBusy -or -not $script:portLoaded) { return }; $raw = ([string]$win.FindName('FlClashPort').Text).Trim(); if (-not $raw) { $raw = 'auto' }; Start-CommandOperation 'set-flclash-controller' @('set-flclash-controller',$raw) })
 $win.FindName('BtnTools').Add_Click({ Show-ToolsWindow }); $win.FindName('BtnSettings').Add_Click({ Show-CheckSettings }); $win.FindName('BtnDiagnostics').Add_Click({ Export-DiagnosticLog })
 $win.FindName('BtnCheckUpdate').Add_Click({ if ($script:updateRunning -or $script:isBusy) { return }; Remove-Item -LiteralPath (Join-Path $BASE 'update-check.json') -Force -ErrorAction SilentlyContinue; Start-UpdateCheck $true })
 $win.FindName('BtnLater').Add_Click({ if ($script:checkJob) { Stop-Job $script:checkJob -ErrorAction SilentlyContinue; Remove-Job $script:checkJob -Force -ErrorAction SilentlyContinue; $script:checkJob = $null }; if ($script:checkTimer) { $script:checkTimer.Stop() }; $win.FindName('UpdateBar').Visibility = 'Collapsed'; Write-UpdateCache 'dismissed' $(if ($script:latestVersion) { [string]$script:latestVersion } else { '' }) })
