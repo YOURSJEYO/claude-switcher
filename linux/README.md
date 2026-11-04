@@ -4,15 +4,19 @@
 
 ## 先说最重要的设计差异(为什么是这些取舍)
 
-1. **Claude 官方没有 Linux 桌面版**——Linux 上的使用形态是「网页版(浏览器) + Claude Code CLI」。因此:
-   - **账号切换**切换的是**浏览器登录态**(对 `~/.config/google-chrome` 或 `~/.config/chromium` 做快照交换),切换前会完全退出浏览器
-   - **保镖**只终止 `claude` CLI 进程,**不会关你的浏览器**(网页版没有独立进程可归因,关浏览器体验太糟;网页端的保护由 TUN + 置顶规则兜底)
-2. **没有图形界面**——Linux 桌面环境太多样,本版提供**终端交互菜单**(`claude-switch menu`)+ 完整命令行接口
+1. **桌面 Code 会话**：需要已安装的 `claude-desktop` 支持 `claude://code/new`。从应用菜单打开「Claude 切换器 (Linux)」可查看发行版、架构和客户端路径，或运行：
+   ```bash
+   claude-switch desktop-info
+   claude-switch desktop A    # 使用客户端现有配置
+   claude-switch desktop C    # B、C、D 各自使用独立的 Electron、XDG 与 Claude Code 配置目录
+   ```
+   使用上述 desktop 命令时须先退出已有桌面实例及 Code CLI。B、C、D 首次使用时分别登录并核对账号；客户端版本、系统密钥环和内置 Code 对配置目录的处理可能不同。代理离线时保镖会请求关闭当前用户的 claude-desktop 进程。
+2. **浏览器模式**：桌面 A–D 与浏览器 A/B 相互独立；`switch A|B` 切换 Chrome/Chromium 浏览器资料。
 3. **常驻服务用 systemd 用户单元**——免 root、登录自启、崩溃自动拉起
 
 ## 系统要求
 
-> **注意**：Linux 版已支持多代理客户端与地区自适应（安装时按出口国家自动锁定 国家/时区/地区格式 三件套）。自动更新（`update` 命令 + 12 小时自动检查）目前仍仅 macOS 版提供，后续版本同步。
+> **注意**：Linux 版已支持多代理客户端与地区自适应（安装时按出口国家自动锁定 国家/时区/地区格式 三件套）。Linux 托盘启动时和每 12 小时只读检查上游 main，也可手动选择「检查更新」。
 
 - 任一现代发行版(Ubuntu/Debian/Fedora/Arch 等,systemd)
 - 以下任一代理客户端(TUN/虚拟网卡可用):
@@ -21,7 +25,24 @@
   - WireGuard(wg-quick 服务,启发式判定)
   - 其他客户端安装时选 `other`/`auto`
 - python3、bash、curl
+- 桌面切换与启动需要 `flock`（util-linux）和 `systemd-run`
 - 建议安装 `dnsutils`(Debian/Ubuntu)或 `bind-utils`(Fedora)以获得 dig;没有也能跑(自动回退 nslookup/getent)
+
+## 监测窗口与托盘
+
+在 `linux/` 目录运行 `bash install-monitor.sh` 即可安装当前用户的监测应用。打开应用菜单或桌面上的「Claude 切换器」。Linux 完整安装器也会安装此界面。窗口读取原有的 14 项环境检查，列出通过、警告、失败与缺失结果；每两分钟自动刷新，也可手动重新检查。完整保护尚未配置时，界面注明独立监测与默认参考目标（US / America/New_York / en_US）。
+
+窗口中的「时区」按 timedatectl 的有效时区检查；「地区格式」优先检查 GNOME 地区设置。右上角信息按钮提供两项判定说明。账号 A–D 按两行排列。点击卡片（或运行 `claude-switch desktop-switch C`）先重新安检，通过后请求当前用户的 Claude 桌面版与 Code CLI 退出，再启动目标账号。请先保存当前工作；Code CLI 最多等待 10 秒，桌面端最多等待 90 秒完成退出。逾时保留原槽位。再次点击正在运行的同一槽位会在现有客户端打开 Code。高亮表示最近启动的槽位。
+
+点击盾牌托盘图标会弹出摘要和待处理项目，选择「打开主窗口」查看详情。托盘连接时，关闭窗口后仍会监测；从托盘或窗口选择「退出」结束本次运行。下次登录桌面自动驻留。
+
+「检查更新」（终端：`claude-switch update-check`）固定 main 提交、校验远程工件 SHA256，再比较已安装的脚本与界面。比对忽略安装器写入的五项配置及保镖代理模式。上游校验项缺失、网络错误会单独提示；检查不会替换文件。工作区领先上游时，内容差异也会显示。
+
+「检查设置」可关闭六项非关键探测或将这些项目的失败降为警告，监测窗口和启动前安检共用设置。「导出诊断日志」保存 ZIP，仅包含检查设置、环境类型、状态枚举与本次运行的脱敏检查历史。
+
+完整安装后，应用菜单里的 Claude 图标和“新建 Claude Code 会话”等动作使用最近启动的槽位，首次使用默认为 A。安装器只接管发行包或 Claude 自生成的桌面入口，保留已有自定义入口。
+
+界面使用系统 Python 3、PyGObject 和 GTK 3。Ubuntu 上的托盘需要 GNOME AppIndicator 扩展以及 `gir1.2-ayatanaappindicator3-0.1`。不支持托盘的桌面仍可从应用菜单打开窗口。单装监测界面不需要 sudo，不启用保镖、不修改代理或系统网络设置。需要启动 Claude 或切换账号时，请先配置 TUN，再运行完整安装器。
 
 ## 安装
 
@@ -50,7 +71,7 @@ claude-switch switch A      # 切到账号A(切换浏览器登录态)
 
 | 客户端 | PROXY_MODE | 在线判定 | 置顶规则 |
 |---|---|---|---|
-| Clash Verge | `clash-verge` | verge-mihomo/mihomo 进程 | 自动写入 Merge.yaml(智能合并,不动你的已有配置) |
+| Clash Verge | `clash-verge` | verge-mihomo/mihomo 进程 | 备份并合并全局 Script.js，重新应用当前订阅后从内核验证域名与 UDP 规则 |
 | mihomo | `mihomo` | mihomo 进程 | 手动添加(安装器打印清单) |
 | sing-box | `sing-box` | sing-box 进程 | 手动添加 |
 | V2RayA | `v2raya` | v2raya 进程 | 手动添加 |
@@ -61,22 +82,32 @@ claude-switch switch A      # 切到账号A(切换浏览器登录态)
 
 ## Beta 已知限制
 
-- 设备指纹体检（`fingerprint`）与 Web 检测页为 macOS/浏览器能力，Linux 版暂未内置，可用 Web 版检查 Canvas/WebGL。
+- 设备指纹体检在监测窗口提供字体族、GPU 驱动与虚拟化摘要，不对应 macOS 的 `fingerprint` 命令；Canvas/WebGL 仍请使用 Web 检测页。
 - **wireguard / other 为启发式判定**:WireGuard 没有 fake-ip,DNS 与规则置顶的行为检测(解析到 198.18.x.x)不适用,以虚拟网卡与出口国家校验为准
 - **非 Clash Verge 客户端的置顶规则需手动维护**:安装器会打印 DOMAIN-SUFFIX 清单,`fix` 只检测不代写
-- **未做多发行版 CI 覆盖**:脚本只依赖 bash + systemd + 常见命令,但各发行版(尤其 Fedora/Arch/openSUSE 等非 Debian 系)未经真机回归,遇到问题请到 [Issues](https://github.com/YOURSJEYO/claude-switcher/issues) 反馈
+- **未做 Linux 真机与多发行版验收**:脚本只依赖 bash + systemd + 常见命令,但各发行版(尤其 Fedora/Arch/openSUSE 等非 Debian 系)未经真机回归,静态检查与隔离回归不能视为这些环境已验收;遇到问题请到 [Issues](https://github.com/YOURSJEYO/claude-switcher/issues) 反馈
 
 ## 与 macOS/Windows 版的差异
 
 | 项目 | Linux 版 |
 |---|---|
-| 账号切换对象 | 浏览器配置目录(Chrome/Chromium),不是独立 App |
-| 保镖保护对象 | `claude` CLI 进程(不关浏览器) |
+| 账号切换对象 | 桌面客户端 A–D 配置，或 Chrome/Chromium 浏览器配置目录 |
+| 保镖保护对象 | `claude` CLI 与当前用户的 `claude-desktop` 进程 |
 | 常驻方式 | systemd 用户服务(免 root) |
-| 界面 | 终端菜单 + CLI |
+| 界面 | GTK 监测窗口、盾牌托盘、终端菜单与 CLI |
 | 时区/IPv6 | timedatectl / sysctl(需 sudo) |
 
 ## 卸载
+
+仅安装监测窗口时，先从托盘选择「退出切换器」。移除以下安装器创建的文件即可撤销安装：
+
+- `~/.local/bin/claude-switch-monitor`
+- `${XDG_DATA_HOME:-~/.local/share}/claude-switcher/` 与同级 `applications/claude-switcher.desktop`
+- `${XDG_CONFIG_HOME:-~/.config}/autostart/claude-switcher.desktop` 与桌面的 `claude-switcher.desktop`
+
+如需恢复 Claude 原有图标入口：确认用户应用目录的 `com.anthropic.Claude.desktop` 中有 `X-Claude-Switcher=true` 后，用同目录的 `.desktop.pre-switcher` 备份还原；没有备份时移除该用户入口即可使用系统版本。随后可删除 `~/.local/bin/claude-desktop-selected`。
+
+以下命令用于完整安装的卸载，其中删除 `~/.claude-switcher` 会删除该目录中的账号存档，执行前请自行备份。
 
 ```bash
 systemctl --user disable --now claude-bodyguard.service

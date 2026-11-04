@@ -10,5 +10,6 @@ shasum -a 256 \
     daemons/local.tz-watchdog.plist \
     daemons/local.claude-update.plist \
     installer/安装.command \
-    installer/卸载.command > SHA256SUMS
+    installer/卸载.command \
+    linux/*.sh linux/*.py linux/monitor.css linux/claude-switcher-shield-symbolic.svg > SHA256SUMS
 echo "✓ SHA256SUMS 已更新"

@@ -5,6 +5,11 @@ set -u
 BASE="$HOME/.claude-switcher"
 CLASH_DIR="$HOME/.config/io.github.clash-verge-rev.clash-verge-rev"
 [ -d "$HOME/Library/Application Support/io.github.clash-verge-rev.clash-verge-rev" ] && CLASH_DIR="$HOME/Library/Application Support/io.github.clash-verge-rev.clash-verge-rev"
+# Clash Verge Rev on Linux stores runtime profiles under XDG_DATA_HOME.
+data_clash="${XDG_DATA_HOME:-$HOME/.local/share}/io.github.clash-verge-rev.clash-verge-rev"
+if [ ! -f "$CLASH_DIR/clash-verge.yaml" ] && [ -f "$data_clash/clash-verge.yaml" ]; then
+    CLASH_DIR="$data_clash"
+fi
 
 echo "=================================="
 echo "  Claude 账号切换器 · Linux 安装"
@@ -182,6 +187,14 @@ echo "✓ 代理客户端: $MODE"
 # ---- 前置检查 ----
 python3 --version >/dev/null 2>&1 || { echo "X 需要 python3,请先安装 (如: sudo apt install python3)"; exit 1; }
 systemctl --user --version >/dev/null 2>&1 || { echo "X 需要 systemd(用户服务)"; exit 1; }
+missing_deps=""
+for dep in flock systemd-run; do
+    command -v "$dep" >/dev/null 2>&1 || missing_deps="${missing_deps:+$missing_deps }$dep"
+done
+if [ -n "$missing_deps" ]; then
+    echo "X 缺少桌面切换依赖:$missing_deps(通常由 util-linux/systemd 提供)"
+    exit 1
+fi
 command -v dig >/dev/null 2>&1 || echo "提示: 未找到 dig,将使用 nslookup/getent 回退(建议安装 dnsutils/bind-utils)"
 echo "✓ 前置检查通过"
 
@@ -264,11 +277,14 @@ fi
 [ -z "$GRP" ] && GRP="GLOBAL"
 
 # ---- 安装文件 ----
-mkdir -p "$BASE"
+mkdir -p "$BASE" && chmod 700 "$BASE" || exit 1
 DIR="$(cd "$(dirname "$0")" && pwd)"
 cp "$DIR/claude-switch.sh" "$BASE/"
 cp "$DIR/claude-bodyguard.sh" "$BASE/"
-cp "$DIR/stun-probe.py" "$BASE/"
+cp "$DIR"/{stun-probe.py,update_check.py} "$BASE/" || exit 1
+support="$DIR/../core/claude-switch.sh"
+[ -f "$support" ] || support="$DIR/clash-support.sh"
+install -m 644 "$support" "$BASE/clash-support.sh" || exit 1
 chmod +x "$BASE/claude-switch.sh" "$BASE/claude-bodyguard.sh"
 sed -i \
     -e "s|^PROXY_MODE=\".*\"|PROXY_MODE=\"$MODE\"|" \
@@ -309,22 +325,28 @@ RestartSec=5
 WantedBy=default.target
 EOF
 systemctl --user daemon-reload
-systemctl --user enable --now claude-bodyguard.service >/dev/null 2>&1 \
+systemctl --user enable claude-bodyguard.service >/dev/null 2>&1 && systemctl --user restart claude-bodyguard.service \
     && echo "✓ 保镖已注册并启动(systemd 用户服务,登录自启)" \
     || echo "✗ 保镖注册失败,可稍后用 fix 自动补装"
 
 # ---- 时区与 IPv6(需要 sudo) ----
 echo ""
 echo "接下来需要 sudo 密码: 锁定时区($TZV) + 关闭 IPv6"
-sudo timedatectl set-timezone "$TZV" && echo "✓ 时区已锁定"
-sudo sysctl -w net.ipv6.conf.all.disable_ipv6=1 >/dev/null && echo "✓ IPv6 已关闭(运行时)"
-echo "net.ipv6.conf.all.disable_ipv6=1" | sudo tee /etc/sysctl.d/90-claude-switcher.conf >/dev/null \
-    && echo "✓ IPv6 关闭已持久化(/etc/sysctl.d/90-claude-switcher.conf)"
+if [ "$(timedatectl show -p Timezone --value)" != "$TZV" ]; then
+    sudo timedatectl set-timezone "$TZV" || echo "✗ 时区设置失败"
+fi
+if [ "$(sysctl -n net.ipv6.conf.all.disable_ipv6)" != 1 ]; then
+    sudo sysctl -w net.ipv6.conf.all.disable_ipv6=1 >/dev/null || echo "✗ IPv6 设置失败"
+fi
+if ! grep -qx 'net.ipv6.conf.all.disable_ipv6=1' /etc/sysctl.d/90-claude-switcher.conf 2>/dev/null; then
+    echo "net.ipv6.conf.all.disable_ipv6=1" | sudo tee /etc/sysctl.d/90-claude-switcher.conf >/dev/null || echo "✗ IPv6 持久化失败"
+fi
 command -v resolvectl >/dev/null 2>&1 && resolvectl flush-caches 2>/dev/null
 
 # ---- 终端入口 ----
 mkdir -p "$HOME/.local/bin"
 ln -sf "$BASE/claude-switch.sh" "$HOME/.local/bin/claude-switch" 2>/dev/null
+bash "$DIR/install-monitor.sh" || echo "图形界面未安装；终端菜单仍可使用"
 echo ""
 echo "=================================="
 echo "  ✅ 安装完成!"
