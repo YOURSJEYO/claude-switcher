@@ -1796,6 +1796,21 @@ ASEOF
 
 # 自动更新:拉取 main 分支最新代码,SHA256 校验+配置注入+自检+失败回滚
 # --check 只检查不写入;--auto 供 LaunchAgent 每12小时调用(静默写 update.log)
+# 原子安装脚本文件:先写同目录临时文件,再 rename 覆盖目标。
+# 绝不能直接 cp 覆盖目标:更新时正在运行的 bash 持有旧脚本的 fd,并按字节偏移继续读后续语句,
+# 若用 cp 原地覆盖同一 inode(截断后重写),bash 会从新内容中间开始解析,表现为"更新成功"之后
+# 仍报 `syntax error near unexpected token ...` / `xxx: unbound variable`、丢失结果日志并以
+# 非零码退出,极端情况下还会执行到新版脚本的半截语句。rename 后运行中的 bash 继续读旧 inode,
+# 新进程则只会看到完整的新文件(也顺带消除了并发调用读到半截脚本的窗口)。
+install_staged() {  # $1=源文件 $2=目标文件
+    _src="$1"; _dst="$2"
+    _stage="$(dirname "$_dst")/.$(basename "$_dst").new.$$"
+    if ! cp "$_src" "$_stage"; then rm -f "$_stage"; return 1; fi
+    chmod +x "$_stage" 2>/dev/null
+    if ! mv -f "$_stage" "$_dst"; then rm -f "$_stage"; return 1; fi
+    return 0
+}
+
 self_update() {
     auto=0; check=0
     case "${1:-}" in
@@ -1856,8 +1871,10 @@ self_update() {
     # 备份现有核心脚本
     [ -f "$BIN/claude-switch.sh" ] && cp "$BIN/claude-switch.sh" "$BIN/claude-switch.sh.bak"
 
-    # 替换核心脚本 + 从 .bak 读出5个配置值注入新脚本
-    cp "$NEW/core/claude-switch.sh" "$BIN/claude-switch.sh"
+    # 替换核心脚本 + 从 .bak 读出5个配置值注入新脚本(必须原子替换,原因见 install_staged 注释)
+    if ! install_staged "$NEW/core/claude-switch.sh" "$BIN/claude-switch.sh"; then
+        echo "FAIL:写入核心脚本失败,已中止"; rm -rf "$tmpd"; return 1
+    fi
     PM=""; PG=""; CT=""; TZV=""; LCT=""
     if [ -f "$BIN/claude-switch.sh.bak" ]; then
         get_cfg() { grep "^$1=\"" "$BIN/claude-switch.sh.bak" | head -1 | cut -d'"' -f2; }
@@ -1891,7 +1908,7 @@ self_update() {
         out=$("$BIN/claude-switch.sh" checkdetail 2>&1)
     fi
     if [ -z "$out" ] || echo "$out" | grep -q '=fail'; then
-        [ -f "$BIN/claude-switch.sh.bak" ] && cp "$BIN/claude-switch.sh.bak" "$BIN/claude-switch.sh"
+        [ -f "$BIN/claude-switch.sh.bak" ] && install_staged "$BIN/claude-switch.sh.bak" "$BIN/claude-switch.sh"
         echo "FAIL:新版自检未通过,已自动回滚"
         return 1
     fi
