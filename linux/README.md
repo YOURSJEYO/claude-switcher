@@ -16,7 +16,7 @@
 
 ## 系统要求
 
-> **注意**：Linux 版已支持多代理客户端与地区自适应（安装时按出口国家自动锁定 国家/时区/地区格式 三件套）。自动更新（`update` 命令 + 12 小时自动检查）目前仍仅 macOS 版提供，后续版本同步。
+> **注意**：Linux 版已支持多代理客户端与地区自适应（安装时按出口国家自动锁定 国家/时区/地区格式 三件套）。Linux 托盘启动时和每 12 小时只读检查上游 main，也可手动选择「检查更新」。
 
 - 任一现代发行版(Ubuntu/Debian/Fedora/Arch 等,systemd)
 - 以下任一代理客户端(TUN/虚拟网卡可用):
@@ -31,9 +31,15 @@
 
 在 `linux/` 目录运行 `bash install-monitor.sh` 即可安装当前用户的监测应用。打开应用菜单或桌面上的「Claude 切换器」。Linux 完整安装器也会安装此界面。窗口读取原有的 14 项环境检查，列出通过、警告、失败与缺失结果；每两分钟自动刷新，也可手动重新检查。完整保护尚未配置时，界面注明独立监测与默认参考目标（US / America/New_York / en_US）。
 
-窗口中的「时区」按 timedatectl 的有效时区检查；「地区格式」优先检查 GNOME 地区设置。右上角信息按钮提供两项判定说明。账号 A–D 按两行排列。点击卡片（或运行 `claude-switch desktop-switch C`）先重新安检，通过后请求当前用户的 Claude 桌面版与 Code CLI 退出，再启动目标账号。请先保存当前工作；10 秒后仍有进程时会取消切换。高亮表示最近启动的槽位。
+窗口中的「时区」按 timedatectl 的有效时区检查；「地区格式」优先检查 GNOME 地区设置。右上角信息按钮提供两项判定说明。账号 A–D 按两行排列。点击卡片（或运行 `claude-switch desktop-switch C`）先重新安检，通过后请求当前用户的 Claude 桌面版与 Code CLI 退出，再启动目标账号。请先保存当前工作；Code CLI 最多等待 10 秒，桌面端最多等待 90 秒完成退出。逾时保留原槽位。再次点击正在运行的同一槽位会在现有客户端打开 Code。高亮表示最近启动的槽位。
 
-点击盾牌托盘图标会弹出摘要和待处理项目，选择「打开监测窗口」查看详情。托盘连接时，关闭窗口后仍会监测；从托盘或窗口选择「退出」结束本次运行。下次登录桌面自动驻留。
+点击盾牌托盘图标会弹出摘要和待处理项目，选择「打开主窗口」查看详情。托盘连接时，关闭窗口后仍会监测；从托盘或窗口选择「退出」结束本次运行。下次登录桌面自动驻留。
+
+「检查更新」（终端：`claude-switch update-check`）固定 main 提交、校验远程工件 SHA256，再比较已安装的脚本与界面。比对忽略安装器写入的五项配置及保镖代理模式。上游校验项缺失、网络错误会单独提示；检查不会替换文件。工作区领先上游时，内容差异也会显示。
+
+「检查设置」可关闭六项非关键探测或将这些项目的失败降为警告，监测窗口和启动前安检共用设置。「导出诊断日志」保存 ZIP，仅包含检查设置、环境类型、状态枚举与本次运行的脱敏检查历史。
+
+完整安装后，应用菜单里的 Claude 图标和“新建 Claude Code 会话”等动作使用最近启动的槽位，首次使用默认为 A。安装器只接管发行包或 Claude 自生成的桌面入口，保留已有自定义入口。
 
 界面使用系统 Python 3、PyGObject 和 GTK 3。Ubuntu 上的托盘需要 GNOME AppIndicator 扩展以及 `gir1.2-ayatanaappindicator3-0.1`。不支持托盘的桌面仍可从应用菜单打开窗口。单装监测界面不需要 sudo，不启用保镖、不修改代理或系统网络设置。需要启动 Claude 或切换账号时，请先配置 TUN，再运行完整安装器。
 
@@ -97,6 +103,8 @@ claude-switch switch A      # 切到账号A(切换浏览器登录态)
 - `~/.local/bin/claude-switch-monitor`
 - `${XDG_DATA_HOME:-~/.local/share}/claude-switcher/` 与同级 `applications/claude-switcher.desktop`
 - `${XDG_CONFIG_HOME:-~/.config}/autostart/claude-switcher.desktop` 与桌面的 `claude-switcher.desktop`
+
+如需恢复 Claude 原有图标入口：确认用户应用目录的 `com.anthropic.Claude.desktop` 中有 `X-Claude-Switcher=true` 后，用同目录的 `.desktop.pre-switcher` 备份还原；没有备份时移除该用户入口即可使用系统版本。随后可删除 `~/.local/bin/claude-desktop-selected`。
 
 以下命令用于完整安装的卸载，其中删除 `~/.claude-switcher` 会删除该目录中的账号存档，执行前请自行备份。
 

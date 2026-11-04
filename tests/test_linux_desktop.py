@@ -17,6 +17,8 @@ class LinuxDesktopTests(unittest.TestCase):
             script = '''
                 set -- status
                 source "$CORE"
+                desktop_exec() { claude-desktop "$@"; }
+                desktop_matches_slot() { return 1; }
                 desktop_session_pids() {
                     if [ "$SESSION" != none ] && [ ! -e "$HOME/exited" ]; then echo 12345; fi
                 }
@@ -85,3 +87,22 @@ class LinuxDesktopTests(unittest.TestCase):
             self.assertEqual(subprocess.run(command, env=env).returncode, 0)
             helper.write_text("exit 1")
             self.assertNotEqual(subprocess.run(command, env=env).returncode, 0)
+
+
+    def test_focus_preserves_requested_action_in_live_session(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            script = """
+                source "$CORE" status
+                echo D > "$BASE/desktop-last"
+                claude-desktop() { :; }
+                desktop_audit() { return 0; }
+                desktop_session_pids() { echo 12345; }
+                desktop_exec() { printf '%s\n' "$@"; }
+                kill() { exit 80; }
+                desktop_open A focus claude://code/continue
+            """
+            env = dict(os.environ, HOME=tmp, CORE=str(CORE))
+            run = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True)
+            self.assertEqual(run.returncode, 0, run.stderr)
+            self.assertIn("/desktop/D/profile", run.stdout)
+            self.assertIn("claude://code/continue", run.stdout)

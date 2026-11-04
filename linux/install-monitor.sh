@@ -9,7 +9,7 @@ bin="$HOME/.local/bin"
 # Check GTK before replacing launchers on upgrade.
 "/usr/bin/python3" -c 'import gi; gi.require_version("Gtk", "3.0"); from gi.repository import Gtk'
 mkdir -p "$dest" "$apps" "$autostart" "$bin"
-install -m 644 "$dir"/{monitor.py,monitor.css,claude-switch.sh,stun-probe.py} "$dest/"
+install -m 644 "$dir"/{monitor.py,monitor.css,update_check.py,claude-switch.sh,stun-probe.py} "$dest/"
 support="$dir/../core/claude-switch.sh"
 [ -f "$support" ] || support="$dir/clash-support.sh"
 install -m 644 "$support" "$dest/clash-support.sh"
@@ -39,3 +39,14 @@ if ! /usr/bin/python3 -c 'import runpy,sys; sys.exit(runpy.run_path(sys.argv[1],
     echo "未检测到托盘绑定。Ubuntu 可安装 gir1.2-ayatanaappindicator3-0.1；监测窗口仍可使用。"
 fi
 echo "监测界面已安装。应用菜单打开「Claude 切换器」，下次登录自动驻留。"
+if [ -x "$HOME/.claude-switcher/claude-switch.sh" ] && grep -q 'desktop-current)' "$HOME/.claude-switcher/claude-switch.sh"; then
+    cat > "$bin/claude-desktop-selected" <<'ENTRY'
+#!/bin/bash
+if ! "$HOME/.claude-switcher/claude-switch.sh" desktop-current "$@" >/dev/null; then
+    command -v zenity >/dev/null && zenity --error --text="当前账号无法启动。请在 Claude 切换器中重新检查。"
+    exit 1
+fi
+ENTRY
+    chmod +x "$bin/claude-desktop-selected"
+    /usr/bin/python3 "$dir/desktop-entry.py" "$apps" "$bin/claude-desktop-selected"
+fi

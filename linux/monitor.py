@@ -1,6 +1,8 @@
 #!/usr/bin/python3
 """Linux session monitor. The shell backend owns the checks and launch policy."""
+from collections import deque
 import datetime
+import json
 import os
 from pathlib import Path
 import re
@@ -8,6 +10,8 @@ import signal
 import subprocess
 import sys
 import threading
+import tempfile
+import zipfile
 
 import gi
 
@@ -70,12 +74,17 @@ class Monitor(Gtk.Application):
         self.window = None
         self.child = None
         self.indicator = None
+        self.history = deque(maxlen=200)
+        self.latest = {}
+        self.checking_update = False
 
     def do_command_line(self, command):
         if self.window is None:
             self.build()
             self.refresh()
             GLib.timeout_add_seconds(120, self.periodic)
+            GLib.timeout_add_seconds(12 * 3600, self.scheduled_update)
+            self.start_update(False)
         if "--background" in command.get_arguments() and self.indicator:
             GLib.timeout_add_seconds(5, self.show_if_no_tray)
         else:
@@ -178,16 +187,29 @@ class Monitor(Gtk.Application):
         self.menu_status.connect("activate", self.present)
         self.menu_detail = Gtk.MenuItem(label="等待首轮检查")
         self.menu_detail.connect("activate", self.present)
+        self.account_item = Gtk.MenuItem(label=self.slot_text())
+        self.account_item.set_sensitive(False)
+        self.update_item = Gtk.MenuItem(label="检查更新")
+        self.update_item.connect("activate", lambda *_: self.start_update(True))
         if Indicator:
             menu = Gtk.Menu()
-            menu.append(self.menu_status)
-            menu.append(self.menu_detail)
-            menu.append(Gtk.SeparatorMenuItem())
-            for label, action in (("打开监测窗口", self.present), ("重新检查", self.refresh),
-                                  ("退出切换器", lambda *_: self.quit())):
+            title_item = Gtk.MenuItem(label="Claude 切换器")
+            title_item.set_sensitive(False)
+            for item in (title_item, self.account_item, self.menu_status, self.menu_detail, Gtk.SeparatorMenuItem()):
+                menu.append(item)
+            for label, action in (("打开主窗口", self.present), ("重新检查", self.refresh)):
                 item = Gtk.MenuItem(label=label)
                 item.connect("activate", action)
                 menu.append(item)
+            menu.append(self.update_item)
+            for label, action in (("检查设置", self.settings), ("导出诊断日志", self.export_log)):
+                item = Gtk.MenuItem(label=label)
+                item.connect("activate", action)
+                menu.append(item)
+            menu.append(Gtk.SeparatorMenuItem())
+            quit_item = Gtk.MenuItem(label="退出 Claude 切换器")
+            quit_item.connect("activate", lambda *_: self.quit())
+            menu.append(quit_item)
             menu.show_all()
             self.indicator = Indicator.Indicator.new("claude-switcher", "security-medium-symbolic",
                                                     Indicator.IndicatorCategory.APPLICATION_STATUS)
@@ -203,6 +225,9 @@ class Monitor(Gtk.Application):
         dialog.run()
         dialog.destroy()
 
+    def slot_text(self):
+        return "当前账号（最近启动）：" + (self.last_slot if self.last_slot in tuple("ABCD") else "尚无记录")
+
     def update_slots(self):
         try:
             slot = (BASE / "desktop-last").read_text().strip()
@@ -210,6 +235,8 @@ class Monitor(Gtk.Application):
             slot = ""
         if slot != self.last_slot:
             self.last_slot = slot
+            if hasattr(self, "account_item"):
+                self.account_item.set_label(self.slot_text())
             for key, button in self.slot_buttons.items():
                 style = button.get_style_context()
                 hint = "现有配置" if key == "A" else "独立配置"
@@ -220,6 +247,115 @@ class Monitor(Gtk.Application):
                     style.remove_class("primary")
                 button.set_label(f"账号 {key}\n{hint}")
         return True
+
+    def message(self, title, text):
+        self.present()
+        dialog = Gtk.MessageDialog(transient_for=self.window, modal=True, buttons=Gtk.ButtonsType.CLOSE, text=title)
+        dialog.format_secondary_text(text)
+        dialog.run()
+        dialog.destroy()
+
+    def scheduled_update(self):
+        self.start_update(False)
+        return True
+
+    def start_update(self, interactive):
+        self.show_update_result = interactive or (self.checking_update and self.show_update_result)
+        if self.checking_update:
+            return
+        self.checking_update = True
+        self.update_item.set_label("正在检查更新…")
+        threading.Thread(target=self.fetch_update, daemon=True).start()
+
+    def fetch_update(self):
+        try:
+            run = subprocess.run(["bash", str(self.core), "update-check"], stdout=subprocess.PIPE,
+                                 stderr=subprocess.DEVNULL, text=True, timeout=95)
+            result = run.stdout.strip() or "更新检查未返回结果"
+        except (OSError, subprocess.TimeoutExpired):
+            result = "无法完成更新检查，请稍后重试"
+        GLib.idle_add(self.finish_update, result)
+
+    def finish_update(self, result):
+        self.checking_update = False
+        self.update_item.set_label("检查更新 · " + ("有差异" if "版本不同" in result else
+                                  "已是最新" if "最新版本" in result else "未能确认"))
+        if self.show_update_result:
+            self.message("检查更新", result)
+        return False
+
+    def config(self):
+        raw = subprocess.check_output(["bash", str(self.core), "get-check-config"], text=True,
+                                      stderr=subprocess.DEVNULL, timeout=5)
+        return json.loads(raw)
+
+    def settings(self, *_):
+        try:
+            config = self.config()
+        except (OSError, ValueError, subprocess.SubprocessError):
+            self.message("检查设置", "配置无法读取，未修改现有设置。")
+            return
+        self.present()
+        dialog = Gtk.Dialog(title="检查设置", transient_for=self.window, modal=True)
+        dialog.add_buttons("取消", Gtk.ResponseType.CANCEL, "保存", Gtk.ResponseType.OK)
+        box = dialog.get_content_area()
+        box.set_border_width(16)
+        box.set_spacing(6)
+        box.add(Gtk.Label(label="可选检查 · 关闭后显示为跳过", xalign=0))
+        toggles = {}
+        for key in ("IP一致", "DNS", "WebRTC", "客户端语言", "ASN属性", "生态可达性"):
+            control = Gtk.CheckButton(label=key)
+            control.set_active(key not in config["disabled"])
+            toggles[key] = control
+            box.add(control)
+        warn = Gtk.CheckButton(label="将上述可选检查的失败显示为警告")
+        warn.set_active(config["allowOptionalFailures"])
+        box.add(warn)
+        logging = Gtk.CheckButton(label="保留本次运行的脱敏检查历史")
+        logging.set_active(config["logging"])
+        box.add(logging)
+        dialog.show_all()
+        if dialog.run() == Gtk.ResponseType.OK:
+            config.update(disabled=[k for k, v in toggles.items() if not v.get_active()],
+                          allowOptionalFailures=warn.get_active(), logging=logging.get_active())
+            run = subprocess.run(["bash", str(self.core), "set-check-config", json.dumps(config)],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if run.returncode:
+                self.message("检查设置", "保存失败，请检查配置和目录权限。")
+            else:
+                if not config["logging"]:
+                    self.history.clear()
+                self.refresh()
+        dialog.destroy()
+
+    def export_log(self, *_):
+        self.present()
+        chooser = Gtk.FileChooserDialog(title="导出诊断日志", transient_for=self.window,
+                                        action=Gtk.FileChooserAction.SAVE)
+        chooser.add_buttons("取消", Gtk.ResponseType.CANCEL, "导出", Gtk.ResponseType.OK)
+        chooser.set_current_name("claude-switcher-diagnostics.zip")
+        chooser.set_do_overwrite_confirmation(True)
+        dest = chooser.get_filename() if chooser.run() == Gtk.ResponseType.OK else None
+        chooser.destroy()
+        if not dest:
+            return
+        tmp = None
+        try:
+            config = self.config()
+            with tempfile.NamedTemporaryFile(dir=Path(dest).parent, delete=False) as handle:
+                tmp = handle.name
+            with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as archive:
+                for name, data in (("checks", config), ("recent-status", self.latest),
+                                   ("environment", {"platform": "Linux", "app": "Claude Switcher"})):
+                    archive.writestr(name + ".json", json.dumps(data, ensure_ascii=False, indent=2))
+                archive.writestr("client.log", "\n".join(self.history) if config["logging"] else "")
+            os.replace(tmp, dest)
+            self.message("诊断日志已导出", dest)
+        except (OSError, ValueError, subprocess.SubprocessError):
+            self.message("导出失败", "未能保存诊断文件。")
+        finally:
+            if tmp:
+                Path(tmp).unlink(missing_ok=True)
 
     def open_slot(self, _, slot):
         # The terminal preserves the core's refusal message and normal launch checks.
@@ -308,7 +444,14 @@ class Monitor(Gtk.Application):
         else:
             self.badge("环境安全", "")
         self.summary.set_tooltip_text(result)
-        self.menu_status.set_label(result)
+        self.menu_status.set_label("最近检查：" + result)
+        self.latest = {key: rows.get(key, ("unknown",))[0] for key in CHECKS}
+        try:
+            if self.config()["logging"]:
+                self.history.append(datetime.datetime.now().isoformat(timespec="seconds") + " " +
+                                    " ".join(f"{key}={state}" for key, state in self.latest.items()))
+        except (OSError, ValueError, subprocess.SubprocessError):
+            pass
         failed = [name for name in CHECKS if rows.get(name, ("unknown",))[0] in ("fail", "unknown")]
         brief = "、".join(failed[:3]) + (" 等" if len(failed) > 3 else "")
         self.menu_detail.set_label("需处理：" + brief if brief else "查看 14 项详情")

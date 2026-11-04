@@ -273,7 +273,7 @@ mkdir -p "$BASE" && chmod 700 "$BASE" || exit 1
 DIR="$(cd "$(dirname "$0")" && pwd)"
 cp "$DIR/claude-switch.sh" "$BASE/"
 cp "$DIR/claude-bodyguard.sh" "$BASE/"
-cp "$DIR/stun-probe.py" "$BASE/"
+cp "$DIR"/{stun-probe.py,update_check.py} "$BASE/" || exit 1
 support="$DIR/../core/claude-switch.sh"
 [ -f "$support" ] || support="$DIR/clash-support.sh"
 install -m 644 "$support" "$BASE/clash-support.sh" || exit 1
