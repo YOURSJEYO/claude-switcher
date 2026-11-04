@@ -2,6 +2,7 @@
 """Linux session monitor. The shell backend owns the checks and launch policy."""
 from collections import deque
 import datetime
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -36,7 +37,23 @@ STATES = {"ok": "通过", "warn": "警告", "fail": "失败", "skip": "跳过", 
 COLORS = {"ok": "#26815b", "warn": "#ab6500", "fail": "#c13d37", "skip": "#777777", "unknown": "#777777"}
 PRIVACY = re.compile(r"(?<!\d)(?:\d{1,3}\.){3}\d{1,3}(?!\d)")
 BASE = Path.home() / ".claude-switcher"
+TRAY_ICON = "claude-switcher-shield-symbolic"
 APP_ID = "io.github.YOURSJEYO.ClaudeSwitcher"
+
+
+def mask_egress(detail):
+    address, separator, region = detail.partition("/")
+    try:
+        ip = ipaddress.ip_address(address)
+    except ValueError:
+        return PRIVACY.sub("•••", detail)
+    if ip.version == 4:
+        first, _, _, last = address.split(".")
+        visible = f"{first}.….{last}"
+    else:
+        groups = ip.exploded.split(":")
+        visible = f"{int(groups[0], 16):x}:…:{int(groups[-1], 16):x}"
+    return visible + separator + region
 
 
 def parse_report(output):
@@ -44,8 +61,14 @@ def parse_report(output):
     for line in output.splitlines():
         key, _, value = line.partition("=")
         state, _, detail = value.partition(":")
-        if key in CHECKS and state in STATES and key not in rows:
-            rows[key] = state, PRIVACY.sub("•••", detail)
+        if key not in CHECKS:
+            continue
+        if key in rows:
+            rows[key] = "fail", "检测输出存在重复项"
+        elif state not in ("ok", "warn", "skip", "fail"):
+            rows[key] = "fail", "检测状态无效"
+        else:
+            rows[key] = state, detail if key == "出口IP" else PRIVACY.sub("•••", detail)
     return rows
 
 
@@ -68,9 +91,24 @@ NOTICE_SECTIONS = (
 
 DISPLAY_NAMES = ("代理内核", "TUN 网卡", "出口 IP", "IP 与上次一致", "时区", "地区格式", "IPv6 关闭",
                  "DNS 走隧道", "WebRTC", "保镖在线", "规则置顶", "客户端语言", "ASN 属性", "生态可达性")
-ICONS = ("system-run", "network-wired", "network-server", "emblem-ok", "appointment-soon",
-         "preferences-desktop-locale", "changes-prevent", "edit-find", "network-wireless",
-         "security-high", "view-list", "preferences-desktop-font", "network-workgroup", "network-transmit-receive")
+# Linux equivalents of the SF Symbols used by the macOS check rows.
+ROW_PATHS = {
+    "代理内核": "M6 6h12v12H6z M9 9h6v6H9z M9 3v3m6-3v3M9 18v3m6-3v3M3 9h3m-3 6h3m12-6h3m-3 6h3",
+    "TUN网卡": "M9 8h6v8H9z M10 5h4v3h-4z M12 16v5",
+    "出口IP": "M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0z M5 7l4-1 2 3-3 2 1 3-4-2 M12 13l4-2 3 3-3 1-1 4-2-3z",
+    "IP一致": "M12 2l3 2 3 .5 1.5 3 2 3-1.5 3-.5 3-3 1.5-3 2-3-1.5-3-.5-1.5-3-2-3 1.5-3 .5-3 3-1.5z M8 12l3 3 5-6",
+    "时区": "M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0z M12 6v6H7",
+    "地区": "M5 21V4c5-3 9 4 15 0v10c-6 4-10-3-15 0",
+    "IPv6": "M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0z M15 8c-6-3-8 9-2 8 5-1 2-7-3-4",
+    "DNS": "M16 10a6 6 0 1 1-12 0 6 6 0 0 1 12 0z M15 15l6 6",
+    "WebRTC": "M2 3l20 18 M3 9l-2 3s5 7 11 7c2 0 4-1 5-2 M7 6c6-3 12 1 16 6l-3 3 M9 10a4 4 0 0 0 5 6",
+    "保镖": "M7 13V6a1.5 1.5 0 0 1 3 0v6-8a1.5 1.5 0 0 1 3 0v8-7a1.5 1.5 0 0 1 3 0v7-5a1.5 1.5 0 0 1 3 0v8c0 7-8 9-11 4l-4-6c-1-2 1-3 3 0z",
+    "规则置顶": "M3 5l2-1v5 M3 13q4-3 3 0l-3 4h4 M10 6h11m-11 6h11m-11 6h11",
+    "客户端语言": "M1 17l3-10 3 10m-5-3h4 M10 7v10h3q5-1 0-5 4-4 0-5z M22 8q-6-4-6 4t6 4",
+    "ASN属性": "M2 8l10-6 10 6z M5 10v8m4-8v8m6-8v8m4-8v8M3 19h18M2 22h20",
+    "生态可达性": "M12 13v8 M13.5 11a1.5 1.5 0 1 1-3 0 1.5 1.5 0 1 1 3 0z M8 7q-3 4 0 8m8-8q3 4 0 8M5 4q-5 7 0 14m14-14q5 7 0 14",
+    "代理客户端": "M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0z M12 3q-9 9 0 18 9-9 0-18z M3 12h18 M5 7q7 4 14 0M5 17q7-4 14 0",
+}
 BASIS = {"时区": "原脚本读取 timedatectl 的 Timezone，与安装时的 TZ_TARGET 比较。此项不读取 /etc/timezone。",
          "地区": "原脚本优先使用 GNOME 地区格式；未设置时使用 LANG，与 LOCALE_TARGET 匹配。"}
 
@@ -89,8 +127,33 @@ def header_icon(path, color, size, fill="none"):
     svg = (f'<svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}" viewBox="0 0 24 24">'
            f'<path d="{path}" fill="{fill}" stroke="{color}" stroke-width="1.8" '
            'stroke-linecap="round" stroke-linejoin="round"/></svg>')
+    return Gtk.Image.new_from_pixbuf(svg_pixbuf(svg))
+
+
+def svg_pixbuf(svg):
     stream = Gio.MemoryInputStream.new_from_bytes(GLib.Bytes.new(svg.encode()))
-    return Gtk.Image.new_from_pixbuf(GdkPixbuf.Pixbuf.new_from_stream(stream, None))
+    return GdkPixbuf.Pixbuf.new_from_stream(stream, None)
+
+
+def row_icon(key):
+    image = styled(header_icon(ROW_PATHS[key], "#756e67", 14), "glyph")
+    image.set_valign(Gtk.Align.CENTER)
+    return image
+
+
+def status_pixbuf(state):
+    color = COLORS[state]
+    shape, mark = {
+        "ok": ('<circle cx="12" cy="12" r="10"/>', 'M7 12l3.5 3.5 6-7'),
+        "warn": ('<path d="M10.4 3.6q1.6-3 3.2 0l8 15q1 2-1.5 2h-16q-2.5 0-1.5-2z"/>', 'M12 8v5m0 3v.4'),
+        "fail": ('<path d="M8 2h8l6 6v8l-6 6H8l-6-6V8z"/>', 'M8 8l8 8m0-8-8 8'),
+        "skip": ('<circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2"/>', 'M8 12h8'),
+        "unknown": ('<circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2"/>', 'M9 9q0-4 4-3 5 2 0 6l-1 1m0 3v.4'),
+    }[state]
+    ink = color if state in ("skip", "unknown") else "white"
+    return svg_pixbuf(f'<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" '
+                      f'color="{color}" fill="{color}">{shape}<path d="{mark}" fill="none" stroke="{ink}" '
+                      'stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>')
 
 
 class Monitor(Gtk.Application):
@@ -158,8 +221,9 @@ class Monitor(Gtk.Application):
         scroll.add(body)
         brand = Gtk.Box(spacing=8)
         body.pack_start(brand, False, False, 0)
-        # Fill the left half of the shield over the terracotta badge.
-        shield = header_icon("M12 2 4 5v6c0 5 3 8 8 11V2z M12 2l8 3v6c0 5-3 8-8 11 5-3 8-6 8-11V5z", "white", 20, "white")
+        shield_svg = Path(__file__).with_name(TRAY_ICON + ".svg").read_text()
+        white_shield = svg_pixbuf(shield_svg.replace("#2e3436", "white"))
+        shield = Gtk.Image.new_from_pixbuf(white_shield.scale_simple(20, 20, GdkPixbuf.InterpType.BILINEAR))
         shield.set_valign(Gtk.Align.CENTER)
         brand.pack_start(styled(shield, "brand"), False, False, 0)
         titles = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, valign=Gtk.Align.CENTER)
@@ -192,22 +256,24 @@ class Monitor(Gtk.Application):
         table = styled(Gtk.Box(orientation=Gtk.Orientation.VERTICAL), "card")
         body.add(table)
         self.labels = {}
-        for key, name, glyph in zip(CHECKS, DISPLAY_NAMES, ICONS):
+        self.status_icons = {state: status_pixbuf(state) for state in STATES}
+        for key, name in zip(CHECKS, DISPLAY_NAMES):
             line = styled(Gtk.Box(spacing=9), "check-line")
             if key != CHECKS[-1]:
                 styled(line, "check-divider")
             table.add(line)
-            line.pack_start(styled(icon(glyph), "glyph"), False, False, 0)
+            line.pack_start(row_icon(key), False, False, 0)
             line.pack_start(styled(Gtk.Label(label=name), "check-name"), False, False, 0)
             detail = styled(Gtk.Label(xalign=1, hexpand=True), "detail")
             detail.set_ellipsize(Pango.EllipsizeMode.END)
             detail.set_width_chars(8)
             line.pack_start(detail, True, True, 0)
-            state = Gtk.Label(label="·", width_chars=2)
+            state = Gtk.Image.new_from_pixbuf(self.status_icons["unknown"])
+            state.get_accessible().set_name("待检查")
             line.pack_end(state, False, False, 0)
             self.labels[key] = state, detail
         proxy = styled(Gtk.Box(spacing=9, margin_top=2), "card", "check-line")
-        proxy.pack_start(styled(icon("network-server"), "glyph"), False, False, 0)
+        proxy.pack_start(row_icon("代理客户端"), False, False, 0)
         proxy.pack_start(Gtk.Label(label="代理客户端"), False, False, 0)
         self.proxy = styled(Gtk.Label(label="检查中"), "detail")
         proxy.pack_end(self.proxy, False, False, 0)
@@ -275,8 +341,9 @@ class Monitor(Gtk.Application):
             quit_item.connect("activate", lambda *_: self.quit())
             menu.append(quit_item)
             menu.show_all()
-            self.indicator = Indicator.Indicator.new("claude-switcher", "security-medium-symbolic",
-                                                    Indicator.IndicatorCategory.APPLICATION_STATUS)
+            self.indicator = Indicator.Indicator.new_with_path(
+                "claude-switcher", TRAY_ICON, Indicator.IndicatorCategory.APPLICATION_STATUS,
+                str(Path(__file__).resolve().parent))
             self.indicator.set_title("Claude 切换器")
             self.indicator.set_menu(menu)
             self.indicator.set_status(Indicator.IndicatorStatus.ACTIVE)
@@ -388,8 +455,12 @@ class Monitor(Gtk.Application):
     def update_slots(self):
         try:
             slot = (BASE / "desktop-last").read_text().strip()
-        except OSError:
+            if slot not in tuple("ABCD"):
+                slot = None
+        except FileNotFoundError:
             slot = ""
+        except (OSError, UnicodeError):
+            slot = None
         if slot != self.last_slot:
             self.last_slot = slot
             if hasattr(self, "account_item"):
@@ -549,7 +620,7 @@ class Monitor(Gtk.Application):
     def refresh(self, *_):
         if self.child:
             return
-        self.badge("检查中…", "pending")
+        self.badge("检查中", "pending")
         self.menu_status.set_label("环境监测 · 检查中…")
         self.button.set_sensitive(False)
         try:
@@ -585,24 +656,28 @@ class Monitor(Gtk.Application):
         for key, (label, explanation) in self.labels.items():
             state, detail = rows.get(key, ("unknown", reason or "没有返回结果"))
             counts[state] += 1
-            symbol = {"ok": "✔", "warn": "▲", "fail": "✖", "skip": "–", "unknown": "?"}[state]
-            label.set_markup(f'<span foreground="{COLORS[state]}" weight="bold">{symbol}</span>')
+            label.set_from_pixbuf(self.status_icons[state])
             label.set_tooltip_text(STATES[state])
             label.get_accessible().set_name(STATES[state])
             if state == "ok" and not detail:
                 detail = {"时区": "系统时区匹配", "地区": "地区格式匹配"}.get(key, "")
-            explanation.set_text(detail)
-            explanation.set_tooltip_text("\n".join(filter(None, (detail, BASIS.get(key)))))
+            if key == "出口IP":
+                explanation.set_text(mask_egress(detail))
+                explanation.get_parent().set_tooltip_text(detail)
+            else:
+                explanation.set_text(detail)
+                explanation.set_tooltip_text("\n".join(filter(None, (detail, BASIS.get(key)))))
         proxy_detail = rows.get("代理内核", ("unknown", ""))[1]
         self.proxy.set_text(proxy_detail or "未取得")
         result = "  ·  ".join(f"{count} {STATES[state]}" for state, count in counts.items() if count)
-        if counts["fail"] or counts["unknown"]:
-            self.badge("需要处理", "fail")
-        elif counts["warn"] or counts["skip"]:
-            self.badge("环境有提示", "warn")
+        self.update_slots()
+        if self.last_slot is None:
+            reason = reason or "无法读取账号状态"
+        if reason or counts["fail"] or counts["unknown"]:
+            self.badge("检查未过", "fail")
         else:
             self.badge("环境安全", "")
-        self.summary.set_tooltip_text(result)
+        self.summary.set_tooltip_text(reason or result)
         self.menu_status.set_label("最近检查：" + result)
         self.latest = {key: rows.get(key, ("unknown",))[0] for key in CHECKS}
         try:
@@ -617,9 +692,7 @@ class Monitor(Gtk.Application):
         now = datetime.datetime.now().strftime("%H:%M:%S")
         self.stamp.set_text(f"{now}   ·   {result}")
         if self.indicator:
-            icon = "security-low" if counts["fail"] or counts["unknown"] else (
-                "security-medium" if counts["warn"] or counts["skip"] else "security-high")
-            self.indicator.set_icon_full(icon + "-symbolic", result)
+            self.indicator.set_icon_full(TRAY_ICON, result)
         return False
 
     def do_shutdown(self):

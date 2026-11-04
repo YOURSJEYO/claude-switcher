@@ -7,7 +7,7 @@ window.monitor { background: #f7f3ee; color: #322e2a; }
 .card { background: #fffefd; color: #302a26; border: 1px solid #e7dfd8; border-radius: 14px; padding: 4px 12px; }
 .check-line { min-height: 31px; }
 .check-divider { border-bottom: 1px solid #efeae5; }
-.glyph { background: #f5f1ed; color: #746a62; border-radius: 7px; padding: 4px; }
+.glyph { background: #f5f1ed; color: #746a62; border: 1px solid #eee9e4; border-radius: 6px; padding: 4px; }
 .check-name { font-weight: 600; }
 .detail { color: #60574f; font-size: 12px; }
 .badge { color: #315c49; background: #e1eee6; border-radius: 18px; padding: 4px 10px; font-weight: bold; }

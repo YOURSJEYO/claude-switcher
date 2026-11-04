@@ -27,7 +27,7 @@ def installed_files():
     ui = Path(os.environ.get('XDG_DATA_HOME', Path.home() / '.local/share')) / 'claude-switcher'
     base = Path.home() / '.claude-switcher'
     full = (base / 'claude-switch.sh').is_file()
-    files = {f'linux/{name}': [ui / name] for name in ('monitor.py', 'monitor.css', 'update_check.py',
+    files = {f'linux/{name}': [ui / name] for name in ('monitor.py', 'monitor.css', 'claude-switcher-shield-symbolic.svg', 'update_check.py',
                                                          'claude-switch.sh', 'stun-probe.py')}
     files['core/claude-switch.sh'] = [ui / 'clash-support.sh']
     if full:
