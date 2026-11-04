@@ -66,6 +66,7 @@ jobs:
           LINUX_ROOT="$WORK/ClaudeSwitcher-${VERSION}-linux"
           mkdir -p "$LINUX_ROOT"
           ditto linux "$LINUX_ROOT/linux"
+          cp core/claude-switch.sh "$LINUX_ROOT/linux/clash-support.sh"
           cp README.md AGENTS.md SECURITY.md LICENSE "$LINUX_ROOT/"
           tar -C "$WORK" -czf \
             "$GITHUB_WORKSPACE/build/ClaudeSwitcher-${VERSION}-linux.tar.gz" \

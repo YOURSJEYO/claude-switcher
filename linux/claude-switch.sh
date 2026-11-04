@@ -25,6 +25,11 @@ DATA="$HOME/.config/google-chrome"   # Web 版登录态目录(Chrome)
 LOG="$BASE/claude-switch.log"
 CLASH_DIR="$HOME/.config/io.github.clash-verge-rev.clash-verge-rev"
 [ -d "$HOME/Library/Application Support/io.github.clash-verge-rev.clash-verge-rev" ] && CLASH_DIR="$HOME/Library/Application Support/io.github.clash-verge-rev.clash-verge-rev"
+# Clash Verge Rev on Linux stores runtime profiles under XDG_DATA_HOME.
+data_clash="${XDG_DATA_HOME:-$HOME/.local/share}/io.github.clash-verge-rev.clash-verge-rev"
+if [ ! -f "$CLASH_DIR/clash-verge.yaml" ] && [ -f "$data_clash/clash-verge.yaml" ]; then
+    CLASH_DIR="$data_clash"
+fi
 ROUTE_MISSED=""
 mkdir -p "$BASE/accounts"
 
@@ -94,16 +99,17 @@ egress() {
 
 webrtc_test() { python3 "$PROBE" 2>/dev/null; }
 
-# 置顶规则配置检查(仅 Clash Verge):合并配置里是否含置顶规则
-merge_ok() {
-    grep -q "DOMAIN-SUFFIX,claude.ai,$PROXY_GROUP" "$CLASH_DIR/clash-verge.yaml" 2>/dev/null
+# 与 macOS 使用同一个规则管理入口，直接查询当前内核。
+clash_rules() {
+    local script_dir helper
+    script_dir="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
+    helper="$script_dir/clash-support.sh"
+    [ -f "$helper" ] || helper="$script_dir/../core/claude-switch.sh"
+    [ -f "$helper" ] || { echo "缺少 Clash 规则组件，请重新安装" >&2; return 1; }
+    bash "$helper" clash-rules "$1" "$CLASH_DIR" "$BASE" "$PROXY_GROUP" "${WEBRTC_POLICY:-}"
 }
 
-# STUN/TURN 端口置顶是否已生效(国内直连规则会把 stun.miwifi.com 等判直连,UDP 需按端口强制进隧道)
-stun_ok() {
-    grep -q 'DST-PORT,3478,' "$CLASH_DIR/clash-verge.yaml" 2>/dev/null \
-        || grep -q 'DST-PORT,3478,' "$CLASH_DIR/profiles/Merge.yaml" 2>/dev/null
-}
+merge_ok() { clash_rules verify >/dev/null 2>&1; }
 
 # 置顶规则行为检测:三个生态域名全部解析到 fake-ip 段(198.18.x.x)即视为已置顶;未命中域名记入 ROUTE_MISSED
 route_ok() {
@@ -178,6 +184,10 @@ checkdetail() {
 
     # 6. 地区(LANG 未设时回退 localectl)
     lang="${LANG:-$(localectl status 2>/dev/null | grep 'LANG=' | head -1 | cut -d= -f2)}"
+    if [[ "${XDG_CURRENT_DESKTOP:-}" == *GNOME* ]] && command -v gsettings >/dev/null; then
+        region=$(gsettings get org.gnome.system.locale region 2>/dev/null | tr -d "'")
+        [ -z "$region" ] || lang="$region"
+    fi
     case "$lang" in ${LOCALE_TARGET}*) echo '地区=ok' ;; *) echo "地区=fail:$lang(期望$LOCALE_TARGET)" ;; esac
 
     # 7. IPv6
@@ -213,10 +223,8 @@ checkdetail() {
     if [ "$PROXY_MODE" = "clash-verge" ]; then
         if merge_ok; then
             echo '规则置顶=ok'
-        elif route_ok; then
-            echo '规则置顶=ok:行为检测通过'
         else
-            echo '规则置顶=fail:未生效'
+            echo '规则置顶=fail:运行中的内核规则未通过验证'
         fi
     else
         if route_ok; then
@@ -253,103 +261,7 @@ checkdetail() {
     fi
 }
 
-# 置顶规则写入(智能合并):不整文件覆盖,用户已有的 Merge 配置原样保留
-# 标记块自包含 prepend-rules 键+全部规则,重复执行幂等
-write_merge_rules() {
-    M="$CLASH_DIR/profiles/Merge.yaml"
-    B0="# >>> claude-switcher pinned rules >>>"
-    B1="# <<< claude-switcher pinned rules <<<"
-    mkdir -p "$CLASH_DIR/profiles"
-    # 置顶规则清单(缩进两格)
-    rules=""
-    for d in claude.ai claude.com anthropic.com claudeusercontent.com challenges.cloudflare.com datadoghq.com segment.io stripe.com stripe.network stripecdn.com intercom.io intercomcdn.com intercomassets.com; do
-        rules="$rules  - DOMAIN-SUFFIX,$d,$PROXY_GROUP
-"
-    done
-    # STUN/TURN 标准端口置顶:国内直连规则会把 stun.miwifi.com 等判直连,UDP 需按端口强制进隧道
-    for p in 3478 5349 19302; do
-        rules="$rules  - DST-PORT,$p,$PROXY_GROUP
-"
-    done
-
-    # 首次:文件不存在,整文件写入
-    if [ ! -f "$M" ]; then
-        cat > "$M" <<MEOF
-# Profile Enhancement Merge Template for Clash Verge
-
-profile:
-  store-selected: true
-
-# Claude 全家族及生态域名置顶强制走代理(优先级高于任何国内规则集)
-$B0
-prepend-rules:
-$rules$B1
-MEOF
-        return 0
-    fi
-
-    # 已存在:备份后幂等替换(只在将要修改时备份)
-    cp "$M" "$M.bak.$(date +%Y%m%d%H%M%S)"
-    tmp="$M.cs.tmp"
-    cp "$M" "$tmp"
-    # 删除旧标记块(含标记行,兼容块在 prepend-rules 下缩进的情形)
-    if grep -qF "$B0" "$tmp"; then
-        awk -v b0="$B0" -v b1="$B1" '
-            index($0, b0) {inblock=1; next}
-            inblock && index($0, b1) {inblock=0; next}
-            !inblock
-        ' "$tmp" > "$tmp.out" && mv "$tmp.out" "$tmp"
-        # 清理孤立的 prepend-rules: 键(其后没有规则行,只剩空行/注释/EOF)
-        awk '
-            { L[NR]=$0 }
-            END {
-                for (i=1; i<=NR; i++) {
-                    if (L[i] ~ /^prepend-rules:/) {
-                        has=0
-                        for (j=i+1; j<=NR; j++) {
-                            if (L[j] ~ /^[ \t]*- /) { has=1; break }
-                            if (L[j] ~ /^[ \t]*$/ || L[j] ~ /^[ \t]*#/) continue
-                            break
-                        }
-                        if (!has) continue
-                    }
-                    print L[i]
-                }
-            }
-        ' "$tmp" > "$tmp.out" && mv "$tmp.out" "$tmp"
-    fi
-    # 注入:已有 prepend-rules: 则标记规则块(不带键)插到该行之后,否则文件顶部插入完整块
-    # 注意:多行文本走环境变量传递(macOS awk 的 -v 不支持含换行的字符串);先写中间文件再替换,失败不碰原文件
-    if grep -q '^prepend-rules:' "$tmp"; then
-        if MARK0="$B0" MARK1="$B1" RULES="$rules" awk '
-            /^prepend-rules:/ && !done {
-                print
-                print "  " ENVIRON["MARK0"]
-                printf "%s", ENVIRON["RULES"]
-                print "  " ENVIRON["MARK1"]
-                done=1
-                next
-            }
-            { print }
-        ' "$tmp" > "$tmp.out"; then
-            mv "$tmp.out" "$M" && rm -f "$tmp"
-        else
-            rm -f "$tmp" "$tmp.out"
-            return 1
-        fi
-    else
-        {
-            echo "# Claude 全家族及生态域名置顶强制走代理(优先级高于任何国内规则集)"
-            echo "$B0"
-            echo "prepend-rules:"
-            printf "%s" "$rules"
-            echo "$B1"
-            echo ""
-            cat "$tmp"
-        } > "$tmp.out" && mv "$tmp.out" "$M" && rm -f "$tmp"
-    fi
-    rm -f "$tmp"
-}
+write_merge_rules() { clash_rules write; }
 
 fix() {
     echo "FIX:开始一键修复"
@@ -410,7 +322,7 @@ EOF
 
     # D. 置顶规则(仅 Clash Verge 智能合并写入;其他客户端行为检测不通过时提示手动)
     if [ "$PROXY_MODE" = "clash-verge" ]; then
-        if ! merge_ok || ! stun_ok || ! route_ok; then
+        if ! merge_ok; then
             echo "FIX:写入置顶规则(智能合并,不动你的已有配置)..."
             write_merge_rules && echo "FIX:置顶规则已写入(请重启 Clash Verge 生效)" || echo "FIX:置顶规则 ✗(写入失败)"
         fi

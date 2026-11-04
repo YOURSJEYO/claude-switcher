@@ -42,3 +42,23 @@ class LinuxDesktopTests(unittest.TestCase):
             result = self.run_slot(slot, checks)
             self.assertNotEqual(result.returncode, 0)
             self.assertNotIn("claude://code/new", result.stdout)
+
+    def test_runtime_rule_check_via_installed_symlink(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            installed = root / ".claude-switcher"
+            installed.mkdir()
+            script = installed / "claude-switch.sh"
+            script.write_bytes(CORE.read_bytes())
+            entry = root / "claude-switch"
+            entry.symlink_to(script)
+            clash = root / ".local/share/io.github.clash-verge-rev.clash-verge-rev"
+            clash.mkdir(parents=True)
+            (clash / "clash-verge.yaml").touch()
+            helper = installed / "clash-support.sh"
+            helper.write_text('[[ "$1" = clash-rules && "$2" = verify && "$3" = "$EXPECTED_DIR" ]]')
+            env = dict(os.environ, HOME=tmp, EXPECTED_DIR=str(clash), XDG_DATA_HOME=str(root / ".local/share"))
+            command = ['bash', '-c', 'source "$1" status >/dev/null; merge_ok', 'bash', str(entry)]
+            self.assertEqual(subprocess.run(command, env=env).returncode, 0)
+            helper.write_text("exit 1")
+            self.assertNotEqual(subprocess.run(command, env=env).returncode, 0)

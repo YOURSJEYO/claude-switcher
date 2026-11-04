@@ -62,7 +62,7 @@ claude-switch switch A      # 切到账号A(切换浏览器登录态)
 
 | 客户端 | PROXY_MODE | 在线判定 | 置顶规则 |
 |---|---|---|---|
-| Clash Verge | `clash-verge` | verge-mihomo/mihomo 进程 | 自动写入 Merge.yaml(智能合并,不动你的已有配置) |
+| Clash Verge | `clash-verge` | verge-mihomo/mihomo 进程 | 备份并合并全局 Script.js，重新应用当前订阅后从内核验证域名与 UDP 规则 |
 | mihomo | `mihomo` | mihomo 进程 | 手动添加(安装器打印清单) |
 | sing-box | `sing-box` | sing-box 进程 | 手动添加 |
 | V2RayA | `v2raya` | v2raya 进程 | 手动添加 |

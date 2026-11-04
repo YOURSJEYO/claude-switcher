@@ -5,6 +5,11 @@ set -u
 BASE="$HOME/.claude-switcher"
 CLASH_DIR="$HOME/.config/io.github.clash-verge-rev.clash-verge-rev"
 [ -d "$HOME/Library/Application Support/io.github.clash-verge-rev.clash-verge-rev" ] && CLASH_DIR="$HOME/Library/Application Support/io.github.clash-verge-rev.clash-verge-rev"
+# Clash Verge Rev on Linux stores runtime profiles under XDG_DATA_HOME.
+data_clash="${XDG_DATA_HOME:-$HOME/.local/share}/io.github.clash-verge-rev.clash-verge-rev"
+if [ ! -f "$CLASH_DIR/clash-verge.yaml" ] && [ -f "$data_clash/clash-verge.yaml" ]; then
+    CLASH_DIR="$data_clash"
+fi
 
 echo "=================================="
 echo "  Claude 账号切换器 · Linux 安装"
@@ -264,11 +269,14 @@ fi
 [ -z "$GRP" ] && GRP="GLOBAL"
 
 # ---- 安装文件 ----
-mkdir -p "$BASE"
+mkdir -p "$BASE" && chmod 700 "$BASE" || exit 1
 DIR="$(cd "$(dirname "$0")" && pwd)"
 cp "$DIR/claude-switch.sh" "$BASE/"
 cp "$DIR/claude-bodyguard.sh" "$BASE/"
 cp "$DIR/stun-probe.py" "$BASE/"
+support="$DIR/../core/claude-switch.sh"
+[ -f "$support" ] || support="$DIR/clash-support.sh"
+install -m 644 "$support" "$BASE/clash-support.sh" || exit 1
 chmod +x "$BASE/claude-switch.sh" "$BASE/claude-bodyguard.sh"
 sed -i \
     -e "s|^PROXY_MODE=\".*\"|PROXY_MODE=\"$MODE\"|" \
@@ -316,10 +324,15 @@ systemctl --user enable claude-bodyguard.service >/dev/null 2>&1 && systemctl --
 # ---- 时区与 IPv6(需要 sudo) ----
 echo ""
 echo "接下来需要 sudo 密码: 锁定时区($TZV) + 关闭 IPv6"
-sudo timedatectl set-timezone "$TZV" && echo "✓ 时区已锁定"
-sudo sysctl -w net.ipv6.conf.all.disable_ipv6=1 >/dev/null && echo "✓ IPv6 已关闭(运行时)"
-echo "net.ipv6.conf.all.disable_ipv6=1" | sudo tee /etc/sysctl.d/90-claude-switcher.conf >/dev/null \
-    && echo "✓ IPv6 关闭已持久化(/etc/sysctl.d/90-claude-switcher.conf)"
+if [ "$(timedatectl show -p Timezone --value)" != "$TZV" ]; then
+    sudo timedatectl set-timezone "$TZV" || echo "✗ 时区设置失败"
+fi
+if [ "$(sysctl -n net.ipv6.conf.all.disable_ipv6)" != 1 ]; then
+    sudo sysctl -w net.ipv6.conf.all.disable_ipv6=1 >/dev/null || echo "✗ IPv6 设置失败"
+fi
+if ! grep -qx 'net.ipv6.conf.all.disable_ipv6=1' /etc/sysctl.d/90-claude-switcher.conf 2>/dev/null; then
+    echo "net.ipv6.conf.all.disable_ipv6=1" | sudo tee /etc/sysctl.d/90-claude-switcher.conf >/dev/null || echo "✗ IPv6 持久化失败"
+fi
 command -v resolvectl >/dev/null 2>&1 && resolvectl flush-caches 2>/dev/null
 
 # ---- 终端入口 ----
