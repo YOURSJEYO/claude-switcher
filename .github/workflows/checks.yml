@@ -60,6 +60,26 @@ jobs:
       - name: JavaScript syntax
         run: node --check docs/app.js
 
+  linux:
+    name: Linux desktop and update checks
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Shell syntax and Linux integration
+        run: |
+          set -euo pipefail
+          for file in linux/*.sh; do
+            bash -n "$file"
+          done
+          python3 -B -m unittest -v tests.test_linux_desktop tests.test_linux_update_check
+
   windows:
     name: Windows PowerShell integration
     runs-on: windows-latest

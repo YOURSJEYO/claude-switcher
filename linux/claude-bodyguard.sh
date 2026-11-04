@@ -1,5 +1,5 @@
 #!/bin/bash
-# Claude 保镖 (Linux) —— 代理离线时自动关闭 claude CLI 进程
+# Claude 保镖 (Linux) —— 代理离线时自动关闭 claude CLI 与当前用户的 claude-desktop 进程
 # 安装器会把 __PROXY_MODE__ 替换为安装时识别的客户端;未替换(旧装)时按 Clash 内核判定,行为与旧版一致
 LOG="$HOME/.claude-switcher/bodyguard.log"
 MODE="__PROXY_MODE__"

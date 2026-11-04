@@ -187,6 +187,14 @@ echo "✓ 代理客户端: $MODE"
 # ---- 前置检查 ----
 python3 --version >/dev/null 2>&1 || { echo "X 需要 python3,请先安装 (如: sudo apt install python3)"; exit 1; }
 systemctl --user --version >/dev/null 2>&1 || { echo "X 需要 systemd(用户服务)"; exit 1; }
+missing_deps=""
+for dep in flock systemd-run; do
+    command -v "$dep" >/dev/null 2>&1 || missing_deps="${missing_deps:+$missing_deps }$dep"
+done
+if [ -n "$missing_deps" ]; then
+    echo "X 缺少桌面切换依赖:$missing_deps(通常由 util-linux/systemd 提供)"
+    exit 1
+fi
 command -v dig >/dev/null 2>&1 || echo "提示: 未找到 dig,将使用 nslookup/getent 回退(建议安装 dnsutils/bind-utils)"
 echo "✓ 前置检查通过"
 

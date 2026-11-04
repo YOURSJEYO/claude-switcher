@@ -11,7 +11,7 @@
    claude-switch desktop C    # B、C、D 各自使用独立的 Electron、XDG 与 Claude Code 配置目录
    ```
    使用上述 desktop 命令时须先退出已有桌面实例及 Code CLI。B、C、D 首次使用时分别登录并核对账号；客户端版本、系统密钥环和内置 Code 对配置目录的处理可能不同。代理离线时保镖会请求关闭当前用户的 claude-desktop 进程。
-2. **浏览器模式**：`switch A|B` 切换 Chrome/Chromium 浏览器资料，与桌面槽位分开。
+2. **浏览器模式**：桌面 A–D 与浏览器 A/B 相互独立；`switch A|B` 切换 Chrome/Chromium 浏览器资料。
 3. **常驻服务用 systemd 用户单元**——免 root、登录自启、崩溃自动拉起
 
 ## 系统要求
@@ -25,6 +25,7 @@
   - WireGuard(wg-quick 服务,启发式判定)
   - 其他客户端安装时选 `other`/`auto`
 - python3、bash、curl
+- 桌面切换与启动需要 `flock`（util-linux）和 `systemd-run`
 - 建议安装 `dnsutils`(Debian/Ubuntu)或 `bind-utils`(Fedora)以获得 dig;没有也能跑(自动回退 nslookup/getent)
 
 ## 监测窗口与托盘
@@ -81,10 +82,10 @@ claude-switch switch A      # 切到账号A(切换浏览器登录态)
 
 ## Beta 已知限制
 
-- 设备指纹体检（`fingerprint`）与 Web 检测页为 macOS/浏览器能力，Linux 版暂未内置，可用 Web 版检查 Canvas/WebGL。
+- 设备指纹体检在监测窗口提供字体族、GPU 驱动与虚拟化摘要，不对应 macOS 的 `fingerprint` 命令；Canvas/WebGL 仍请使用 Web 检测页。
 - **wireguard / other 为启发式判定**:WireGuard 没有 fake-ip,DNS 与规则置顶的行为检测(解析到 198.18.x.x)不适用,以虚拟网卡与出口国家校验为准
 - **非 Clash Verge 客户端的置顶规则需手动维护**:安装器会打印 DOMAIN-SUFFIX 清单,`fix` 只检测不代写
-- **未做多发行版 CI 覆盖**:脚本只依赖 bash + systemd + 常见命令,但各发行版(尤其 Fedora/Arch/openSUSE 等非 Debian 系)未经真机回归,遇到问题请到 [Issues](https://github.com/YOURSJEYO/claude-switcher/issues) 反馈
+- **未做 Linux 真机与多发行版验收**:脚本只依赖 bash + systemd + 常见命令,但各发行版(尤其 Fedora/Arch/openSUSE 等非 Debian 系)未经真机回归,静态检查与隔离回归不能视为这些环境已验收;遇到问题请到 [Issues](https://github.com/YOURSJEYO/claude-switcher/issues) 反馈
 
 ## 与 macOS/Windows 版的差异
 

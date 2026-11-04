@@ -83,10 +83,10 @@ NOTICE_SECTIONS = (
      '目标服务全家族域名及其生态依赖（Turnstile 人机验证、Telemetry 遥测、Payment 支付、Support 组件）置顶锁定代理路由，优先级高于任何第三方分流规则集，免疫规则库误判。'),
     ('Session Isolation 会话隔离快照',
      '多账号采用完整快照隔离：各账号持有独立的 Device Fingerprint、OAuth Credential 与本地状态，切换即物理交换数据卷，账号间零交叉污染。'),
-    ('Drift Self-Healing 配置漂移自愈',
-     '针对系统时区漂移、代理组件升级导致的配置重置等常见问题，内置 Watchdog 周期性校验并自动回滚至基线状态，全程留痕、可审计。'),
-    ('Anti-Tracking 反追踪卫生',
-     '验证链接（Magic Link）闭环于受保护环境内打开；邮件追踪像素（Tracking Pixel）经由邮箱服务商代理层屏蔽；全程固定单一住宅出口，不产生 Geo 跳变。'),
+    ('Proxy Watchdog 代理健康巡检',
+     '内置保镖以 10 秒周期检查代理内核与 TUN 状态，异常时请求关闭受保护的 Claude 进程；不自动修改系统时区或客户端配置。'),
+    ('Privacy Boundary 隐私边界',
+     '界面仅展示脱敏后的出口信息，诊断日志只包含检查状态与必要的脱敏摘要，不包含出口 IP、账号数据或凭据。'),
 )
 
 DISPLAY_NAMES = ("代理内核", "TUN 网卡", "出口 IP", "IP 与上次一致", "时区", "地区格式", "IPv6 关闭",
@@ -450,7 +450,7 @@ class Monitor(Gtk.Application):
         dialog.destroy()
 
     def slot_text(self):
-        return "当前账号（最近启动）：" + (self.last_slot if self.last_slot in tuple("ABCD") else "尚无记录")
+        return "当前账号（最近请求）：" + (self.last_slot if self.last_slot in tuple("ABCD") else "尚无记录")
 
     def update_slots(self):
         try:
@@ -470,7 +470,7 @@ class Monitor(Gtk.Application):
                 hint = "现有配置" if key == "A" else "独立配置"
                 if key == slot:
                     style.add_class("primary")
-                    hint = "最近启动"
+                    hint = "最近请求"
                 else:
                     style.remove_class("primary")
                 button.set_label(f"账号 {key}\n{hint}")
@@ -548,9 +548,14 @@ class Monitor(Gtk.Application):
         if dialog.run() == Gtk.ResponseType.OK:
             config.update(disabled=[k for k, v in toggles.items() if not v.get_active()],
                           allowOptionalFailures=warn.get_active(), logging=logging.get_active())
-            run = subprocess.run(["bash", str(self.core), "set-check-config", json.dumps(config)],
-                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            if run.returncode:
+            try:
+                run = subprocess.run(["bash", str(self.core), "set-check-config", json.dumps(config)],
+                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                     text=True, timeout=10)
+                failed = run.returncode != 0
+            except (OSError, subprocess.SubprocessError):
+                failed = True
+            if failed:
                 self.message("检查设置", "保存失败，请检查配置和目录权限。")
             else:
                 if not config["logging"]:
@@ -662,8 +667,9 @@ class Monitor(Gtk.Application):
             if state == "ok" and not detail:
                 detail = {"时区": "系统时区匹配", "地区": "地区格式匹配"}.get(key, "")
             if key == "出口IP":
-                explanation.set_text(mask_egress(detail))
-                explanation.get_parent().set_tooltip_text(detail)
+                masked = mask_egress(detail)
+                explanation.set_text(masked)
+                explanation.get_parent().set_tooltip_text(masked)
             else:
                 explanation.set_text(detail)
                 explanation.set_tooltip_text("\n".join(filter(None, (detail, BASIS.get(key)))))
@@ -680,12 +686,7 @@ class Monitor(Gtk.Application):
         self.summary.set_tooltip_text(reason or result)
         self.menu_status.set_label("最近检查：" + result)
         self.latest = {key: rows.get(key, ("unknown",))[0] for key in CHECKS}
-        try:
-            if self.config()["logging"]:
-                self.history.append(datetime.datetime.now().isoformat(timespec="seconds") + " " +
-                                    " ".join(f"{key}={state}" for key, state in self.latest.items()))
-        except (OSError, ValueError, subprocess.SubprocessError):
-            pass
+        self.record_history(self.latest)
         failed = [name for name in CHECKS if rows.get(name, ("unknown",))[0] in ("fail", "unknown")]
         brief = "、".join(failed[:3]) + (" 等" if len(failed) > 3 else "")
         self.menu_detail.set_label("需处理：" + brief if brief else "查看 14 项详情")
@@ -693,6 +694,24 @@ class Monitor(Gtk.Application):
         self.stamp.set_text(f"{now}   ·   {result}")
         if self.indicator:
             self.indicator.set_icon_full(TRAY_ICON, result)
+        return False
+
+    def record_history(self, latest):
+        # Keep subprocesses off the GTK main loop; history append returns on idle.
+        def task():
+            try:
+                logging = bool(self.config().get("logging"))
+            except (OSError, ValueError, subprocess.SubprocessError):
+                return
+            if not logging:
+                return
+            entry = datetime.datetime.now().isoformat(timespec="seconds") + " " + \
+                " ".join(f"{key}={state}" for key, state in latest.items())
+            GLib.idle_add(self.append_history, entry)
+        threading.Thread(target=task, daemon=True).start()
+
+    def append_history(self, entry):
+        self.history.append(entry)
         return False
 
     def do_shutdown(self):

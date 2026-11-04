@@ -477,14 +477,55 @@ desktop_info() {
 }
 
 # Match the current user's desktop and Code CLI, including Node/Bun CLI installs.
+# Prefer /proc so argv options, npm global symlinks and Bun installs are resolved
+# without relying on a fixed ps column.
 desktop_session_pids() {
-    ps -eo uid=,pid=,comm=,args= | awk -v uid="$(id -u)" -v kind="${1:-all}" '
-        $1 != uid {next}
-        $3 == "claude-desktop" {
-            if (kind != "cli" && (kind != "roots" || $0 !~ / --type=/)) print $2
-            next
-        }
-        $3 == "claude" || ($3 ~ /^(node|bun)$/ && $5 ~ /(^|\/)@anthropic-ai\/claude-code\/(bin\/claude|cli\.js)$/) {print $2}'
+    local kind="${1:-all}" root="${2:-/proc}" entry pid cmd0 helper arg resolved
+    local args=()
+    shopt -s nullglob
+    for entry in "$root"/[0-9]*; do
+        pid="${entry##*/}"
+        [ -r "$entry/cmdline" ] || continue
+        args=()
+        while IFS= read -r -d '' arg; do args+=("$arg"); done < "$entry/cmdline"
+        [ "${#args[@]}" -gt 0 ] || continue
+        cmd0=$(basename -- "${args[0]}")
+        helper=0
+        for arg in "${args[@]:1}"; do
+            case "$arg" in --type=*) helper=1 ;; esac
+        done
+        if [ "$cmd0" = "claude-desktop" ]; then
+            if [ "$kind" = "cli" ]; then continue; fi
+            if [ "$kind" = "roots" ] && [ "$helper" -eq 1 ]; then continue; fi
+            printf '%s\n' "$pid"
+            continue
+        fi
+        if [ "$cmd0" = "claude" ]; then
+            [ "$kind" = "roots" ] && continue
+            printf '%s\n' "$pid"
+            continue
+        fi
+        case "$cmd0" in
+            node|bun) ;;
+            *) continue ;;
+        esac
+        [ "$kind" = "roots" ] && continue
+        for arg in "${args[@]:1}"; do
+            case "$arg" in --*|-*) continue ;; esac
+            # GNU readlink resolves npm symlinks; Python realpath is the portable fallback.
+            resolved=$(command -p readlink -f -- "$arg" 2>/dev/null) || resolved=""
+            if [ -z "$resolved" ]; then
+                resolved=$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$arg" 2>/dev/null) || continue
+            fi
+            [ -e "$resolved" ] || continue
+            case "$resolved" in
+                */@anthropic-ai/claude-code/bin/claude|*/@anthropic-ai/claude-code/bin/claude.exe|*/@anthropic-ai/claude-code/cli.js)
+                    printf '%s\n' "$pid"
+                    break
+                    ;;
+            esac
+        done
+    done
 }
 
 desktop_matches_slot() {
@@ -505,12 +546,64 @@ desktop_matches_slot() {
 
 desktop_exec() {
     # Keep the GUI in its own graphical-session service when the terminal closes.
-    local opts=() key
-    for key in DISPLAY WAYLAND_DISPLAY XDG_CONFIG_HOME CLAUDE_CONFIG_DIR; do
-        [ -z "${!key:-}" ] || opts+=("--setenv=$key")
+    local slot="${CLAUDE_SWITCHER_DESKTOP_SLOT:-A}" opts=() key old_unit output unit state i
+    # A must not inherit another account's paths from the systemd manager.
+    # Explicit caller-provided account paths are preserved.
+    for key in DISPLAY WAYLAND_DISPLAY; do
+        [ -z "${!key:-}" ] || opts+=("--setenv=$key=${!key}")
     done
-    systemd-run --user --collect --quiet --service-type=exec -p StandardOutput=null -p StandardError=null \
-        "${opts[@]}" -- "$(command -v claude-desktop)" "$@"
+    for key in XDG_CONFIG_HOME CLAUDE_CONFIG_DIR; do
+        if [ -n "${!key:-}" ]; then
+            opts+=("--setenv=$key=${!key}")
+        elif [ "$slot" = A ]; then
+            opts+=("--setenv=$key=")
+        fi
+    done
+
+    old_unit=""
+    if [ -f "$BASE/desktop-unit" ]; then
+        read -r old_unit < "$BASE/desktop-unit" 2>/dev/null || old_unit=""
+        case "$old_unit" in *.service) ;; *) old_unit="" ;; esac
+    fi
+    if [ -n "$old_unit" ] && command -v systemctl >/dev/null 2>&1; then
+        state=$(systemctl --user is-active "$old_unit" 2>/dev/null) || true
+        case "$state" in
+            active|activating|reloading)
+                # systemctl stop is synchronous for user units; do not race a new start.
+                systemctl --user stop "$old_unit" || return 1
+                ;;
+        esac
+    fi
+
+    if ! output=$(systemd-run --user --collect --service-type=exec \
+            -p StandardOutput=null -p StandardError=null \
+            "${opts[@]+"${opts[@]}"}" -- "$(command -v claude-desktop)" "$@" 2>&1); then
+        printf '%s\n' "$output" >&2
+        return 1
+    fi
+    unit=$(printf '%s\n' "$output" | sed -n 's/^Running as unit: //p' | head -n 1)
+    [ -n "$unit" ] || { echo "无法获取 systemd 启动单元" >&2; return 1; }
+    printf '%s\n' "$unit" > "$BASE/desktop-unit.new" && mv -f "$BASE/desktop-unit.new" "$BASE/desktop-unit"
+    if command -v systemctl >/dev/null 2>&1; then
+        for ((i=0; i<100; i++)); do
+            state=$(systemctl --user is-active "$unit" 2>/dev/null) || true
+            case "$state" in
+                active) break ;;
+                activating|reloading) sleep 0.1 ;;
+                *)
+                    if (( i >= 20 )); then
+                        echo "桌面客户端单元未进入运行状态($state)" >&2
+                        return 1
+                    fi
+                    sleep 0.1
+                    ;;
+            esac
+        done
+        if [ "$state" != active ]; then
+            echo "桌面客户端启动等待超时" >&2
+            return 1
+        fi
+    fi
 }
 
 desktop_audit() {
@@ -551,11 +644,13 @@ desktop_open() (
     fi
     desktop_audit || return 1
     if [ "$action" = switch ]; then
-        pids=$(desktop_session_pids roots)
-        if [ -n "$pids" ] && desktop_matches_slot "$slot"; then
+        root_pids=$(desktop_session_pids roots)
+        cli_pids=$(desktop_session_pids cli)
+        if [ -n "$root_pids" ] && desktop_matches_slot "$slot"; then
             action=focus
-        elif [ -n "$pids" ]; then
-            kill -TERM $pids 2>/dev/null || true
+        elif [ -n "$root_pids$cli_pids" ]; then
+            # TERM both desktop roots and CLI; a CLI-only session must also be asked to exit.
+            kill -TERM $root_pids $cli_pids 2>/dev/null || true
             for ((i=0; i<90; i++)); do
                 [ -z "$(desktop_session_pids)" ] && break
                 if (( i >= 10 )) && [ -n "$(desktop_session_pids cli)" ]; then break; fi
@@ -567,7 +662,7 @@ desktop_open() (
         echo "会话仍在运行，已取消切换。请保存工作并完全退出 Claude 桌面版和 Code CLI。"
         return 1
     fi
-    if [ "$action" = switch ] && [ -n "${pids:-}" ]; then desktop_audit || return 1; fi
+    if [ "$action" = switch ] && [ -n "${root_pids:-}${cli_pids:-}" ]; then desktop_audit || return 1; fi
     if [ "$slot" != A ]; then
         export CLAUDE_CONFIG_DIR="$BASE/desktop/$slot/code"
         export XDG_CONFIG_HOME="$BASE/desktop/$slot/config"
