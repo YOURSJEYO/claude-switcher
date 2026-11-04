@@ -487,6 +487,11 @@ Bug 反馈和功能建议仍建议提交 Issue，便于跟踪与处理。
 
 如果这个工具让你少被封了一个号，希望有条件的佬哥能帮我们在 [Linux.do](https://linux.do) 论坛发个帖子推荐一下——仓库地址 <https://github.com/YOURSJEYO/claude-switcher>，一句话定位：**"Claude 账号的 Fail-Closed 环境保护罩：硬性安全项不过就物理上不让启动"**。让更多被风控折磨的兄弟少走弯路。
 
+## 致谢
+
+- [@XuCe](https://github.com/XuCe) —— Linux 桌面版的主体工作：GTK 监测窗口、托盘菜单、A–D 桌面槽位切换与 Claude Code 启动联动（[#40](https://github.com/YOURSJEYO/claude-switcher/pull/40)）
+- [@ArmedHelicopter](https://github.com/ArmedHelicopter) —— Windows 端 FlClash 控制端口自动发现（[#36](https://github.com/YOURSJEYO/claude-switcher/pull/36)）与深色主题 ComboBox 可见性修复（[#37](https://github.com/YOURSJEYO/claude-switcher/pull/37)），并在 Windows 真机完成了冒烟验证
+
 ## Star History
 
 <a href="https://www.star-history.com/?repos=yoursjeyo%2Fclaude-switcher&type=timeline&legend=bottom-right">
