@@ -437,14 +437,21 @@ desktop_info() {
     fi
 }
 
+# Match the current user's desktop and Code CLI, including Node/Bun CLI installs.
+desktop_session_pids() {
+    ps -eo uid=,pid=,comm=,args= | awk -v uid="$(id -u)" '
+        $1 == uid && ($3 == "claude-desktop" || $3 == "claude" ||
+        ($3 ~ /^(node|bun)$/ && $5 ~ /(^|\/)@anthropic-ai\/claude-code\/(bin\/claude|cli\.js)$/)) { print $2 }'
+}
+
 desktop_open() (
-    local slot="${1:-A}" report name
-    case "$slot" in A|B) ;; *) echo "桌面槽位必须是 A 或 B"; return 2 ;; esac
+    local slot="${1:-A}" action="${2:-open}" report name pid pids i
+    case "$slot" in A|B|C|D) ;; *) echo "桌面槽位必须是 A、B、C 或 D"; return 2 ;; esac
     command -v claude-desktop >/dev/null || { echo "请先安装带有 Code 入口的 claude-desktop"; return 1; }
     exec 9>"$BASE/desktop.lock" || return 1
-    flock -n 9 || { echo "桌面启动正在进行，请先退出已有会话"; return 1; }
-    if pgrep -u "$(id -u)" -x claude-desktop >/dev/null; then
-        echo "请先完全退出 Claude 桌面客户端，再选择槽位"
+    flock -n 9 || { echo "已有账号切换正在进行，请稍后重试"; return 1; }
+    if [ "$action" = open ] && [ -n "$(desktop_session_pids)" ]; then
+        echo "请先完全退出 Claude 桌面客户端和 Code CLI，或使用界面切换"
         return 1
     fi
     report=$(checkdetail) || return 1
@@ -452,16 +459,38 @@ desktop_open() (
     for name in 代理内核 TUN网卡 出口IP IP一致 时区 地区 IPv6 DNS WebRTC 保镖 规则置顶 客户端语言 ASN属性 生态可达性; do
         grep -Eq "^${name}=(ok|warn)(:|$)" <<< "$report" || { echo "启动已阻止：$name 未通过"; return 1; }
     done
-    if [ "$slot" = B ]; then
-        umask 077
-        export CLAUDE_CONFIG_DIR="$BASE/desktop/B/code"
-        export XDG_CONFIG_HOME="$BASE/desktop/B/config"
+    if [ "$action" = switch ]; then
+        pids=$(desktop_session_pids)
+        if [ -n "$pids" ]; then
+            kill -TERM $pids 2>/dev/null || true
+            for ((i=0; i<10; i++)); do
+                [ -z "$(desktop_session_pids)" ] && break
+                sleep 1
+            done
+        fi
+    fi
+    if [ -n "$(desktop_session_pids)" ]; then
+        echo "会话仍在运行，已取消切换。请保存工作并完全退出 Claude 桌面版和 Code CLI。"
+        return 1
+    fi
+    if [ "$slot" != A ]; then
+        export CLAUDE_CONFIG_DIR="$BASE/desktop/$slot/code"
+        export XDG_CONFIG_HOME="$BASE/desktop/$slot/config"
         mkdir -p "$CLAUDE_CONFIG_DIR" "$XDG_CONFIG_HOME" || return 1
-        set -- "--user-data-dir=$BASE/desktop/B/profile"
+        set -- "--user-data-dir=$BASE/desktop/$slot/profile"
     else
         set --
     fi
-    claude-desktop "$@" 'claude://code/new?source=desktop_action'
+    claude-desktop "$@" 'claude://code/new?source=desktop_action' 9>&- &
+    pid=$!
+    sleep 1
+    if ! kill -0 "$pid" 2>/dev/null; then
+        wait "$pid" || return $?
+    fi
+    printf '%s\n' "$slot" > "$BASE/desktop-last.new" && mv -f "$BASE/desktop-last.new" "$BASE/desktop-last" || return 1
+    exec 9>&-
+    wait "$pid"
+
 )
 
 menu() {
@@ -479,6 +508,8 @@ menu() {
         echo "  5) 查看状态 (status)"
         echo "  6) 打开 Claude Code 桌面版 (A，现有配置)"
         echo "  7) 打开 Claude Code 桌面版 (B，独立配置)"
+        echo "  8) 打开 Claude Code 桌面版 (C，独立配置)"
+        echo "  9) 打开 Claude Code 桌面版 (D，独立配置)"
         echo "  0) 退出"
         echo ""
         read -r -p "选择: " c || return
@@ -488,7 +519,7 @@ menu() {
             3) switch_to A; read -r -p "回车继续..." _ ;;
             4) switch_to B; read -r -p "回车继续..." _ ;;
             5) status; read -r -p "回车继续..." _ ;;
-            6|7) if [ "$c" = 6 ]; then desktop_open A; else desktop_open B; fi; read -r -p "回车继续..." _ ;;
+            6|7|8|9) slots=(A B C D); desktop_open "${slots[c-6]}" switch; read -r -p "回车继续..." _ ;;
             0) exit 0 ;;
         esac
     done
@@ -499,10 +530,11 @@ case "${1:-menu}" in
     checkdetail) OUT="$BASE/last-check.txt"; { checkdetail; } > "$OUT" 2>&1; cat "$OUT" ;;
     desktop-info) desktop_info ;;
     desktop) desktop_open "${2:-A}" ;;
+    desktop-switch) desktop_open "${2:?请选择桌面槽位 A/B/C/D}" switch ;;
     status) status ;;
     fix) fix ;;
     switch) case "${2:-}" in A|B) switch_to "$2" ;; *) echo "槽位必须是 A 或 B"; exit 2 ;; esac ;;
     write-merge-rules) write_merge_rules ;;  # 隐藏入口:供安装器调用,保证两处合并逻辑一致
     menu) menu ;;
-    *) echo "用法: claude-switch.sh checkdetail|status|fix|switch A|B|desktop [A|B]|desktop-info|menu"; exit 2 ;;
+    *) echo "用法: claude-switch.sh checkdetail|status|fix|switch A|B|desktop [A|B|C|D]|desktop-switch A|B|C|D|desktop-info|menu"; exit 2 ;;
 esac

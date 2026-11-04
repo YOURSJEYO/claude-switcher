@@ -8,9 +8,9 @@
    ```bash
    claude-switch desktop-info
    claude-switch desktop A    # 使用客户端现有配置
-   claude-switch desktop B    # 使用独立的 Electron、XDG 与 Claude Code 配置目录
+   claude-switch desktop C    # B、C、D 各自使用独立的 Electron、XDG 与 Claude Code 配置目录
    ```
-   启动前须完全退出已有桌面实例并通过环境检查。B 首次使用请核对登录账号；客户端版本、系统密钥环和内置 Code 对配置目录的处理可能不同。代理离线时保镖会请求关闭当前用户的 claude-desktop 进程。
+   使用上述 desktop 命令时须先退出已有桌面实例及 Code CLI。B、C、D 首次使用时分别登录并核对账号；客户端版本、系统密钥环和内置 Code 对配置目录的处理可能不同。代理离线时保镖会请求关闭当前用户的 claude-desktop 进程。
 2. **浏览器模式**：`switch A|B` 切换 Chrome/Chromium 浏览器资料，与桌面槽位分开。
 3. **常驻服务用 systemd 用户单元**——免 root、登录自启、崩溃自动拉起
 
@@ -31,7 +31,7 @@
 
 在 `linux/` 目录运行 `bash install-monitor.sh` 即可安装当前用户的监测应用。打开应用菜单或桌面上的「Claude 切换器」。Linux 完整安装器也会安装此界面。窗口读取原有的 14 项环境检查，列出通过、警告、失败与缺失结果；每两分钟自动刷新，也可手动重新检查。完整保护尚未配置时，界面注明独立监测与默认参考目标（US / America/New_York / en_US）。
 
-窗口中的「时区」按 timedatectl 的有效时区检查；「地区格式」优先检查 GNOME 地区设置。右上角信息按钮提供两项判定说明。账号 A/B 卡片调用原有的桌面启动命令并重新安检。
+窗口中的「时区」按 timedatectl 的有效时区检查；「地区格式」优先检查 GNOME 地区设置。右上角信息按钮提供两项判定说明。账号 A–D 按两行排列。点击卡片（或运行 `claude-switch desktop-switch C`）先重新安检，通过后请求当前用户的 Claude 桌面版与 Code CLI 退出，再启动目标账号。请先保存当前工作；10 秒后仍有进程时会取消切换。高亮表示最近启动的槽位。
 
 点击盾牌托盘图标会弹出摘要和待处理项目，选择「打开监测窗口」查看详情。托盘连接时，关闭窗口后仍会监测；从托盘或窗口选择「退出」结束本次运行。下次登录桌面自动驻留。
 
@@ -84,7 +84,7 @@ claude-switch switch A      # 切到账号A(切换浏览器登录态)
 
 | 项目 | Linux 版 |
 |---|---|
-| 账号切换对象 | 桌面客户端 A/B 配置，或 Chrome/Chromium 浏览器配置目录 |
+| 账号切换对象 | 桌面客户端 A–D 配置，或 Chrome/Chromium 浏览器配置目录 |
 | 保镖保护对象 | `claude` CLI 与当前用户的 `claude-desktop` 进程 |
 | 常驻方式 | systemd 用户服务(免 root) |
 | 界面 | GTK 监测窗口、盾牌托盘、终端菜单与 CLI |

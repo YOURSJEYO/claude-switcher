@@ -93,7 +93,7 @@ class Monitor(Gtk.Application):
 
     def build(self):
         self.window = Gtk.ApplicationWindow(application=self, title="Claude 切换器 · Linux")
-        self.window.set_default_size(520, 810)
+        self.window.set_default_size(520, 885)
         self.window.connect("delete-event", self.hide_window)
         styled(self.window, "monitor")
         css = Gtk.CssProvider()
@@ -153,16 +153,20 @@ class Monitor(Gtk.Application):
         slots = styled(Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6), "card")
         body.add(slots)
         slots.add(styled(Gtk.Label(label="桌面账号", xalign=0, margin_top=4), "section"))
-        buttons = Gtk.Box(spacing=8, homogeneous=True, margin_bottom=5)
+        buttons = Gtk.Grid(column_spacing=8, row_spacing=8, column_homogeneous=True, margin_bottom=5)
+        self.slot_buttons = {}
         slots.add(buttons)
-        for slot, hint in (("A", "现有配置"), ("B", "独立配置")):
+        for i, slot in enumerate("ABCD"):
+            hint = "现有配置" if slot == "A" else "独立配置"
             button = styled(Gtk.Button(label=f"账号 {slot}\n{hint}"), "slot")
-            if slot == "A":
-                styled(button, "primary")
             button.set_sensitive(self.core == installed)
-            button.set_tooltip_text(f"重新安检并启动账号 {slot}")
+            button.set_tooltip_text(f"通过安检后退出当前 Claude 桌面与 Code CLI 会话，并启动账号 {slot}")
             button.connect("clicked", self.open_slot, slot)
-            buttons.add(button)
+            buttons.attach(button, i % 2, i // 2, 1, 1)
+            self.slot_buttons[slot] = button
+        self.last_slot = None
+        self.update_slots()
+        GLib.timeout_add_seconds(2, self.update_slots)
         footer = Gtk.Box(spacing=8)
         body.add(footer)
         self.stamp = styled(Gtk.Label(xalign=0), "secondary")
@@ -199,9 +203,27 @@ class Monitor(Gtk.Application):
         dialog.run()
         dialog.destroy()
 
+    def update_slots(self):
+        try:
+            slot = (BASE / "desktop-last").read_text().strip()
+        except OSError:
+            slot = ""
+        if slot != self.last_slot:
+            self.last_slot = slot
+            for key, button in self.slot_buttons.items():
+                style = button.get_style_context()
+                hint = "现有配置" if key == "A" else "独立配置"
+                if key == slot:
+                    style.add_class("primary")
+                    hint = "最近启动"
+                else:
+                    style.remove_class("primary")
+                button.set_label(f"账号 {key}\n{hint}")
+        return True
+
     def open_slot(self, _, slot):
         # The terminal preserves the core's refusal message and normal launch checks.
-        script = 'bash "$1" desktop "$2" || read -r -p "按回车关闭…"'
+        script = 'bash "$1" desktop-switch "$2" || read -r -p "按回车关闭…"'
         args = ("bash", "-c", script, "claude-switch", str(self.core), slot)
         try:
             app = Gio.AppInfo.create_from_commandline(" ".join(GLib.shell_quote(arg) for arg in args),
