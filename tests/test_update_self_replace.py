@@ -1,22 +1,9 @@
-"""update 自替换必须原子化，避免运行中的 bash 从被覆盖的脚本里解析到半截语句。
-
-回归背景：self_update 早期用 `cp 新版本 $BIN/claude-switch.sh` 原地覆盖目标文件。
-正在运行 update 的 bash 持有该脚本的 fd，执行完 update 分支后还要按字节偏移继续读
-后续语句（`rc=$?`、结果日志、`exit`），而 cp 截断重写同一 inode 后，偏移处已是新文件
-中间的内容，于是出现"更新成功"后紧跟 `syntax error near unexpected token ...` /
-`xxx: unbound variable`，退出码变 2、结果日志丢失（见 ~/.claude-switcher/update.log）。
-修复方式：写同目录临时文件后 rename 覆盖，运行中的 bash 继续读旧 inode。
-
-本文件两层覆盖：
-1) 静态断言：self_update 必须经 install_staged（临时文件 + chmod + rename）落盘，
-   不允许再出现 cp 直接覆盖 $BIN/claude-switch.sh；
-2) 流程冒烟：假 curl 提供"远端"工件（新核心 + 对应 SHA256SUMS），在隔离 HOME 里跑真实
-   `update` 入口，断言退出码不是解析失败码 2、尾部语句执行（结果日志落盘）、落盘脚本可解析。
-"""
+"""update 自替换必须暂存完整候选脚本，再原子发布并可靠回滚。"""
 
 import hashlib
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -24,8 +11,15 @@ import unittest
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = ROOT / "core/claude-switch.sh"
+SOURCE = Path(os.environ.get("CLAUDE_SWITCHER_TEST_SOURCE", ROOT / "core/claude-switch.sh"))
 MARK = "\n# local marker: 强制走真实替换分支(与远端工件不同)\n"
+CONFIG = {
+    "PROXY_MODE": "clash-verge",
+    "PROXY_GROUP": "隔离测试组",
+    "COUNTRY_TARGET": "JP",
+    "TZ_TARGET": "Asia/Tokyo",
+    "LOCALE_TARGET": "ja_JP",
+}
 
 CURL_STUB = """#!/bin/bash
 url=""
@@ -39,11 +33,34 @@ while [ $# -gt 0 ]; do
 done
 [ -n "$out" ] || exit 0
 case "$url" in
-  *SHA256SUMS*) cp "__SUMS__" "$out" ;;
-  *codeload*) cp "__ZIP__" "$out" ;;
+  *SHA256SUMS*) /bin/cp "__SUMS__" "$out" ;;
+  *codeload*) /bin/cp "__ZIP__" "$out" ;;
   *) : >"$out" ;;
 esac
 exit 0
+"""
+
+COMMAND_STUB = """#!/bin/bash
+name="$(basename "$0")"
+{
+  printf '%s' "$name"
+  printf ' %s' "$@"
+  printf '\\n'
+} >> "$UPDATE_TRACE"
+if [ "$name" = cp ]; then
+  eval 'src="${'$(($# - 1))'}"; dst="${'$#'}"'
+  if [ "${UPDATE_FAIL_BACKUP:-0}" = 1 ] && [[ "$dst" = *.bak ]]; then
+    exit 1
+  fi
+  if [ "${UPDATE_FAIL_ROLLBACK:-0}" = 1 ] && [[ "$src" = *.bak ]]; then
+    exit 1
+  fi
+fi
+case "$name" in
+  cp) exec /bin/cp "$@" ;;
+  mv) exec /bin/mv "$@" ;;
+  *) exec "/usr/bin/$name" "$@" ;;
+esac
 """
 
 
@@ -55,20 +72,36 @@ class UpdateSelfReplaceTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         root = Path(self.tmp.name)
 
-        # 已安装版本：核心脚本 + 标记行（保证与远端工件不同，走替换分支）
         self.home = root / "home"
         self.bin = self.home / ".local" / "bin"
         self.bin.mkdir(parents=True)
         self.core = self.bin / "claude-switch.sh"
         core_text = SOURCE.read_text(encoding="utf-8")
-        self.core.write_text(core_text + MARK, encoding="utf-8")
+        for key, value in CONFIG.items():
+            core_text = re.sub(r'^%s="[^"]*"' % key, '%s="%s"' % (key, value),
+                               core_text, count=1, flags=re.MULTILINE)
+        self.original = (core_text + MARK).encode()
+        self.core.write_bytes(self.original)
         self.core.chmod(0o755)
 
-        # 远端工件：新核心 + 只含该文件的 SHA256SUMS（self_update 逐项校验）
         pkg = root / "pkg"
         (pkg / "core").mkdir(parents=True)
         remote_core = pkg / "core" / "claude-switch.sh"
-        remote_core.write_text(core_text, encoding="utf-8")
+        self_check = r'''
+checkdetail() {
+    : > "$HOME/self-check-ran"
+    case "${UPDATE_TEST_SELF_CHECK:-fail}" in
+        pass) echo "forced=ok"; return 0 ;;
+        nonzero) echo "forced=ok"; return 1 ;;
+        *) echo "forced=fail"; return 1 ;;
+    esac
+}
+'''
+        padding = "".join("# remote padding %04d %s\n" % (i, "x" * 72) for i in range(400))
+        remote_text = core_text.replace('operation="${1:-}"',
+                                        padding + self_check + 'operation="${1:-}"', 1)
+        self.assertNotEqual(remote_text, core_text)
+        remote_core.write_text(remote_text, encoding="utf-8")
         sums = pkg / "SHA256SUMS"
         sums.write_text(
             "%s  core/claude-switch.sh\n" % hashlib.sha256(remote_core.read_bytes()).hexdigest(),
@@ -85,42 +118,96 @@ class UpdateSelfReplaceTests(unittest.TestCase):
             CURL_STUB.replace("__SUMS__", str(sums)).replace("__ZIP__", str(self.zip_path)),
             encoding="utf-8")
         curl.chmod(0o755)
+        for name in ("cp", "mv", "sed"):
+            stub = stubs / name
+            stub.write_text(COMMAND_STUB, encoding="utf-8")
+            stub.chmod(0o755)
 
+        self.trace = root / "commands.log"
+        self.trace.write_text("", encoding="utf-8")
         self.env = dict(os.environ, HOME=str(self.home),
                         PATH="%s:/usr/bin:/bin:/usr/sbin:/sbin" % stubs,
-                        CLAUDE_SWITCHER_PYTHON=sys.executable, PYTHONUTF8="1")
+                        CLAUDE_SWITCHER_PYTHON=sys.executable, PYTHONUTF8="1",
+                        UPDATE_TRACE=str(self.trace))
 
-    def test_self_update_replaces_core_via_staged_rename(self):
-        """静态防回归：不能用 cp 原地覆盖正在执行的脚本（会从半截内容解析）。"""
+    def run_update(self, self_check="fail", fail_backup=False, fail_rollback=False):
+        self.env.update(UPDATE_TEST_SELF_CHECK=self_check,
+                        UPDATE_FAIL_BACKUP="1" if fail_backup else "0",
+                        UPDATE_FAIL_ROLLBACK="1" if fail_rollback else "0")
+        return subprocess.run(["/bin/bash", str(self.core), "update"], env=self.env,
+                              text=True, encoding="utf-8", capture_output=True, timeout=300)
+
+    def operations(self, name):
+        return [line for line in self.trace.read_text(encoding="utf-8").splitlines()
+                if line.startswith(name + " ")]
+
+    def assert_original_restored(self):
+        self.assertEqual(self.core.read_bytes(), self.original)
+        self.assertEqual((self.bin / "claude-switch.sh.bak").read_bytes(), self.original)
+        self.assertEqual(subprocess.run(["/bin/bash", "-n", str(self.core)]).returncode, 0)
+
+    def assert_result_logged(self):
+        log = self.home / "Library" / "Logs" / "claude-switcher" / "client.log"
+        self.assertTrue(log.exists(), "结果日志未生成，说明 update 尾部语句被跳过")
+        self.assertIn("command=update", log.read_text(encoding="utf-8"))
+
+    def test_self_update_uses_staged_rename(self):
         text = SOURCE.read_text(encoding="utf-8")
         self.assertTrue("install_staged() {" in text, "缺少原子落盘助手 install_staged")
         body = text.split("self_update() {", 1)[1]
-        self.assertFalse('cp "$NEW/core/claude-switch.sh" "$BIN/claude-switch.sh"' in body,
-                         "self_update 仍在用 cp 原地覆盖正在执行的核心脚本")
-        self.assertTrue('install_staged "$NEW/core/claude-switch.sh" "$BIN/claude-switch.sh"' in body,
-                        "self_update 未通过 install_staged 落盘")
-        # install_staged 自身必须是"写临时文件 → chmod → rename"的顺序
+        self.assertNotRegex(body, r'cp "\$NEW/core/claude-switch\.sh" "\$BIN/claude-switch\.sh"')
+        self.assertIn('install_staged "$candidate" "$BIN/claude-switch.sh"', body,
+                      "完整候选脚本必须通过一次 install_staged 发布")
         helper = text.split("install_staged() {", 1)[1].split("\n}\n", 1)[0]
         self.assertIn("mv -f", helper, "install_staged 未使用 rename 覆盖")
         self.assertLess(helper.index("cp "), helper.index("mv -f"))
 
-    def test_update_does_not_parse_truncated_self(self):
-        run = subprocess.run(["/bin/bash", str(self.core), "update"], env=self.env,
-                             text=True, encoding="utf-8", capture_output=True, timeout=300)
-        stderr = run.stderr
-        # 自替换后不得再从被覆盖的脚本里解析出半截语句
-        self.assertNotIn("syntax error", stderr)
-        self.assertNotIn("unbound variable", stderr)
-        # 隔离环境里自检必然不通过 → 回滚并返回 1；解析坏掉时是 2
-        self.assertIn(run.returncode, (0, 1),
-                      "update 退出码异常：%s（stderr 前 500 字：%s）"
-                      % (run.returncode, stderr[:500]))
-        # 尾部语句必须真的执行：结果日志里应有本次 update 记录
-        log = self.home / "Library" / "Logs" / "claude-switcher" / "client.log"
-        self.assertTrue(log.exists(), "结果日志未生成，说明尾部语句被跳过：%s" % stderr[:500])
-        self.assertIn("command=update", log.read_text(encoding="utf-8"))
-        # 落盘脚本必须是完整可解析的版本
-        self.assertEqual(subprocess.run(["/bin/bash", "-n", str(self.core)]).returncode, 0)
+    def test_success_publishes_configured_candidate_once(self):
+        run = self.run_update(self_check="pass")
+        self.assertEqual(run.returncode, 0, run.stderr + run.stdout)
+        installed = self.core.read_text(encoding="utf-8")
+        for key, value in CONFIG.items():
+            self.assertIn('%s="%s"' % (key, value), installed)
+        self.assertEqual((self.bin / "claude-switch.sh.bak").read_bytes(), self.original)
+        self.assertTrue((self.home / "self-check-ran").exists())
+        publishes = [line for line in self.operations("mv")
+                     if line.endswith(" " + str(self.core))]
+        self.assertEqual(len(publishes), 1, publishes)
+        self.assertEqual([line for line in self.operations("sed")
+                          if line.endswith(" " + str(self.core))], [])
+        self.assert_result_logged()
+
+    def test_failed_self_check_restores_original_and_logs_result(self):
+        run = self.run_update()
+        self.assertEqual(run.returncode, 1, run.stderr + run.stdout)
+        self.assertIn("已自动回滚", run.stdout)
+        self.assertTrue((self.home / "self-check-ran").exists(), "未进入更新后自检路径")
+        self.assert_original_restored()
+        self.assert_result_logged()
+
+    def test_nonzero_self_check_without_fail_text_restores_original(self):
+        run = self.run_update(self_check="nonzero")
+        self.assertEqual(run.returncode, 1, run.stderr + run.stdout)
+        self.assertTrue((self.home / "self-check-ran").exists(), "未进入更新后自检路径")
+        self.assert_original_restored()
+
+    def test_backup_failure_aborts_before_publish_or_self_check(self):
+        backup = self.bin / "claude-switch.sh.bak"
+        backup.write_bytes(b"existing backup")
+        run = self.run_update(self_check="pass", fail_backup=True)
+        self.assertEqual(run.returncode, 1, run.stderr + run.stdout)
+        self.assertEqual(self.core.read_bytes(), self.original)
+        self.assertEqual(backup.read_bytes(), b"existing backup")
+        self.assertFalse((self.home / "self-check-ran").exists())
+        self.assertEqual([line for line in self.operations("mv")
+                          if line.endswith(" " + str(self.core))], [])
+
+    def test_rollback_failure_is_not_reported_as_rolled_back(self):
+        run = self.run_update(fail_rollback=True)
+        self.assertEqual(run.returncode, 1, run.stderr + run.stdout)
+        self.assertIn("回滚失败", run.stdout)
+        self.assertNotIn("已自动回滚", run.stdout)
+        self.assertNotEqual(self.core.read_bytes(), self.original)
 
 
 if __name__ == "__main__":

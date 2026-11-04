@@ -1868,23 +1868,33 @@ self_update() {
         rm -rf "$tmpd"; return 0
     fi
 
-    # 备份现有核心脚本
-    [ -f "$BIN/claude-switch.sh" ] && cp "$BIN/claude-switch.sh" "$BIN/claude-switch.sh.bak"
-
-    # 替换核心脚本 + 从 .bak 读出5个配置值注入新脚本(必须原子替换,原因见 install_staged 注释)
-    if ! install_staged "$NEW/core/claude-switch.sh" "$BIN/claude-switch.sh"; then
-        echo "FAIL:写入核心脚本失败,已中止"; rm -rf "$tmpd"; return 1
+    # 备份现有核心脚本；备份失败必须中止，不能用损坏/缺失备份继续更新
+    if [ -f "$BIN/claude-switch.sh" ] && ! cp "$BIN/claude-switch.sh" "$BIN/claude-switch.sh.bak"; then
+        echo "FAIL:备份现有核心脚本失败,已中止"; rm -rf "$tmpd"; return 1
     fi
+
+    # 先在临时目录注入配置，再一次性原子发布完整候选脚本。
+    # 不要先发布默认脚本再 sed 正式路径：并发读取/信号中断会看到默认或半配置版本。
+    candidate="$NEW/core/claude-switch.sh"
     PM=""; PG=""; CT=""; TZV=""; LCT=""
     if [ -f "$BIN/claude-switch.sh.bak" ]; then
         get_cfg() { grep "^$1=\"" "$BIN/claude-switch.sh.bak" | head -1 | cut -d'"' -f2; }
         PM=$(get_cfg PROXY_MODE); PG=$(get_cfg PROXY_GROUP); CT=$(get_cfg COUNTRY_TARGET)
         TZV=$(get_cfg TZ_TARGET); LCT=$(get_cfg LOCALE_TARGET)
-        inject_cfg() { grep -q "^$1=\"" "$BIN/claude-switch.sh.bak" && sed -i '' "s|^$1=\".*\"|$1=\"$2\"|" "$BIN/claude-switch.sh"; }
-        inject_cfg PROXY_MODE "$PM"; inject_cfg PROXY_GROUP "$PG"; inject_cfg COUNTRY_TARGET "$CT"
-        inject_cfg TZ_TARGET "$TZV"; inject_cfg LOCALE_TARGET "$LCT"
+        inject_cfg() {
+            grep -q "^$1=\"" "$BIN/claude-switch.sh.bak" || return 0
+            sed -i '' "s|^$1=\".*\"|$1=\"$2\"|" "$candidate" || return 1
+            grep -q "^$1=\"$2\"" "$candidate" || return 1
+        }
+        inject_cfg PROXY_MODE "$PM" && inject_cfg PROXY_GROUP "$PG" \
+            && inject_cfg COUNTRY_TARGET "$CT" && inject_cfg TZ_TARGET "$TZV" \
+            && inject_cfg LOCALE_TARGET "$LCT" || {
+                echo "FAIL:配置注入失败,已中止"; rm -rf "$tmpd"; return 1
+            }
     fi
-    chmod +x "$BIN/claude-switch.sh"
+    if ! install_staged "$candidate" "$BIN/claude-switch.sh"; then
+        echo "FAIL:写入核心脚本失败,已中止"; rm -rf "$tmpd"; return 1
+    fi
 
     # 守护进程脚本(root 所有,用户态不可写):与远程模板比对,有差异只提示不自动改
     APPDIR="/Library/Application Support/claude-switcher"
@@ -1901,15 +1911,24 @@ self_update() {
     rm -rf "$tmpd"
 
     # 更新后自检:root(旧版 LaunchDaemon)下切回真实用户执行,避免 defaults 读到 root 的配置
+    check_rc=0
     if [ "$(id -u)" -eq 0 ]; then
         owner=$(stat -f '%Su' "$UHOME" 2>/dev/null)
-        if [ -n "$owner" ]; then out=$(sudo -H -u "$owner" "$BIN/claude-switch.sh" checkdetail 2>&1); else out=""; fi
+        if [ -n "$owner" ]; then out=$(sudo -H -u "$owner" "$BIN/claude-switch.sh" checkdetail 2>&1) || check_rc=$?; else out=""; check_rc=1; fi
     else
-        out=$("$BIN/claude-switch.sh" checkdetail 2>&1)
+        out=$("$BIN/claude-switch.sh" checkdetail 2>&1) || check_rc=$?
     fi
-    if [ -z "$out" ] || echo "$out" | grep -q '=fail'; then
-        [ -f "$BIN/claude-switch.sh.bak" ] && install_staged "$BIN/claude-switch.sh.bak" "$BIN/claude-switch.sh"
-        echo "FAIL:新版自检未通过,已自动回滚"
+    if [ "$check_rc" -ne 0 ] || [ -z "$out" ] || echo "$out" | grep -q '=fail'; then
+        if [ -f "$BIN/claude-switch.sh.bak" ]; then
+            if ! install_staged "$BIN/claude-switch.sh.bak" "$BIN/claude-switch.sh"; then
+                echo "FAIL:新版自检未通过,回滚失败;请从 $BIN/claude-switch.sh.bak 手动恢复"
+                return 1
+            fi
+            echo "FAIL:新版自检未通过,已自动回滚"
+        else
+            rm -f "$BIN/claude-switch.sh"
+            echo "FAIL:新版自检未通过,已移除新版(无旧版可回滚)"
+        fi
         return 1
     fi
     echo "OK:更新完成 $(date '+%Y-%m-%d')"
@@ -2552,7 +2571,12 @@ case "$operation" in
     fingerprint) fingerprint ;;
     *) echo "用法: claude-switch.sh check|checkdetail|fix|status|switch A|B|C|D|set-region|set-client <mode>|update [--check|--auto]|update-check|fingerprint|snapshot-export <A|B|C|D> <file>|snapshot-import <file> <A|B|C|D>|open-safe <url>|cli-info|cli [args...]|cli-current|export-diagnostics <file>|get-check-config|set-check-config <json>|diagnose-proxy [--proxy URL|--config FILE]"; exit 2 ;;
 esac
-rc=$?
+# checkdetail 分支内部已保存返回码;其他分支取 case 的最终状态。
+# 判断本身会改变 $?，所以必须先捕获 dispatch_rc，再按操作类型落 rc。
+dispatch_rc=$?
+if [ "$operation" != "checkdetail" ]; then
+    rc=$dispatch_rc
+fi
 case "$operation" in
     get-check-config|set-check-config|export-diagnostics) ;;
     *) log_result "$started_at" "$operation" "$rc" "$summary" ;;
