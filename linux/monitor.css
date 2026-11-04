@@ -1,0 +1,21 @@
+window.monitor { background: #f7f3ee; color: #322e2a; }
+.monitor headerbar { background: #fffdfb; min-height: 30px; box-shadow: none; }
+.brand { background: #c96448; color: white; border-radius: 13px; padding: 11px; }
+.app-title { font: bold 19px serif; color: #302621; }
+.secondary { color: #6a615a; font-size: 12px; }
+.section { color: #685d55; font-weight: bold; }
+.card { background: #fffefd; color: #302a26; border: 1px solid #e7dfd8; border-radius: 14px; padding: 4px 12px; }
+.check-line { min-height: 31px; }
+.check-divider { border-bottom: 1px solid #efeae5; }
+.glyph { background: #f5f1ed; color: #746a62; border-radius: 7px; padding: 4px; }
+.check-name { font-weight: 600; }
+.detail { color: #60574f; font-size: 12px; }
+.badge { color: #315c49; background: #e1eee6; border-radius: 18px; padding: 4px 10px; font-weight: bold; }
+.badge.warn { color: #865310; background: #fff0ce; }
+.badge.fail { color: #96392f; background: #f9e4e0; }
+.badge.pending { color: #635e59; background: #eae5df; }
+.tool, .slot { background-image: none; box-shadow: none; text-shadow: none; }
+.tool { background: white; color: #60574f; border: 1px solid #e7dfd8; border-radius: 9px; padding: 5px; }
+.slot { background: #f6f2ed; color: #4a3b34; border: 1px solid #e8dfd8; border-radius: 12px; padding: 9px; }
+.slot.primary { background: #c56348; color: white; border-color: #b95b42; }
+.tool:hover, .slot:hover { border-color: #ae765f; }

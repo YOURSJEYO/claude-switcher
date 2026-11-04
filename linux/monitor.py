@@ -13,7 +13,8 @@ import gi
 
 gi.Repository.get_default().prepend_search_path(str(Path.home() / ".local/lib/girepository-1.0"))
 gi.require_version("Gtk", "3.0")
-from gi.repository import Gio, GLib, Gtk
+gi.require_version("Gdk", "3.0")
+from gi.repository import Gdk, Gio, GLib, Gtk, Pango
 
 try:
     gi.require_version("AyatanaAppIndicator3", "0.1")
@@ -42,6 +43,25 @@ def parse_report(output):
         if key in CHECKS and state in STATES and key not in rows:
             rows[key] = state, PRIVACY.sub("•••", detail)
     return rows
+
+
+DISPLAY_NAMES = ("代理内核", "TUN 网卡", "出口 IP", "IP 与上次一致", "时区", "地区格式", "IPv6 关闭",
+                 "DNS 走隧道", "WebRTC", "保镖在线", "规则置顶", "客户端语言", "ASN 属性", "生态可达性")
+ICONS = ("system-run", "network-wired", "network-server", "emblem-ok", "appointment-soon",
+         "preferences-desktop-locale", "changes-prevent", "edit-find", "network-wireless",
+         "security-high", "view-list", "preferences-desktop-font", "network-workgroup", "network-transmit-receive")
+BASIS = {"时区": "原脚本读取 timedatectl 的 Timezone，与安装时的 TZ_TARGET 比较。此项不读取 /etc/timezone。",
+         "地区": "原脚本优先使用 GNOME 地区格式；未设置时使用 LANG，与 LOCALE_TARGET 匹配。"}
+
+
+def styled(widget, *classes):
+    for cls in classes:
+        widget.get_style_context().add_class(cls)
+    return widget
+
+
+def icon(name, size=Gtk.IconSize.MENU):
+    return Gtk.Image.new_from_icon_name(name + "-symbolic", size)
 
 
 class Monitor(Gtk.Application):
@@ -73,46 +93,83 @@ class Monitor(Gtk.Application):
 
     def build(self):
         self.window = Gtk.ApplicationWindow(application=self, title="Claude 切换器 · Linux")
-        self.window.set_default_size(500, 640)
+        self.window.set_default_size(520, 810)
         self.window.connect("delete-event", self.hide_window)
-        header = Gtk.HeaderBar(title="Claude 切换器", subtitle="Linux Desktop Beta", show_close_button=True)
-        self.window.set_titlebar(header)
-        self.button = Gtk.Button(label="重新检查")
-        self.button.connect("clicked", self.refresh)
-        header.pack_end(self.button)
-        body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10, margin=18)
-        self.window.add(body)
-        title = Gtk.Label(xalign=0)
-        title.set_markup('<span size="x-large" weight="bold">环境监测</span>')
-        body.pack_start(title, False, False, 0)
-        self.summary = Gtk.Label(xalign=0)
-        body.pack_start(self.summary, False, False, 0)
-        installed = BASE / "claude-switch.sh"
-        self.core = installed if installed.is_file() else Path(__file__).with_name("claude-switch.sh")
-        distro = GLib.get_os_info("PRETTY_NAME") or "Linux"
-        mode = "已配置核心" if self.core == installed else "独立监测 · 参考目标 US / 纽约 · 保护未配置"
-        body.pack_start(Gtk.Label(label=f"{distro}   ·   {mode}", xalign=0), False, False, 0)
+        styled(self.window, "monitor")
+        css = Gtk.CssProvider()
+        css.load_from_path(str(Path(__file__).with_name("monitor.css")))
+        Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+        self.window.set_titlebar(Gtk.HeaderBar(show_close_button=True))
         scroll = Gtk.ScrolledWindow()
         scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        body.pack_start(scroll, True, True, 0)
-        grid = Gtk.Grid(column_spacing=18, row_spacing=10, margin=12)
-        scroll.add(grid)
+        self.window.add(scroll)
+        body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10, margin=15)
+        scroll.add(body)
+        brand = Gtk.Box(spacing=10)
+        body.pack_start(brand, False, False, 0)
+        brand.pack_start(styled(icon("security-high", Gtk.IconSize.LARGE_TOOLBAR), "brand"), False, False, 0)
+        titles = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, valign=Gtk.Align.CENTER)
+        titles.add(styled(Gtk.Label(label="Claude 账号切换器", xalign=0), "app-title"))
+        titles.add(styled(Gtk.Label(label="安全检查 · 切换 · 启动", xalign=0), "secondary"))
+        brand.pack_start(titles, True, True, 0)
+        self.button = styled(Gtk.Button(image=icon("view-refresh")), "tool")
+        self.button.set_tooltip_text("重新运行 14 项检查")
+        self.button.connect("clicked", self.refresh)
+        brand.pack_start(self.button, False, False, 0)
+        about = styled(Gtk.Button(image=icon("help-about")), "tool")
+        about.set_tooltip_text("查看时区与地区的判定依据")
+        about.connect("clicked", self.show_basis)
+        brand.pack_end(about, False, False, 0)
+        heading = Gtk.Box()
+        body.add(heading)
+        heading.pack_start(styled(Gtk.Label(label="环境检查"), "section"), False, False, 0)
+        self.summary = styled(Gtk.Label(), "badge", "pending")
+        heading.pack_end(self.summary, False, False, 0)
+        installed = BASE / "claude-switch.sh"
+        self.core = installed if installed.is_file() else Path(__file__).with_name("claude-switch.sh")
+        table = styled(Gtk.Box(orientation=Gtk.Orientation.VERTICAL), "card")
+        body.add(table)
         self.labels = {}
-        for i, key in enumerate(CHECKS):
-            name = Gtk.Label(label=key, xalign=0)
-            state = Gtk.Label(label="待检查", xalign=0)
-            detail = Gtk.Label(xalign=0, hexpand=True, wrap=True)
-            grid.attach(name, 0, i, 1, 1)
-            grid.attach(state, 1, i, 1, 1)
-            grid.attach(detail, 2, i, 1, 1)
+        for key, name, glyph in zip(CHECKS, DISPLAY_NAMES, ICONS):
+            line = styled(Gtk.Box(spacing=9), "check-line")
+            if key != CHECKS[-1]:
+                styled(line, "check-divider")
+            table.add(line)
+            line.pack_start(styled(icon(glyph), "glyph"), False, False, 0)
+            line.pack_start(styled(Gtk.Label(label=name), "check-name"), False, False, 0)
+            detail = styled(Gtk.Label(xalign=1, hexpand=True), "detail")
+            detail.set_ellipsize(Pango.EllipsizeMode.END)
+            detail.set_width_chars(8)
+            line.pack_start(detail, True, True, 0)
+            state = Gtk.Label(label="·", width_chars=2)
+            line.pack_end(state, False, False, 0)
             self.labels[key] = state, detail
-        footer = Gtk.Box(spacing=12)
-        body.pack_start(footer, False, False, 0)
-        self.stamp = Gtk.Label(label="每 2 分钟自动检查", xalign=0, hexpand=True)
+        proxy = styled(Gtk.Box(spacing=9, margin_top=2), "card", "check-line")
+        proxy.pack_start(styled(icon("network-server"), "glyph"), False, False, 0)
+        proxy.pack_start(Gtk.Label(label="代理客户端"), False, False, 0)
+        self.proxy = styled(Gtk.Label(label="检查中"), "detail")
+        proxy.pack_end(self.proxy, False, False, 0)
+        body.add(proxy)
+        slots = styled(Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6), "card")
+        body.add(slots)
+        slots.add(styled(Gtk.Label(label="桌面账号", xalign=0, margin_top=4), "section"))
+        buttons = Gtk.Box(spacing=8, homogeneous=True, margin_bottom=5)
+        slots.add(buttons)
+        for slot, hint in (("A", "现有配置"), ("B", "独立配置")):
+            button = styled(Gtk.Button(label=f"账号 {slot}\n{hint}"), "slot")
+            if slot == "A":
+                styled(button, "primary")
+            button.set_sensitive(self.core == installed)
+            button.set_tooltip_text(f"重新安检并启动账号 {slot}")
+            button.connect("clicked", self.open_slot, slot)
+            buttons.add(button)
+        footer = Gtk.Box(spacing=8)
+        body.add(footer)
+        self.stamp = styled(Gtk.Label(xalign=0), "secondary")
         footer.pack_start(self.stamp, True, True, 0)
-        quit_button = Gtk.Button(label="退出")
-        quit_button.connect("clicked", lambda *_: self.quit())
-        footer.pack_end(quit_button, False, False, 0)
+        footer.pack_end(styled(Gtk.Label(label="Linux Desktop Beta"), "secondary"), False, False, 0)
+        if self.core != installed:
+            body.add(Gtk.Label(label="独立监测 · 完整保护尚未配置"))
         self.menu_status = Gtk.MenuItem(label="环境监测 · 尚未检查")
         self.menu_status.connect("activate", self.present)
         self.menu_detail = Gtk.MenuItem(label="等待首轮检查")
@@ -135,6 +192,32 @@ class Monitor(Gtk.Application):
             self.indicator.set_status(Indicator.IndicatorStatus.ACTIVE)
         body.show_all()
 
+    def show_basis(self, *_):
+        dialog = Gtk.MessageDialog(transient_for=self.window, modal=True, buttons=Gtk.ButtonsType.CLOSE,
+                                   text="时区与地区如何判断")
+        dialog.format_secondary_text("\n\n".join(BASIS.values()))
+        dialog.run()
+        dialog.destroy()
+
+    def open_slot(self, _, slot):
+        # The terminal preserves the core's refusal message and normal launch checks.
+        script = 'bash "$1" desktop "$2" || read -r -p "按回车关闭…"'
+        args = ("bash", "-c", script, "claude-switch", str(self.core), slot)
+        try:
+            app = Gio.AppInfo.create_from_commandline(" ".join(GLib.shell_quote(arg) for arg in args),
+                                                      "Claude Code", Gio.AppInfoCreateFlags.NEEDS_TERMINAL)
+            app.launch([], None)
+        except GLib.Error:
+            self.stamp.set_text("未能打开终端，请从应用菜单打开终端启动。")
+
+    def badge(self, text, tone):
+        style = self.summary.get_style_context()
+        for cls in ("pending", "warn", "fail"):
+            style.remove_class(cls)
+        if tone:
+            style.add_class(tone)
+        self.summary.set_text(text)
+
     def hide_window(self, *_):
         if self.indicator and self.indicator.get_property("connected"):
             self.window.hide()
@@ -149,7 +232,7 @@ class Monitor(Gtk.Application):
     def refresh(self, *_):
         if self.child:
             return
-        self.summary.set_text("正在检查 14 项环境指标…")
+        self.badge("检查中…", "pending")
         self.menu_status.set_label("环境监测 · 检查中…")
         self.button.set_sensitive(False)
         try:
@@ -185,16 +268,30 @@ class Monitor(Gtk.Application):
         for key, (label, explanation) in self.labels.items():
             state, detail = rows.get(key, ("unknown", reason or "没有返回结果"))
             counts[state] += 1
-            label.set_markup(f'<span foreground="{COLORS[state]}" weight="bold">{STATES[state]}</span>')
+            symbol = {"ok": "✔", "warn": "▲", "fail": "✖", "skip": "–", "unknown": "?"}[state]
+            label.set_markup(f'<span foreground="{COLORS[state]}" weight="bold">{symbol}</span>')
+            label.set_tooltip_text(STATES[state])
+            label.get_accessible().set_name(STATES[state])
+            if state == "ok" and not detail:
+                detail = {"时区": "系统时区匹配", "地区": "地区格式匹配"}.get(key, "")
             explanation.set_text(detail)
+            explanation.set_tooltip_text("\n".join(filter(None, (detail, BASIS.get(key)))))
+        proxy_detail = rows.get("代理内核", ("unknown", ""))[1]
+        self.proxy.set_text(proxy_detail or "未取得")
         result = "  ·  ".join(f"{count} {STATES[state]}" for state, count in counts.items() if count)
-        self.summary.set_text(result)
+        if counts["fail"] or counts["unknown"]:
+            self.badge("需要处理", "fail")
+        elif counts["warn"] or counts["skip"]:
+            self.badge("环境有提示", "warn")
+        else:
+            self.badge("环境安全", "")
+        self.summary.set_tooltip_text(result)
         self.menu_status.set_label(result)
         failed = [name for name in CHECKS if rows.get(name, ("unknown",))[0] in ("fail", "unknown")]
         brief = "、".join(failed[:3]) + (" 等" if len(failed) > 3 else "")
         self.menu_detail.set_label("需处理：" + brief if brief else "查看 14 项详情")
         now = datetime.datetime.now().strftime("%H:%M:%S")
-        self.stamp.set_text(f"最近检查 {now}   ·   每 2 分钟刷新")
+        self.stamp.set_text(f"{now}   ·   {result}")
         if self.indicator:
             icon = "security-low" if counts["fail"] or counts["unknown"] else (
                 "security-medium" if counts["warn"] or counts["skip"] else "security-high")

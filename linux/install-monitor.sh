@@ -9,7 +9,7 @@ bin="$HOME/.local/bin"
 # Check GTK before replacing launchers on upgrade.
 "/usr/bin/python3" -c 'import gi; gi.require_version("Gtk", "3.0"); from gi.repository import Gtk'
 mkdir -p "$dest" "$apps" "$autostart" "$bin"
-install -m 644 "$dir"/{monitor.py,claude-switch.sh,stun-probe.py} "$dest/"
+install -m 644 "$dir"/{monitor.py,monitor.css,claude-switch.sh,stun-probe.py} "$dest/"
 support="$dir/../core/claude-switch.sh"
 [ -f "$support" ] || support="$dir/clash-support.sh"
 install -m 644 "$support" "$dest/clash-support.sh"
