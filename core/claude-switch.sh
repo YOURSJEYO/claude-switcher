@@ -705,15 +705,18 @@ def expected_rules():
     return rules
 
 
-def verify_runtime(clash_dir, group, policy):
+def verify_runtime(clash_dir, group, policy, allow_global=False):
     base, secret = controller_config(clash_dir)
-    state = {
-        "configs": api_get(base, secret, "/configs"),
-        "rules": api_get(base, secret, "/rules"),
-        "proxies": api_get(base, secret, "/proxies"),
-    }
-    if str(state["configs"].get("mode", "")).lower() != "rule":
-        fail("Clash 当前不是 rule 模式")
+    mode = str(api_get(base, secret, "/configs").get("mode", "")).lower()
+    if allow_global and mode == "global":
+        proxies = api_get(base, secret, "/proxies").get("proxies", {})
+        selected = selected_proxy(proxies, "GLOBAL")
+        if str(selected.get("type", "")).lower() in {"", "direct", "pass", "reject", "rejectdrop", "block"}:
+            fail("全局模式：GLOBAL 未选择代理节点")
+        return "全局模式：流量走全局代理（不使用置顶规则）"
+    if mode != "rule":
+        fail("直连模式：置顶规则不生效" if mode == "direct" else "Clash 当前不是 rule 模式")
+    state = {"rules": api_get(base, secret, "/rules"), "proxies": api_get(base, secret, "/proxies")}
     validate_group(state, group, policy)
     rules = state["rules"].get("rules")
     if not isinstance(rules, list):
@@ -739,7 +742,7 @@ def verify_runtime(clash_dir, group, policy):
                     or rule.get("proxy") != group
                     or (rule.get("extra") or {}).get("disabled") is True):
                 fail("运行规则未按策略置顶:" + value)
-    return state
+    return f"规则模式：{len(DOMAINS)} 个域名、{len(PORTS)} 条 UDP 规则已置顶"
 
 
 def rule_strings(group, policy):
@@ -878,6 +881,9 @@ def main():
     if action == "mode":
         base, secret = controller_config(clash_dir)
         print(str(api_get(base, secret, "/configs").get("mode", "")).lower())
+        return 0
+    if action == "status":
+        print(verify_runtime(clash_dir, group, policy, allow_global=True))
         return 0
     if not group or any(char in group for char in ",\r\n"):
         fail("代理组名为空或包含规则分隔符")

@@ -129,6 +129,19 @@ class WebRTCRulesTests(unittest.TestCase):
         self.assertTrue(self.requests)
         self.assertTrue(all(auth == "Bearer fixture-secret" for _, auth in self.requests))
 
+    def test_status_describes_runtime_evidence(self):
+        self.assertIn("13 个域名、3 条 UDP", self.run_helper("status").stdout)
+        self.responses["/rules"]["rules"].reverse()
+        self.assertNotEqual(self.run_helper("status").returncode, 0)
+        self.responses["/configs"]["mode"] = "global"
+        proxies = self.responses["/proxies"]["proxies"]
+        proxies["GLOBAL"] = {"now": self.group, "all": [self.group]}
+        self.assertIn("全局模式", self.run_helper("status").stdout)
+        proxies["node"]["type"] = "Direct"
+        self.assertNotEqual(self.run_helper("status").returncode, 0)
+        self.responses["/configs"]["mode"] = "direct"
+        self.assertIn("直连模式", self.run_helper("status").stderr)
+
     def test_default_writer_generates_udp_only_rules_for_real_group(self):
         run = self.run_helper("write")
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)

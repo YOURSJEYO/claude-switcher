@@ -1,7 +1,5 @@
 #!/bin/bash
-# Claude 保镖 (Linux) —— 代理离线时自动关闭 claude CLI 进程
-# 说明: Linux 上 Claude 使用形态是 网页版(浏览器) + Claude Code CLI。
-# 保镖只终止 claude CLI(掉了不会误伤你正在用的浏览器)。
+# Claude 保镖 (Linux) —— 代理离线时自动关闭 claude CLI 与当前用户的 claude-desktop 进程
 # 安装器会把 __PROXY_MODE__ 替换为安装时识别的客户端;未替换(旧装)时按 Clash 内核判定,行为与旧版一致
 LOG="$HOME/.claude-switcher/bodyguard.log"
 MODE="__PROXY_MODE__"
@@ -27,6 +25,9 @@ while true; do
     if [ "$ok" -eq 0 ] && pgrep -x claude >/dev/null 2>&1; then
         pkill -x claude
         echo "$(date '+%Y-%m-%d %H:%M:%S') 代理离线(内核或TUN丢失),已自动关闭 claude CLI" >>"$LOG"
+    fi
+    if [ "$ok" -eq 0 ]; then
+        pkill -u "$(id -u)" -x claude-desktop 2>/dev/null && echo "$(date) 代理离线，已请求关闭 Claude 桌面版" >>"$LOG"
     fi
     sleep 10
 done

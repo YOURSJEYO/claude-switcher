@@ -12,12 +12,28 @@ TZ_TARGET="America/New_York"   # 锁定时区,应与出口IP所在国家一致
 LOCALE_TARGET="en_US"          # 锁定地区格式
 # =======================================================
 
+if [ "${1:-}" = update-check ]; then
+    exec python3 "$(dirname "$(readlink -f "$0")")/update_check.py"
+fi
+
+umask 077
 BASE="$HOME/.claude-switcher"
+PROBE="$BASE/stun-probe.py"
+if [ "${1:-}" = monitor-check ] && [ ! -f "$BASE/claude-switch.sh" ]; then
+    BASE="${XDG_STATE_HOME:-$HOME/.local/state}/claude-switcher-monitor"
+    PROBE="$(dirname "$0")/stun-probe.py"
+    PROXY_MODE="auto"
+fi
 DATA="$HOME/.config/google-chrome"   # Web 版登录态目录(Chrome)
 [ -d "$HOME/.config/chromium" ] && [ ! -d "$DATA" ] && DATA="$HOME/.config/chromium"
 LOG="$BASE/claude-switch.log"
 CLASH_DIR="$HOME/.config/io.github.clash-verge-rev.clash-verge-rev"
 [ -d "$HOME/Library/Application Support/io.github.clash-verge-rev.clash-verge-rev" ] && CLASH_DIR="$HOME/Library/Application Support/io.github.clash-verge-rev.clash-verge-rev"
+# Clash Verge Rev on Linux stores runtime profiles under XDG_DATA_HOME.
+data_clash="${XDG_DATA_HOME:-$HOME/.local/share}/io.github.clash-verge-rev.clash-verge-rev"
+if [ ! -f "$CLASH_DIR/clash-verge.yaml" ] && [ -f "$data_clash/clash-verge.yaml" ]; then
+    CLASH_DIR="$data_clash"
+fi
 ROUTE_MISSED=""
 mkdir -p "$BASE/accounts"
 
@@ -85,18 +101,22 @@ egress() {
     echo "$(echo "$t" | grep '^ip=' | cut -d= -f2) $(echo "$t" | grep '^loc=' | cut -d= -f2)"
 }
 
-webrtc_test() { python3 "$BASE/stun-probe.py" 2>/dev/null; }
+webrtc_test() { python3 "$PROBE" 2>/dev/null; }
 
-# 置顶规则配置检查(仅 Clash Verge):合并配置里是否含置顶规则
-merge_ok() {
-    grep -q "DOMAIN-SUFFIX,claude.ai,$PROXY_GROUP" "$CLASH_DIR/clash-verge.yaml" 2>/dev/null
+# 与 macOS 使用同一个规则管理入口，直接查询当前内核。
+clash_rules() {
+    support_script clash-rules "$1" "$CLASH_DIR" "$BASE" "$PROXY_GROUP" "${WEBRTC_POLICY:-}"
 }
 
-# STUN/TURN 端口置顶是否已生效(国内直连规则会把 stun.miwifi.com 等判直连,UDP 需按端口强制进隧道)
-stun_ok() {
-    grep -q 'DST-PORT,3478,' "$CLASH_DIR/clash-verge.yaml" 2>/dev/null \
-        || grep -q 'DST-PORT,3478,' "$CLASH_DIR/profiles/Merge.yaml" 2>/dev/null
+support_script() {
+    local script_dir helper
+    script_dir="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
+    helper="$script_dir/clash-support.sh"
+    [ -f "$helper" ] || helper="$script_dir/../core/claude-switch.sh"
+    bash "$helper" "$@"
 }
+
+merge_ok() { clash_rules verify >/dev/null 2>&1; }
 
 # 置顶规则行为检测:三个生态域名全部解析到 fake-ip 段(198.18.x.x)即视为已置顶;未命中域名记入 ROUTE_MISSED
 route_ok() {
@@ -126,6 +146,23 @@ iphist_count() {
 
 # 逐项输出检查结果: 名称=ok|warn|fail:细节
 checkdetail() {
+    local settings disabled="" allow=0 key value
+    if [ -e "$HOME/.claude-switcher/checks.json" ]; then
+        settings=$(support_script _support config) || { echo "检查设置无效，已阻止启动"; return 1; }
+        while IFS='=' read -r key value; do
+            case "$key" in disabled) disabled="$value" ;; allowOptionalFailures) allow="$value" ;; esac
+        done <<< "$settings"
+    fi
+    probe_checks | awk -v allow="$allow" '
+        allow == 1 && /^(IP一致|DNS|WebRTC|客户端语言|ASN属性|生态可达性)=fail(:|$)/ { sub(/=fail/, "=warn") }
+        {print}'
+}
+
+skip_optional() {
+    case ",$disabled," in *,"$1",*) echo "$1=skip:已在设置中关闭"; return 0 ;; *) return 1 ;; esac
+}
+
+probe_checks() {
     # 1. 代理内核(按安装时识别的客户端判定)
     if proxy_alive; then
         echo "代理内核=ok:$(proxy_name) 运行中"
@@ -145,13 +182,16 @@ checkdetail() {
     # 3. 出口IP(按安装时锁定的目标国家)
     if [ "$loc" = "$COUNTRY_TARGET" ]; then echo "出口IP=ok:$ip/$loc"; else echo "出口IP=fail:${ip:-无}/${loc:-未知}(期望$COUNTRY_TARGET)"; fi
     # 4. IP 一致(含 48h 审查)
-    lastip=""; [ -f "$BASE/lastip" ] && lastip=$(cat "$BASE/lastip")
-    ipst=""; ipdt=""
-    if [ -z "$ip" ]; then echo 'IP一致=fail:未获取到出口IP'
-    elif [ -z "$lastip" ]; then ipst="ok"; ipdt="首次记录"
-    elif [ "$ip" = "$lastip" ]; then ipst="ok"
-    else ipst="warn"; ipdt="$lastip → $ip"; fi
-    [ -n "$ip" ] && echo "$ip" > "$BASE/lastip"
+    if ! skip_optional IP一致; then
+        lastip=""; [ -f "$BASE/lastip" ] && lastip=$(cat "$BASE/lastip")
+        ipst=""; ipdt=""
+        if [ -z "$ip" ]; then echo 'IP一致=fail:未获取到出口IP'
+        elif [ -z "$lastip" ]; then ipst="ok"; ipdt="首次记录"
+        elif [ "$ip" = "$lastip" ]; then ipst="ok"
+        else ipst="warn"; ipdt="$lastip → $ip"; fi
+        [ -n "$ip" ] && echo "$ip" > "$BASE/lastip"
+    fi
+
     # IP 审查:48h 内出口 IP 变化 ≥3 次提示账号画像风险(只 warn 不 fail)
     if [ -n "$ipst" ]; then
         ipn=$(iphist_count "$ip")
@@ -171,6 +211,10 @@ checkdetail() {
 
     # 6. 地区(LANG 未设时回退 localectl)
     lang="${LANG:-$(localectl status 2>/dev/null | grep 'LANG=' | head -1 | cut -d= -f2)}"
+    if [[ "${XDG_CURRENT_DESKTOP:-}" == *GNOME* ]] && command -v gsettings >/dev/null; then
+        region=$(gsettings get org.gnome.system.locale region 2>/dev/null | tr -d "'")
+        [ -z "$region" ] || lang="$region"
+    fi
     case "$lang" in ${LOCALE_TARGET}*) echo '地区=ok' ;; *) echo "地区=fail:$lang(期望$LOCALE_TARGET)" ;; esac
 
     # 7. IPv6
@@ -178,21 +222,25 @@ checkdetail() {
     [ "$v6" = "1" ] && echo 'IPv6=ok:已关闭' || echo 'IPv6=fail:未关闭'
 
     # 8. DNS
-    dnsip=$(dns_query claude.ai)
-    case "$dnsip" in 198.18.*) echo 'DNS=ok:走隧道' ;; *) echo "DNS=fail:未走隧道(${dnsip:-空})" ;; esac
+    if ! skip_optional DNS; then
+        dnsip=$(dns_query claude.ai)
+        case "$dnsip" in 198.18.*) echo 'DNS=ok:走隧道' ;; *) echo "DNS=fail:未走隧道(${dnsip:-空})" ;; esac
+    fi
 
     # 9. WebRTC
-    wr=$(webrtc_test)
-    case "$wr" in
-        RESULT:NONE) echo 'WebRTC=ok:UDP不出网,零暴露' ;;
-        RESULT:*)
-            wips=${wr#RESULT:}; leak=""
-            OLDIFS=$IFS; IFS=','
-            for w in $wips; do [ "$w" != "$ip" ] && leak="$leak $w"; done
-            IFS=$OLDIFS
-            [ -n "$leak" ] && echo "WebRTC=fail:暴露非代理IP:$leak" || echo 'WebRTC=ok:仅暴露代理IP' ;;
-        *) echo 'WebRTC=fail:检测异常' ;;
-    esac
+    if ! skip_optional WebRTC; then
+        wr=$(webrtc_test)
+        case "$wr" in
+            RESULT:NONE) echo 'WebRTC=fail:STUN 未返回结果，无法验证' ;;
+            RESULT:*)
+                wips=${wr#RESULT:}; leak=""
+                OLDIFS=$IFS; IFS=','
+                for w in $wips; do [ "$w" != "$ip" ] && leak="$leak $w"; done
+                IFS=$OLDIFS
+                [ -n "$leak" ] && echo "WebRTC=fail:暴露非代理IP:$leak" || echo 'WebRTC=ok:仅暴露代理IP' ;;
+            *) echo 'WebRTC=fail:检测异常' ;;
+        esac
+    fi
 
     # 10. 保镖
     if systemctl --user is-active claude-bodyguard.service >/dev/null 2>&1; then
@@ -202,147 +250,57 @@ checkdetail() {
         echo '保镖=fail:未运行'
     fi
 
-    # 11. 规则置顶:Clash Verge 配置/行为双保险,其他客户端只看行为
+    # 11. Clash Verge 查运行内核；其他客户端仅做 fake-IP 行为检测。
     if [ "$PROXY_MODE" = "clash-verge" ]; then
-        if merge_ok; then
-            echo '规则置顶=ok'
-        elif route_ok; then
-            echo '规则置顶=ok:行为检测通过'
+        local rule_status
+        if rule_status=$(clash_rules status 2>&1); then
+            echo "规则置顶=ok:$rule_status"
         else
-            echo '规则置顶=fail:未生效'
+            echo "规则置顶=fail:${rule_status#FAIL:}"
         fi
     else
         if route_ok; then
-            echo '规则置顶=ok:行为检测通过'
+            echo '规则置顶=ok:行为检测：3 个服务域名解析到 fake-IP'
         else
             echo "规则置顶=fail:未命中(${ROUTE_MISSED# }),请在 $(proxy_name) 中自行加置顶规则"
         fi
     fi
 
     # 12. 客户端语言
-    echo '客户端语言=ok:跟随系统'
+    if ! skip_optional 客户端语言; then
+        echo '客户端语言=ok:跟随系统'
+    fi
 
     # 13. ASN 网络属性(住宅宽带 vs 机房)
-    org=$(curl -s --max-time 6 https://ipinfo.io/json 2>/dev/null | grep '"org"' | cut -d'"' -f4)
-    case "$org" in
-        '') echo 'ASN属性=warn:未获取' ;;
-        *Comcast*|*AT\&T*|*Verizon*|*Spectrum*|*Charter*|*Cox*|*T-Mobile*|*Cable*|*esidential*|\
-        *NTT*|*KDDI*|*SoftBank*|*IIJ*|*OCN*|*So-net*|\
-        *HiNet*|*Chunghwa*|*CHT*|*kbro*|*Taiwan*|*FarEasTone*|*Data\ Communication*|\
-        *Singtel*|*StarHub*|*M1*|\
-        *HKT*|*PCCW*|*HKBN*|*HGC*|\
-        *BT*|*Sky*|*Virgin*|*TalkTalk*|*Vodafone*|\
-        *Deutsche\ Telekom*|*1\&1*|*O2*) echo "ASN属性=ok:$org" ;;
-        *) echo "ASN属性=warn:疑似机房($org)" ;;
-    esac
+    if ! skip_optional ASN属性; then
+        org=$(curl -s --max-time 6 https://ipinfo.io/json 2>/dev/null | grep '"org"' | cut -d'"' -f4)
+        case "$org" in
+            '') echo 'ASN属性=warn:未获取' ;;
+            *Comcast*|*AT\&T*|*Verizon*|*Spectrum*|*Charter*|*Cox*|*T-Mobile*|*Cable*|*esidential*|\
+            *NTT*|*KDDI*|*SoftBank*|*IIJ*|*OCN*|*So-net*|\
+            *HiNet*|*Chunghwa*|*CHT*|*kbro*|*Taiwan*|*FarEasTone*|*Data\ Communication*|\
+            *Singtel*|*StarHub*|*M1*|\
+            *HKT*|*PCCW*|*HKBN*|*HGC*|\
+            *BT*|*Sky*|*Virgin*|*TalkTalk*|*Vodafone*|\
+            *Deutsche\ Telekom*|*1\&1*|*O2*) echo "ASN属性=ok:$org" ;;
+            *) echo "ASN属性=warn:疑似机房($org)" ;;
+        esac
+    fi
 
     # 14. Anthropic 生态可达性
-    r1=$(curl -s --max-time 8 -o /dev/null -w '%{http_code}' https://claude.ai/ 2>/dev/null)
-    r2=$(curl -s --max-time 8 -o /dev/null -w '%{http_code}' https://api.anthropic.com/v1/models 2>/dev/null)
-    if [ "$r1" != "000" ] && [ "$r2" != "000" ]; then
-        echo "生态可达性=ok:claude.ai:$r1 api:$r2"
-    else
-        echo "生态可达性=fail:claude.ai:$r1 api:$r2"
-    fi
-}
-
-# 置顶规则写入(智能合并):不整文件覆盖,用户已有的 Merge 配置原样保留
-# 标记块自包含 prepend-rules 键+全部规则,重复执行幂等
-write_merge_rules() {
-    M="$CLASH_DIR/profiles/Merge.yaml"
-    B0="# >>> claude-switcher pinned rules >>>"
-    B1="# <<< claude-switcher pinned rules <<<"
-    mkdir -p "$CLASH_DIR/profiles"
-    # 置顶规则清单(缩进两格)
-    rules=""
-    for d in claude.ai claude.com anthropic.com claudeusercontent.com challenges.cloudflare.com datadoghq.com segment.io stripe.com stripe.network stripecdn.com intercom.io intercomcdn.com intercomassets.com; do
-        rules="$rules  - DOMAIN-SUFFIX,$d,$PROXY_GROUP
-"
-    done
-    # STUN/TURN 标准端口置顶:国内直连规则会把 stun.miwifi.com 等判直连,UDP 需按端口强制进隧道
-    for p in 3478 5349 19302; do
-        rules="$rules  - DST-PORT,$p,$PROXY_GROUP
-"
-    done
-
-    # 首次:文件不存在,整文件写入
-    if [ ! -f "$M" ]; then
-        cat > "$M" <<MEOF
-# Profile Enhancement Merge Template for Clash Verge
-
-profile:
-  store-selected: true
-
-# Claude 全家族及生态域名置顶强制走代理(优先级高于任何国内规则集)
-$B0
-prepend-rules:
-$rules$B1
-MEOF
-        return 0
-    fi
-
-    # 已存在:备份后幂等替换(只在将要修改时备份)
-    cp "$M" "$M.bak.$(date +%Y%m%d%H%M%S)"
-    tmp="$M.cs.tmp"
-    cp "$M" "$tmp"
-    # 删除旧标记块(含标记行,兼容块在 prepend-rules 下缩进的情形)
-    if grep -qF "$B0" "$tmp"; then
-        awk -v b0="$B0" -v b1="$B1" '
-            index($0, b0) {inblock=1; next}
-            inblock && index($0, b1) {inblock=0; next}
-            !inblock
-        ' "$tmp" > "$tmp.out" && mv "$tmp.out" "$tmp"
-        # 清理孤立的 prepend-rules: 键(其后没有规则行,只剩空行/注释/EOF)
-        awk '
-            { L[NR]=$0 }
-            END {
-                for (i=1; i<=NR; i++) {
-                    if (L[i] ~ /^prepend-rules:/) {
-                        has=0
-                        for (j=i+1; j<=NR; j++) {
-                            if (L[j] ~ /^[ \t]*- /) { has=1; break }
-                            if (L[j] ~ /^[ \t]*$/ || L[j] ~ /^[ \t]*#/) continue
-                            break
-                        }
-                        if (!has) continue
-                    }
-                    print L[i]
-                }
-            }
-        ' "$tmp" > "$tmp.out" && mv "$tmp.out" "$tmp"
-    fi
-    # 注入:已有 prepend-rules: 则标记规则块(不带键)插到该行之后,否则文件顶部插入完整块
-    # 注意:多行文本走环境变量传递(macOS awk 的 -v 不支持含换行的字符串);先写中间文件再替换,失败不碰原文件
-    if grep -q '^prepend-rules:' "$tmp"; then
-        if MARK0="$B0" MARK1="$B1" RULES="$rules" awk '
-            /^prepend-rules:/ && !done {
-                print
-                print "  " ENVIRON["MARK0"]
-                printf "%s", ENVIRON["RULES"]
-                print "  " ENVIRON["MARK1"]
-                done=1
-                next
-            }
-            { print }
-        ' "$tmp" > "$tmp.out"; then
-            mv "$tmp.out" "$M" && rm -f "$tmp"
+    if ! skip_optional 生态可达性; then
+        r1=$(curl -s --max-time 8 -o /dev/null -w '%{http_code}' https://claude.ai/ 2>/dev/null)
+        r2=$(curl -s --max-time 8 -o /dev/null -w '%{http_code}' https://api.anthropic.com/v1/models 2>/dev/null)
+        if [ "$r1" != "000" ] && [ "$r2" != "000" ]; then
+            echo "生态可达性=ok:claude.ai:$r1 api:$r2"
         else
-            rm -f "$tmp" "$tmp.out"
-            return 1
+            echo "生态可达性=fail:claude.ai:$r1 api:$r2"
         fi
-    else
-        {
-            echo "# Claude 全家族及生态域名置顶强制走代理(优先级高于任何国内规则集)"
-            echo "$B0"
-            echo "prepend-rules:"
-            printf "%s" "$rules"
-            echo "$B1"
-            echo ""
-            cat "$tmp"
-        } > "$tmp.out" && mv "$tmp.out" "$M" && rm -f "$tmp"
     fi
-    rm -f "$tmp"
+
 }
+
+write_merge_rules() { clash_rules write; }
 
 fix() {
     echo "FIX:开始一键修复"
@@ -403,7 +361,7 @@ EOF
 
     # D. 置顶规则(仅 Clash Verge 智能合并写入;其他客户端行为检测不通过时提示手动)
     if [ "$PROXY_MODE" = "clash-verge" ]; then
-        if ! merge_ok || ! stun_ok || ! route_ok; then
+        if ! merge_ok; then
             echo "FIX:写入置顶规则(智能合并,不动你的已有配置)..."
             write_merge_rules && echo "FIX:置顶规则已写入(请重启 Clash Verge 生效)" || echo "FIX:置顶规则 ✗(写入失败)"
         fi
@@ -506,6 +464,216 @@ switch_to() {
     echo "OK:已切换到账号$target(请重新打开浏览器, 耗时$(( $(date +%s) - t0 ))s)"
 }
 
+desktop_info() {
+    local PRETTY_NAME=Linux
+    [ ! -r /etc/os-release ] || . /etc/os-release
+    echo "Claude 切换器 · Linux Desktop Beta（基于 v1.8.0，187a8d6）"
+    echo "系统: ${PRETTY_NAME} ($(uname -m))"
+    if command -v claude-desktop >/dev/null; then
+        echo "Claude Code 桌面客户端: $(command -v claude-desktop)"
+    else
+        echo "Claude Code 桌面客户端: 未找到 claude-desktop"
+    fi
+}
+
+# Match the current user's desktop and Code CLI, including Node/Bun CLI installs.
+# Prefer /proc so argv options, npm global symlinks and Bun installs are resolved
+# without relying on a fixed ps column.
+desktop_session_pids() {
+    local kind="${1:-all}" root="${2:-/proc}" entry pid cmd0 helper arg resolved
+    local args=()
+    shopt -s nullglob
+    for entry in "$root"/[0-9]*; do
+        pid="${entry##*/}"
+        [ -r "$entry/cmdline" ] || continue
+        args=()
+        while IFS= read -r -d '' arg; do args+=("$arg"); done < "$entry/cmdline"
+        [ "${#args[@]}" -gt 0 ] || continue
+        cmd0=$(basename -- "${args[0]}")
+        helper=0
+        for arg in "${args[@]:1}"; do
+            case "$arg" in --type=*) helper=1 ;; esac
+        done
+        if [ "$cmd0" = "claude-desktop" ]; then
+            if [ "$kind" = "cli" ]; then continue; fi
+            if [ "$kind" = "roots" ] && [ "$helper" -eq 1 ]; then continue; fi
+            printf '%s\n' "$pid"
+            continue
+        fi
+        if [ "$cmd0" = "claude" ]; then
+            [ "$kind" = "roots" ] && continue
+            printf '%s\n' "$pid"
+            continue
+        fi
+        case "$cmd0" in
+            node|bun) ;;
+            *) continue ;;
+        esac
+        [ "$kind" = "roots" ] && continue
+        for arg in "${args[@]:1}"; do
+            case "$arg" in --*|-*) continue ;; esac
+            # GNU readlink resolves npm symlinks; Python realpath is the portable fallback.
+            resolved=$(command -p readlink -f -- "$arg" 2>/dev/null) || resolved=""
+            if [ -z "$resolved" ]; then
+                resolved=$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$arg" 2>/dev/null) || continue
+            fi
+            [ -e "$resolved" ] || continue
+            case "$resolved" in
+                */@anthropic-ai/claude-code/bin/claude|*/@anthropic-ai/claude-code/bin/claude.exe|*/@anthropic-ai/claude-code/cli.js)
+                    printf '%s\n' "$pid"
+                    break
+                    ;;
+            esac
+        done
+    done
+}
+
+desktop_matches_slot() {
+    local slot="$1" pid arg profile helper expected
+    expected="${XDG_CONFIG_HOME:-$HOME/.config}/Claude"
+    [ "$slot" = A ] || expected="$BASE/desktop/$slot/profile"
+    for pid in $(pgrep -u "$(id -u)" -x claude-desktop); do
+        [ -r "/proc/$pid/cmdline" ] || continue
+        profile=""; helper=0
+        while IFS= read -r -d '' arg; do
+            case "$arg" in --type=*) helper=1 ;; --user-data-dir=*) profile="${arg#*=}" ;; esac
+        done < "/proc/$pid/cmdline"
+        [ "$helper" = 0 ] || continue
+        if [ "$profile" = "$expected" ] || { [ "$slot" = A ] && [ -z "$profile" ]; }; then return 0; fi
+    done
+    return 1
+}
+
+desktop_exec() {
+    # Keep the GUI in its own graphical-session service when the terminal closes.
+    local slot="${CLAUDE_SWITCHER_DESKTOP_SLOT:-A}" opts=() key old_unit output unit state i
+    # A must not inherit another account's paths from the systemd manager.
+    # Explicit caller-provided account paths are preserved.
+    for key in DISPLAY WAYLAND_DISPLAY; do
+        [ -z "${!key:-}" ] || opts+=("--setenv=$key=${!key}")
+    done
+    for key in XDG_CONFIG_HOME CLAUDE_CONFIG_DIR; do
+        if [ -n "${!key:-}" ]; then
+            opts+=("--setenv=$key=${!key}")
+        elif [ "$slot" = A ]; then
+            opts+=("--setenv=$key=")
+        fi
+    done
+
+    old_unit=""
+    if [ -f "$BASE/desktop-unit" ]; then
+        read -r old_unit < "$BASE/desktop-unit" 2>/dev/null || old_unit=""
+        case "$old_unit" in *.service) ;; *) old_unit="" ;; esac
+    fi
+    if [ -n "$old_unit" ] && command -v systemctl >/dev/null 2>&1; then
+        state=$(systemctl --user is-active "$old_unit" 2>/dev/null) || true
+        case "$state" in
+            active|activating|reloading)
+                # systemctl stop is synchronous for user units; do not race a new start.
+                systemctl --user stop "$old_unit" || return 1
+                ;;
+        esac
+    fi
+
+    if ! output=$(systemd-run --user --collect --service-type=exec \
+            -p StandardOutput=null -p StandardError=null \
+            "${opts[@]+"${opts[@]}"}" -- "$(command -v claude-desktop)" "$@" 2>&1); then
+        printf '%s\n' "$output" >&2
+        return 1
+    fi
+    unit=$(printf '%s\n' "$output" | sed -n 's/^Running as unit: //p' | head -n 1)
+    [ -n "$unit" ] || { echo "无法获取 systemd 启动单元" >&2; return 1; }
+    printf '%s\n' "$unit" > "$BASE/desktop-unit.new" && mv -f "$BASE/desktop-unit.new" "$BASE/desktop-unit"
+    if command -v systemctl >/dev/null 2>&1; then
+        for ((i=0; i<100; i++)); do
+            state=$(systemctl --user is-active "$unit" 2>/dev/null) || true
+            case "$state" in
+                active) break ;;
+                activating|reloading) sleep 0.1 ;;
+                *)
+                    if (( i >= 20 )); then
+                        echo "桌面客户端单元未进入运行状态($state)" >&2
+                        return 1
+                    fi
+                    sleep 0.1
+                    ;;
+            esac
+        done
+        if [ "$state" != active ]; then
+            echo "桌面客户端启动等待超时" >&2
+            return 1
+        fi
+    fi
+}
+
+desktop_audit() {
+    local report name states
+    report=$(checkdetail) || return 1
+    printf '%s\n' "$report"
+    for name in 代理内核 TUN网卡 出口IP IP一致 时区 地区 IPv6 DNS WebRTC 保镖 规则置顶 客户端语言 ASN属性 生态可达性; do
+        case "$name" in IP一致|DNS|WebRTC|客户端语言|ASN属性|生态可达性) states='ok|warn|skip' ;; *) states='ok' ;; esac
+        grep -Eq "^${name}=($states)(:|$)" <<< "$report" || { echo "启动已阻止：$name 未通过"; return 1; }
+    done
+}
+
+desktop_open() (
+    local slot="${1:-A}" action="${2:-open}" report name pids i arg states
+    shift 2
+    case "$slot" in A|B|C|D) ;; *) echo "桌面槽位必须是 A、B、C 或 D"; return 2 ;; esac
+    if [ "$action" = focus ]; then
+        for arg in "$@"; do
+            case "$arg" in /*|file:*|https:*|http:*|claude:*) ;; *) echo "不支持的桌面启动参数"; return 2 ;; esac
+        done
+    else
+        set -- 'claude://code/new?source=desktop_action'
+    fi
+    command -v claude-desktop >/dev/null || { echo "请先安装带有 Code 入口的 claude-desktop"; return 1; }
+    exec 9>"$BASE/desktop.lock" || return 1
+    if [ "$action" = focus ]; then
+        flock -w 120 9 || { echo "账号切换尚未完成"; return 1; }
+        if [ -f "$BASE/desktop-last" ]; then
+            read -r slot < "$BASE/desktop-last" || return 1
+            case "$slot" in A|B|C|D) ;; *) echo "无效的桌面槽位记录"; return 1 ;; esac
+        fi
+    else
+        flock -n 9 || { echo "已有账号切换正在进行，请稍后重试"; return 1; }
+    fi
+    if [ "$action" = open ] && [ -n "$(desktop_session_pids)" ]; then
+        echo "请先完全退出 Claude 桌面客户端和 Code CLI，或使用界面切换"
+        return 1
+    fi
+    desktop_audit || return 1
+    if [ "$action" = switch ]; then
+        root_pids=$(desktop_session_pids roots)
+        cli_pids=$(desktop_session_pids cli)
+        if [ -n "$root_pids" ] && desktop_matches_slot "$slot"; then
+            action=focus
+        elif [ -n "$root_pids$cli_pids" ]; then
+            # TERM both desktop roots and CLI; a CLI-only session must also be asked to exit.
+            kill -TERM $root_pids $cli_pids 2>/dev/null || true
+            for ((i=0; i<90; i++)); do
+                [ -z "$(desktop_session_pids)" ] && break
+                if (( i >= 10 )) && [ -n "$(desktop_session_pids cli)" ]; then break; fi
+                sleep 1
+            done
+        fi
+    fi
+    if [ "$action" != focus ] && [ -n "$(desktop_session_pids)" ]; then
+        echo "会话仍在运行，已取消切换。请保存工作并完全退出 Claude 桌面版和 Code CLI。"
+        return 1
+    fi
+    if [ "$action" = switch ] && [ -n "${root_pids:-}${cli_pids:-}" ]; then desktop_audit || return 1; fi
+    if [ "$slot" != A ]; then
+        export CLAUDE_CONFIG_DIR="$BASE/desktop/$slot/code"
+        export XDG_CONFIG_HOME="$BASE/desktop/$slot/config"
+        mkdir -p "$CLAUDE_CONFIG_DIR" "$XDG_CONFIG_HOME" || return 1
+        set -- "--user-data-dir=$BASE/desktop/$slot/profile" "$@"
+    fi
+    desktop_exec "$@" || { echo "桌面客户端启动失败，请检查图形会话"; return 1; }
+    printf '%s\n' "$slot" > "$BASE/desktop-last.new" && mv -f "$BASE/desktop-last.new" "$BASE/desktop-last"
+
+)
+
 menu() {
     while true; do
         clear
@@ -513,31 +681,44 @@ menu() {
         echo "  Claude 账号切换器 (Linux)"
         echo "=============================="
         echo ""
+        desktop_info
         echo "  1) 安全检查 (checkdetail)"
         echo "  2) 一键修复 (fix)"
         echo "  3) 切换到账号 A"
         echo "  4) 切换到账号 B"
         echo "  5) 查看状态 (status)"
+        echo "  6) 打开 Claude Code 桌面版 (A，现有配置)"
+        echo "  7) 打开 Claude Code 桌面版 (B，独立配置)"
+        echo "  8) 打开 Claude Code 桌面版 (C，独立配置)"
+        echo "  9) 打开 Claude Code 桌面版 (D，独立配置)"
         echo "  0) 退出"
         echo ""
-        read -r -p "选择: " c
+        read -r -p "选择: " c || return
         case "$c" in
             1) checkdetail; read -r -p "回车继续..." _ ;;
             2) fix; read -r -p "回车继续..." _ ;;
             3) switch_to A; read -r -p "回车继续..." _ ;;
             4) switch_to B; read -r -p "回车继续..." _ ;;
             5) status; read -r -p "回车继续..." _ ;;
+            6|7|8|9) slots=(A B C D); desktop_open "${slots[c-6]}" switch; read -r -p "回车继续..." _ ;;
             0) exit 0 ;;
         esac
     done
 }
 
 case "${1:-menu}" in
+    monitor-check) checkdetail ;;
+    get-check-config) support_script _support config-get ;;
+    set-check-config) support_script _support config-set "${2:?缺少检查配置}" ;;
     checkdetail) OUT="$BASE/last-check.txt"; { checkdetail; } > "$OUT" 2>&1; cat "$OUT" ;;
+    desktop-info) desktop_info ;;
+    desktop) desktop_open "${2:-A}" open ;;
+    desktop-current) shift; desktop_open A focus "$@" ;;
+    desktop-switch) desktop_open "${2:?请选择桌面槽位 A/B/C/D}" switch ;;
     status) status ;;
     fix) fix ;;
-    switch) switch_to "${2:-}" ;;
+    switch) case "${2:-}" in A|B) switch_to "$2" ;; *) echo "槽位必须是 A 或 B"; exit 2 ;; esac ;;
     write-merge-rules) write_merge_rules ;;  # 隐藏入口:供安装器调用,保证两处合并逻辑一致
     menu) menu ;;
-    *) echo "用法: claude-switch.sh checkdetail|status|fix|switch A|B|menu"; exit 2 ;;
+    *) echo "用法: claude-switch.sh checkdetail|status|fix|switch A|B|desktop [A|B|C|D]|desktop-switch A|B|C|D|desktop-info|menu"; exit 2 ;;
 esac
