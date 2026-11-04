@@ -250,16 +250,17 @@ probe_checks() {
         echo '保镖=fail:未运行'
     fi
 
-    # 11. 规则置顶:Clash Verge 配置/行为双保险,其他客户端只看行为
+    # 11. Clash Verge 查运行内核；其他客户端仅做 fake-IP 行为检测。
     if [ "$PROXY_MODE" = "clash-verge" ]; then
-        if merge_ok; then
-            echo '规则置顶=ok'
+        local rule_status
+        if rule_status=$(clash_rules status 2>&1); then
+            echo "规则置顶=ok:$rule_status"
         else
-            echo '规则置顶=fail:运行中的内核规则未通过验证'
+            echo "规则置顶=fail:${rule_status#FAIL:}"
         fi
     else
         if route_ok; then
-            echo '规则置顶=ok:行为检测通过'
+            echo '规则置顶=ok:行为检测：3 个服务域名解析到 fake-IP'
         else
             echo "规则置顶=fail:未命中(${ROUTE_MISSED# }),请在 $(proxy_name) 中自行加置顶规则"
         fi

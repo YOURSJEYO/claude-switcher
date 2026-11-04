@@ -18,7 +18,7 @@ import gi
 gi.Repository.get_default().prepend_search_path(str(Path.home() / ".local/lib/girepository-1.0"))
 gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
-from gi.repository import Gdk, Gio, GLib, Gtk, Pango
+from gi.repository import Gdk, GdkPixbuf, Gio, GLib, Gtk, Pango
 
 try:
     gi.require_version("AyatanaAppIndicator3", "0.1")
@@ -49,6 +49,23 @@ def parse_report(output):
     return rows
 
 
+NOTICE_SECTIONS = (
+    ('Full-Tunnel 全流量接管',
+     '基于 TUN 虚拟网卡的内核级流量劫持，配合 Fake-IP DNS 解析机制，包括 UDP 在内的全部出站流量在网络栈底层被强制路由至加密隧道，应用层无法旁路。'),
+    ('Environment Audit 环境一致性审计',
+     '每次启动前执行 14 项环境指纹审计：Egress IP 归属地与 ASN 属性、时区与 Geo-location 一致性、Locale、IPv6 双栈旁路、DNS Leak、WebRTC/STUN 多节点交叉探测等。硬性安全项失败即 Block-on-Fail；仅显式配置的非关键项可跳过或降级，skip 不表示通过。'),
+    ('Kill-Switch 断网急停',
+     '常驻守护进程以 10 秒周期巡检隧道健康度，隧道中断即刻终止受保护进程，将裸连窗口压缩到秒级。进程级急停，非防火墙级保证，边界详见 SECURITY.md。'),
+    ('Pinned Routing 域名置顶路由',
+     '目标服务全家族域名及其生态依赖（Turnstile 人机验证、Telemetry 遥测、Payment 支付、Support 组件）置顶锁定代理路由，优先级高于任何第三方分流规则集，免疫规则库误判。'),
+    ('Session Isolation 会话隔离快照',
+     '多账号采用完整快照隔离：各账号持有独立的 Device Fingerprint、OAuth Credential 与本地状态，切换即物理交换数据卷，账号间零交叉污染。'),
+    ('Drift Self-Healing 配置漂移自愈',
+     '针对系统时区漂移、代理组件升级导致的配置重置等常见问题，内置 Watchdog 周期性校验并自动回滚至基线状态，全程留痕、可审计。'),
+    ('Anti-Tracking 反追踪卫生',
+     '验证链接（Magic Link）闭环于受保护环境内打开；邮件追踪像素（Tracking Pixel）经由邮箱服务商代理层屏蔽；全程固定单一住宅出口，不产生 Geo 跳变。'),
+)
+
 DISPLAY_NAMES = ("代理内核", "TUN 网卡", "出口 IP", "IP 与上次一致", "时区", "地区格式", "IPv6 关闭",
                  "DNS 走隧道", "WebRTC", "保镖在线", "规则置顶", "客户端语言", "ASN 属性", "生态可达性")
 ICONS = ("system-run", "network-wired", "network-server", "emblem-ok", "appointment-soon",
@@ -66,6 +83,14 @@ def styled(widget, *classes):
 
 def icon(name, size=Gtk.IconSize.MENU):
     return Gtk.Image.new_from_icon_name(name + "-symbolic", size)
+
+
+def header_icon(path, color, size, fill="none"):
+    svg = (f'<svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}" viewBox="0 0 24 24">'
+           f'<path d="{path}" fill="{fill}" stroke="{color}" stroke-width="1.8" '
+           'stroke-linecap="round" stroke-linejoin="round"/></svg>')
+    stream = Gio.MemoryInputStream.new_from_bytes(GLib.Bytes.new(svg.encode()))
+    return Gtk.Image.new_from_pixbuf(GdkPixbuf.Pixbuf.new_from_stream(stream, None))
 
 
 class Monitor(Gtk.Application):
@@ -100,9 +125,24 @@ class Monitor(Gtk.Application):
         self.window.show_all()
         self.window.present()
 
+    def present_from_tray(self, *_):
+        # Wayland can ignore present() on a mapped background window when the
+        # indicator forwards its activation over D-Bus without a focus token.
+        target = next((w for w in Gtk.Window.list_toplevels()
+                       if w.get_transient_for() == self.window and w.get_visible() and w.get_modal()), self.window)
+        target.deiconify()
+        if target.get_mapped() and not target.is_active():
+            target.hide()
+        def restore():
+            self.window.show_all()
+            target.show_all()
+            target.present()
+            return False
+        GLib.idle_add(restore)
+
     def build(self):
         self.window = Gtk.ApplicationWindow(application=self, title="Claude 切换器 · Linux")
-        self.window.set_default_size(520, 885)
+        self.window.set_default_size(520, 907)
         self.window.connect("delete-event", self.hide_window)
         styled(self.window, "monitor")
         css = Gtk.CssProvider()
@@ -111,23 +151,36 @@ class Monitor(Gtk.Application):
         self.window.set_titlebar(Gtk.HeaderBar(show_close_button=True))
         scroll = Gtk.ScrolledWindow()
         scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        self.window.add(scroll)
+        layout = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self.window.add(layout)
+        layout.pack_start(scroll, True, True, 0)
         body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10, margin=15)
         scroll.add(body)
-        brand = Gtk.Box(spacing=10)
+        brand = Gtk.Box(spacing=8)
         body.pack_start(brand, False, False, 0)
-        brand.pack_start(styled(icon("security-high", Gtk.IconSize.LARGE_TOOLBAR), "brand"), False, False, 0)
+        # Fill the left half of the shield over the terracotta badge.
+        shield = header_icon("M12 2 4 5v6c0 5 3 8 8 11V2z M12 2l8 3v6c0 5-3 8-8 11 5-3 8-6 8-11V5z", "white", 20, "white")
+        shield.set_valign(Gtk.Align.CENTER)
+        brand.pack_start(styled(shield, "brand"), False, False, 0)
         titles = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, valign=Gtk.Align.CENTER)
         titles.add(styled(Gtk.Label(label="Claude 账号切换器", xalign=0), "app-title"))
         titles.add(styled(Gtk.Label(label="安全检查 · 切换 · 启动", xalign=0), "secondary"))
         brand.pack_start(titles, True, True, 0)
-        self.button = styled(Gtk.Button(image=icon("view-refresh")), "tool")
-        self.button.set_tooltip_text("重新运行 14 项检查")
-        self.button.connect("clicked", self.refresh)
+        pulse = header_icon("M2 12h5l2-8 4 16 3-11 2 3h4", "#665e58", 17)
+        self.button = styled(Gtk.Button(image=pulse), "tool")
+        self.button.set_tooltip_text("设备指纹体检（字体、GPU、虚拟化）")
+        self.button.connect("clicked", self.show_fingerprint)
+        self.button.set_valign(Gtk.Align.CENTER)
         brand.pack_start(self.button, False, False, 0)
-        about = styled(Gtk.Button(image=icon("help-about")), "tool")
-        about.set_tooltip_text("查看时区与地区的判定依据")
-        about.connect("clicked", self.show_basis)
+        gear = styled(Gtk.Button(image=icon("emblem-system")), "tool")
+        gear.set_tooltip_text("检查设置")
+        gear.connect("clicked", self.settings)
+        gear.set_valign(Gtk.Align.CENTER)
+        brand.pack_start(gear, False, False, 0)
+        about = styled(Gtk.Button(image=icon("dialog-information")), "tool")
+        about.set_tooltip_text("安全防护体系公告")
+        about.connect("clicked", self.show_notice)
+        about.set_valign(Gtk.Align.CENTER)
         brand.pack_end(about, False, False, 0)
         heading = Gtk.Box()
         body.add(heading)
@@ -176,17 +229,28 @@ class Monitor(Gtk.Application):
         self.last_slot = None
         self.update_slots()
         GLib.timeout_add_seconds(2, self.update_slots)
-        footer = Gtk.Box(spacing=8)
-        body.add(footer)
         self.stamp = styled(Gtk.Label(xalign=0), "secondary")
-        footer.pack_start(self.stamp, True, True, 0)
-        footer.pack_end(styled(Gtk.Label(label="Linux Desktop Beta"), "secondary"), False, False, 0)
+        body.pack_end(self.stamp, False, False, 0)
+        footer = styled(Gtk.Box(spacing=4), "footer")
+        layout.pack_end(footer, False, False, 0)
+        footer.pack_start(icon("security-high"), False, False, 0)
+        note = styled(Gtk.Label(label="硬性安全项必须通过；灰色跳过不表示检查通过", xalign=0), "secondary")
+        note.set_line_wrap(True)
+        footer.pack_start(note, True, True, 0)
+        self.update_button = styled(Gtk.Button(label="检查更新"), "footer-action")
+        self.update_button.set_tooltip_text("检查上游版本，不更改已安装的文件")
+        self.update_button.connect("clicked", lambda *_: self.start_update(True))
+        footer.add(self.update_button)
+        handoff = styled(Gtk.Button(label="AI 配置"), "footer-action")
+        handoff.set_tooltip_text("查看和复制 AI 交接提示词")
+        handoff.connect("clicked", self.show_handoff)
+        footer.add(handoff)
         if self.core != installed:
             body.add(Gtk.Label(label="独立监测 · 完整保护尚未配置"))
         self.menu_status = Gtk.MenuItem(label="环境监测 · 尚未检查")
-        self.menu_status.connect("activate", self.present)
+        self.menu_status.connect("activate", self.present_from_tray)
         self.menu_detail = Gtk.MenuItem(label="等待首轮检查")
-        self.menu_detail.connect("activate", self.present)
+        self.menu_detail.connect("activate", self.present_from_tray)
         self.account_item = Gtk.MenuItem(label=self.slot_text())
         self.account_item.set_sensitive(False)
         self.update_item = Gtk.MenuItem(label="检查更新")
@@ -197,7 +261,7 @@ class Monitor(Gtk.Application):
             title_item.set_sensitive(False)
             for item in (title_item, self.account_item, self.menu_status, self.menu_detail, Gtk.SeparatorMenuItem()):
                 menu.append(item)
-            for label, action in (("打开主窗口", self.present), ("重新检查", self.refresh)):
+            for label, action in (("打开主窗口", self.present_from_tray), ("重新检查", self.refresh)):
                 item = Gtk.MenuItem(label=label)
                 item.connect("activate", action)
                 menu.append(item)
@@ -218,10 +282,103 @@ class Monitor(Gtk.Application):
             self.indicator.set_status(Indicator.IndicatorStatus.ACTIVE)
         body.show_all()
 
-    def show_basis(self, *_):
-        dialog = Gtk.MessageDialog(transient_for=self.window, modal=True, buttons=Gtk.ButtonsType.CLOSE,
-                                   text="时区与地区如何判断")
-        dialog.format_secondary_text("\n\n".join(BASIS.values()))
+    def show_handoff(self, *_):
+        prompt = """这是「Claude 切换器」Linux 版的 AI 交接提示词。请先阅读仓库根目录的 AGENTS.md 和 linux/README.md，再开始安装、配置或排障。
+
+仓库地址：https://github.com/YOURSJEYO/claude-switcher
+
+1. 先确认 Linux 发行版、代理客户端和 TUN 状态。完整安装后，使用 ~/.local/bin/claude-switch checkdetail 运行 14 项检查。硬性安全项必须通过；只有明确配置的非关键项可跳过或降为警告。skip 表示未执行。
+2. 分别核对有效时区和地区格式。时区读取 timedatectl，GNOME 地区格式读取 org.gnome.system.locale 的 region 设置。启动前还须确认出口国家与配置目标一致。
+3. 桌面账号有 A–D 四个槽位。A 使用现有配置，B–D 分别使用独立配置。切换前提醒我保存工作，由切换器安检并等待旧会话退出。保留 ~/.claude-switcher/accounts/ 的存档结构。
+4. Linux 保镖使用 systemd 用户服务 claude-bodyguard.service。用 systemctl --user is-active claude-bodyguard.service 检查状态。
+5. 检查更新只运行 ~/.local/bin/claude-switch update-check。安装、覆盖已安装版本、修改代理或系统设置前，请说明影响并取得我的同意。
+6. 诊断只记录检查项和状态。日志、文档和回复中不得暴露出口 IP、代理地址、账号数据或凭据。"""
+        dialog, box = self.sheet("AI 交接提示词", "复制后粘贴给本地 AI，让它先读 AGENTS.md 再动手", (600, 450))
+        scroll = Gtk.ScrolledWindow()
+        scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        card = styled(Gtk.Box(), "prompt-card")
+        box.pack_start(card, True, True, 0)
+        card.pack_start(scroll, True, True, 0)
+        scroll.set_shadow_type(Gtk.ShadowType.NONE)
+        view = styled(Gtk.TextView(editable=False, wrap_mode=Gtk.WrapMode.WORD_CHAR,
+                                   monospace=True, cursor_visible=False, pixels_below_lines=2), "prompt")
+        view.get_buffer().set_text(prompt)
+        scroll.add(view)
+        copy = styled(Gtk.Button(label="复制", image=icon("edit-copy"), always_show_image=True,
+                                 halign=Gtk.Align.START), "copy-prompt")
+
+        def copy_prompt(button):
+            clipboard = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
+            clipboard.set_text(prompt, -1)
+            clipboard.store()
+            button.set_label("已复制")
+
+        copy.connect("clicked", copy_prompt)
+        box.pack_end(copy, False, False, 0)
+        dialog.show_all()
+        dialog.run()
+        dialog.destroy()
+
+    def show_fingerprint(self, *_):
+        devices = []
+        for path in sorted(Path("/sys/class/drm").glob("card[0-9]*/device")):
+            driver = path / "driver"
+            if driver.is_symlink():
+                devices.append(driver.resolve().name)
+        try:
+            virt = subprocess.run(["systemd-detect-virt"], capture_output=True, text=True, timeout=2).stdout.strip()
+        except (OSError, subprocess.TimeoutExpired):
+            virt = ""
+        fonts = len(self.window.get_pango_context().list_families())
+        self.message("设备指纹体检", f"字体族：{fonts}\nGPU 驱动：{'、'.join(devices) or '未识别'}\n虚拟化：{virt or '未知'}")
+
+    def sheet(self, title, subtitle, size):
+        dialog = Gtk.Dialog(title=title, transient_for=self.window, modal=True)
+        styled(dialog, "monitor")
+        dialog.set_default_size(*size)
+        styled(dialog, "handoff")
+        header = styled(Gtk.HeaderBar(show_close_button=False), "handoff-header")
+        heading = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
+        heading.add(styled(Gtk.Label(label=title, xalign=0), "handoff-title"))
+        heading.add(styled(Gtk.Label(label=subtitle, xalign=0), "secondary"))
+        header.pack_start(heading)
+        cross = icon("window-close")
+        cross.set_pixel_size(12)
+        cross.set_halign(Gtk.Align.CENTER)
+        cross.set_valign(Gtk.Align.CENTER)
+        close = styled(Gtk.Button(image=cross), "handoff-close")
+        close.set_valign(Gtk.Align.CENTER)
+        close.get_accessible().set_name("关闭")
+        close.connect("clicked", lambda *_: dialog.response(Gtk.ResponseType.CLOSE))
+        header.pack_end(close)
+        dialog.set_titlebar(header)
+        box = dialog.get_content_area()
+        box.set_border_width(20)
+        box.set_spacing(10)
+        return dialog, box
+
+    def show_notice(self, *_):
+        dialog, box = self.sheet("安全防护体系公告", "Security Architecture Bulletin", (510, 620))
+        scroll = Gtk.ScrolledWindow()
+        scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        box.pack_start(scroll, True, True, 0)
+        sections = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        scroll.add(sections)
+
+        def paragraph(text):
+            label = styled(Gtk.Label(label=text, xalign=0, wrap=True), "notice-text")
+            label.set_max_width_chars(52)
+            return label
+
+        sections.add(paragraph('本产品面向对账号环境一致性有严格要求的专业用户，基于 Fail-Closed（故障即断）原则构建，针对目标平台的 Risk Control 体系提供全链路防护，确保本地真实出口在任何场景下零暴露。'))
+        for index, (title, text) in enumerate(NOTICE_SECTIONS, 1):
+            card = styled(Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5), "notice-card")
+            card.add(styled(Gtk.Label(label=f"{index}. {title}", xalign=0), "notice-title"))
+            card.add(paragraph(text))
+            sections.add(card)
+        sections.add(paragraph('本防护体系基于对目标平台风控机制的持续逆向分析与实战经验迭代。'))
+        sections.add(paragraph("以上为项目原版公告。Linux 桌面账号使用独立配置目录，实际保护状态请以本机检查结果为准。"))
+        dialog.show_all()
         dialog.run()
         dialog.destroy()
 
@@ -264,6 +421,7 @@ class Monitor(Gtk.Application):
         if self.checking_update:
             return
         self.checking_update = True
+        self.update_button.set_label("检查中…")
         self.update_item.set_label("正在检查更新…")
         threading.Thread(target=self.fetch_update, daemon=True).start()
 
@@ -278,6 +436,7 @@ class Monitor(Gtk.Application):
 
     def finish_update(self, result):
         self.checking_update = False
+        self.update_button.set_label("检查更新")
         self.update_item.set_label("检查更新 · " + ("有差异" if "版本不同" in result else
                                   "已是最新" if "最新版本" in result else "未能确认"))
         if self.show_update_result:
