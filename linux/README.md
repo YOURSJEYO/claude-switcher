@@ -4,10 +4,14 @@
 
 ## 先说最重要的设计差异(为什么是这些取舍)
 
-1. **Claude 官方没有 Linux 桌面版**——Linux 上的使用形态是「网页版(浏览器) + Claude Code CLI」。因此:
-   - **账号切换**切换的是**浏览器登录态**(对 `~/.config/google-chrome` 或 `~/.config/chromium` 做快照交换),切换前会完全退出浏览器
-   - **保镖**只终止 `claude` CLI 进程,**不会关你的浏览器**(网页版没有独立进程可归因,关浏览器体验太糟;网页端的保护由 TUN + 置顶规则兜底)
-2. **没有图形界面**——Linux 桌面环境太多样,本版提供**终端交互菜单**(`claude-switch menu`)+ 完整命令行接口
+1. **桌面 Code 会话**：需要已安装的 `claude-desktop` 支持 `claude://code/new`。从应用菜单打开「Claude 切换器 (Linux)」可查看发行版、架构和客户端路径，或运行：
+   ```bash
+   claude-switch desktop-info
+   claude-switch desktop A    # 使用客户端现有配置
+   claude-switch desktop B    # 使用独立的 Electron、XDG 与 Claude Code 配置目录
+   ```
+   启动前须完全退出已有桌面实例并通过环境检查。B 首次使用请核对登录账号；客户端版本、系统密钥环和内置 Code 对配置目录的处理可能不同。代理离线时保镖会请求关闭当前用户的 claude-desktop 进程。
+2. **浏览器模式**：`switch A|B` 切换 Chrome/Chromium 浏览器资料，与桌面槽位分开。
 3. **常驻服务用 systemd 用户单元**——免 root、登录自启、崩溃自动拉起
 
 ## 系统要求
@@ -22,6 +26,14 @@
   - 其他客户端安装时选 `other`/`auto`
 - python3、bash、curl
 - 建议安装 `dnsutils`(Debian/Ubuntu)或 `bind-utils`(Fedora)以获得 dig;没有也能跑(自动回退 nslookup/getent)
+
+## 监测窗口与托盘
+
+在 `linux/` 目录运行 `bash install-monitor.sh` 即可安装当前用户的监测应用。打开应用菜单或桌面上的「Claude 切换器」。Linux 完整安装器也会安装此界面。窗口读取原有的 14 项环境检查，列出通过、警告、失败与缺失结果；每两分钟自动刷新，也可手动重新检查。完整保护尚未配置时，界面注明独立监测与默认参考目标（US / America/New_York / en_US）。
+
+点击盾牌托盘图标会弹出摘要和待处理项目，选择「打开监测窗口」查看详情。托盘连接时，关闭窗口后仍会监测；从托盘或窗口选择「退出」结束本次运行。下次登录桌面自动驻留。
+
+界面使用系统 Python 3、PyGObject 和 GTK 3。Ubuntu 上的托盘需要 GNOME AppIndicator 扩展以及 `gir1.2-ayatanaappindicator3-0.1`。不支持托盘的桌面仍可从应用菜单打开窗口。单装监测界面不需要 sudo，不启用保镖、不修改代理或系统网络设置。需要启动 Claude 或切换账号时，请先配置 TUN，再运行完整安装器。
 
 ## 安装
 
@@ -70,13 +82,21 @@ claude-switch switch A      # 切到账号A(切换浏览器登录态)
 
 | 项目 | Linux 版 |
 |---|---|
-| 账号切换对象 | 浏览器配置目录(Chrome/Chromium),不是独立 App |
-| 保镖保护对象 | `claude` CLI 进程(不关浏览器) |
+| 账号切换对象 | 桌面客户端 A/B 配置，或 Chrome/Chromium 浏览器配置目录 |
+| 保镖保护对象 | `claude` CLI 与当前用户的 `claude-desktop` 进程 |
 | 常驻方式 | systemd 用户服务(免 root) |
-| 界面 | 终端菜单 + CLI |
+| 界面 | GTK 监测窗口、盾牌托盘、终端菜单与 CLI |
 | 时区/IPv6 | timedatectl / sysctl(需 sudo) |
 
 ## 卸载
+
+仅安装监测窗口时，先从托盘选择「退出切换器」。移除以下安装器创建的文件即可撤销安装：
+
+- `~/.local/bin/claude-switch-monitor`
+- `${XDG_DATA_HOME:-~/.local/share}/claude-switcher/` 与同级 `applications/claude-switcher.desktop`
+- `${XDG_CONFIG_HOME:-~/.config}/autostart/claude-switcher.desktop` 与桌面的 `claude-switcher.desktop`
+
+以下命令用于完整安装的卸载，其中删除 `~/.claude-switcher` 会删除该目录中的账号存档，执行前请自行备份。
 
 ```bash
 systemctl --user disable --now claude-bodyguard.service

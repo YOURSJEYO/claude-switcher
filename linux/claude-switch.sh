@@ -12,7 +12,14 @@ TZ_TARGET="America/New_York"   # 锁定时区,应与出口IP所在国家一致
 LOCALE_TARGET="en_US"          # 锁定地区格式
 # =======================================================
 
+umask 077
 BASE="$HOME/.claude-switcher"
+PROBE="$BASE/stun-probe.py"
+if [ "${1:-}" = monitor-check ] && [ ! -f "$BASE/claude-switch.sh" ]; then
+    BASE="${XDG_STATE_HOME:-$HOME/.local/state}/claude-switcher-monitor"
+    PROBE="$(dirname "$0")/stun-probe.py"
+    PROXY_MODE="auto"
+fi
 DATA="$HOME/.config/google-chrome"   # Web 版登录态目录(Chrome)
 [ -d "$HOME/.config/chromium" ] && [ ! -d "$DATA" ] && DATA="$HOME/.config/chromium"
 LOG="$BASE/claude-switch.log"
@@ -85,7 +92,7 @@ egress() {
     echo "$(echo "$t" | grep '^ip=' | cut -d= -f2) $(echo "$t" | grep '^loc=' | cut -d= -f2)"
 }
 
-webrtc_test() { python3 "$BASE/stun-probe.py" 2>/dev/null; }
+webrtc_test() { python3 "$PROBE" 2>/dev/null; }
 
 # 置顶规则配置检查(仅 Clash Verge):合并配置里是否含置顶规则
 merge_ok() {
@@ -184,7 +191,7 @@ checkdetail() {
     # 9. WebRTC
     wr=$(webrtc_test)
     case "$wr" in
-        RESULT:NONE) echo 'WebRTC=ok:UDP不出网,零暴露' ;;
+        RESULT:NONE) echo 'WebRTC=fail:STUN 未返回结果，无法验证' ;;
         RESULT:*)
             wips=${wr#RESULT:}; leak=""
             OLDIFS=$IFS; IFS=','
@@ -506,6 +513,45 @@ switch_to() {
     echo "OK:已切换到账号$target(请重新打开浏览器, 耗时$(( $(date +%s) - t0 ))s)"
 }
 
+desktop_info() {
+    local PRETTY_NAME=Linux
+    [ ! -r /etc/os-release ] || . /etc/os-release
+    echo "Claude 切换器 · Linux Desktop Beta（基于 v1.8.0，187a8d6）"
+    echo "系统: ${PRETTY_NAME} ($(uname -m))"
+    if command -v claude-desktop >/dev/null; then
+        echo "Claude Code 桌面客户端: $(command -v claude-desktop)"
+    else
+        echo "Claude Code 桌面客户端: 未找到 claude-desktop"
+    fi
+}
+
+desktop_open() (
+    local slot="${1:-A}" report name
+    case "$slot" in A|B) ;; *) echo "桌面槽位必须是 A 或 B"; return 2 ;; esac
+    command -v claude-desktop >/dev/null || { echo "请先安装带有 Code 入口的 claude-desktop"; return 1; }
+    exec 9>"$BASE/desktop.lock" || return 1
+    flock -n 9 || { echo "桌面启动正在进行，请先退出已有会话"; return 1; }
+    if pgrep -u "$(id -u)" -x claude-desktop >/dev/null; then
+        echo "请先完全退出 Claude 桌面客户端，再选择槽位"
+        return 1
+    fi
+    report=$(checkdetail) || return 1
+    printf '%s\n' "$report"
+    for name in 代理内核 TUN网卡 出口IP IP一致 时区 地区 IPv6 DNS WebRTC 保镖 规则置顶 客户端语言 ASN属性 生态可达性; do
+        grep -Eq "^${name}=(ok|warn)(:|$)" <<< "$report" || { echo "启动已阻止：$name 未通过"; return 1; }
+    done
+    if [ "$slot" = B ]; then
+        umask 077
+        export CLAUDE_CONFIG_DIR="$BASE/desktop/B/code"
+        export XDG_CONFIG_HOME="$BASE/desktop/B/config"
+        mkdir -p "$CLAUDE_CONFIG_DIR" "$XDG_CONFIG_HOME" || return 1
+        set -- "--user-data-dir=$BASE/desktop/B/profile"
+    else
+        set --
+    fi
+    claude-desktop "$@" 'claude://code/new?source=desktop_action'
+)
+
 menu() {
     while true; do
         clear
@@ -513,31 +559,38 @@ menu() {
         echo "  Claude 账号切换器 (Linux)"
         echo "=============================="
         echo ""
+        desktop_info
         echo "  1) 安全检查 (checkdetail)"
         echo "  2) 一键修复 (fix)"
         echo "  3) 切换到账号 A"
         echo "  4) 切换到账号 B"
         echo "  5) 查看状态 (status)"
+        echo "  6) 打开 Claude Code 桌面版 (A，现有配置)"
+        echo "  7) 打开 Claude Code 桌面版 (B，独立配置)"
         echo "  0) 退出"
         echo ""
-        read -r -p "选择: " c
+        read -r -p "选择: " c || return
         case "$c" in
             1) checkdetail; read -r -p "回车继续..." _ ;;
             2) fix; read -r -p "回车继续..." _ ;;
             3) switch_to A; read -r -p "回车继续..." _ ;;
             4) switch_to B; read -r -p "回车继续..." _ ;;
             5) status; read -r -p "回车继续..." _ ;;
+            6|7) if [ "$c" = 6 ]; then desktop_open A; else desktop_open B; fi; read -r -p "回车继续..." _ ;;
             0) exit 0 ;;
         esac
     done
 }
 
 case "${1:-menu}" in
+    monitor-check) checkdetail ;;
     checkdetail) OUT="$BASE/last-check.txt"; { checkdetail; } > "$OUT" 2>&1; cat "$OUT" ;;
+    desktop-info) desktop_info ;;
+    desktop) desktop_open "${2:-A}" ;;
     status) status ;;
     fix) fix ;;
-    switch) switch_to "${2:-}" ;;
+    switch) case "${2:-}" in A|B) switch_to "$2" ;; *) echo "槽位必须是 A 或 B"; exit 2 ;; esac ;;
     write-merge-rules) write_merge_rules ;;  # 隐藏入口:供安装器调用,保证两处合并逻辑一致
     menu) menu ;;
-    *) echo "用法: claude-switch.sh checkdetail|status|fix|switch A|B|menu"; exit 2 ;;
+    *) echo "用法: claude-switch.sh checkdetail|status|fix|switch A|B|desktop [A|B]|desktop-info|menu"; exit 2 ;;
 esac

@@ -309,7 +309,7 @@ RestartSec=5
 WantedBy=default.target
 EOF
 systemctl --user daemon-reload
-systemctl --user enable --now claude-bodyguard.service >/dev/null 2>&1 \
+systemctl --user enable claude-bodyguard.service >/dev/null 2>&1 && systemctl --user restart claude-bodyguard.service \
     && echo "✓ 保镖已注册并启动(systemd 用户服务,登录自启)" \
     || echo "✗ 保镖注册失败,可稍后用 fix 自动补装"
 
@@ -325,6 +325,7 @@ command -v resolvectl >/dev/null 2>&1 && resolvectl flush-caches 2>/dev/null
 # ---- 终端入口 ----
 mkdir -p "$HOME/.local/bin"
 ln -sf "$BASE/claude-switch.sh" "$HOME/.local/bin/claude-switch" 2>/dev/null
+bash "$DIR/install-monitor.sh" || echo "图形界面未安装；终端菜单仍可使用"
 echo ""
 echo "=================================="
 echo "  ✅ 安装完成!"
