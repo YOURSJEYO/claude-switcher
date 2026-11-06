@@ -89,9 +89,14 @@ class WindowsSwitchSafetyTests(unittest.TestCase):
         self.assertIn("code = 'warn'; detail = 'STUN 无响应", self.core)
 
     def test_asn_multiline_responses_are_reassembled(self):
+        # 多行响应必须在解析前拼回整体。拼接已收敛到 Invoke-ProbeText 助手，
+        # 这里锁住"ASN 两处查询都走助手"且"助手会拼接"。
         start = self.core.index("if (Test-CheckDisabled 'ASN属性')")
         body = self.core[start:self.core.index("if (Test-CheckDisabled '生态可达性')", start)]
-        self.assertEqual(body.count('-join "`n"'), 2)
+        self.assertEqual(body.count("Invoke-ProbeText"), 2)
+        helper_start = self.core.index("function Invoke-ProbeText")
+        helper = self.core[helper_start:self.core.index("\nfunction ", helper_start)]
+        self.assertIn('-join "`n"', helper)
 
     def test_client_language_is_not_hardcoded_ok(self):
         self.assertNotIn("客户端语言=ok:跟随系统", self.core)

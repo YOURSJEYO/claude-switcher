@@ -5,10 +5,14 @@ $core = Join-Path (Split-Path -Parent $PSScriptRoot) 'windows\claude-switch.ps1'
 $parseErrors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile($core, [ref]$null, [ref]$parseErrors)
 if ($parseErrors.Count) { throw $parseErrors[0].Message }
-foreach ($name in @('Test-CheckDisabled', 'Format-OptionalResult')) {
+foreach ($name in @('Invoke-ProbeText', 'Test-ProxyPathAlive', 'Test-CheckDisabled', 'Format-OptionalResult')) {
     $fn = $ast.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name }, $true)
     . ([scriptblock]::Create($fn.Extent.Text))
 }
+# ASN 查询要把出口 IP 交给第三方,生产实现要求路径存活才发请求。
+# 这里打桩环境信号,组合逻辑(Test-ProxyPathAlive)用生产实现。
+function Test-ProxyAlive { return $true }
+function Test-TunUp { return $true }
 $detail = $ast.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Invoke-CheckDetail' }, $true)
 $statement = $detail.Body.EndBlock.Statements | Where-Object {
     $_ -is [Management.Automation.Language.IfStatementAst] -and $_.Clauses[0].Item1.Extent.Text -eq "Test-CheckDisabled 'ASN属性'"
