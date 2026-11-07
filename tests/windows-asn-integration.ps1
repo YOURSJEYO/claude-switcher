@@ -1,4 +1,4 @@
-# 隔离执行真实 ASN 检查语句；只读取仓库源码，外部查询全部打桩。
+﻿# 隔离执行真实 ASN 检查语句；只读取仓库源码，外部查询全部打桩。
 # powershell -NoProfile -ExecutionPolicy Bypass -File tests\windows-asn-integration.ps1
 $ErrorActionPreference = 'Stop'
 $core = Join-Path (Split-Path -Parent $PSScriptRoot) 'windows\claude-switch.ps1'
