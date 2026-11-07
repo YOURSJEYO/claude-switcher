@@ -1,14 +1,18 @@
-﻿# 隔离执行真实 ASN 检查语句；只读取仓库源码，外部查询全部打桩。
+# 隔离执行真实 ASN 检查语句；只读取仓库源码，外部查询全部打桩。
 # powershell -NoProfile -ExecutionPolicy Bypass -File tests\windows-asn-integration.ps1
 $ErrorActionPreference = 'Stop'
 $core = Join-Path (Split-Path -Parent $PSScriptRoot) 'windows\claude-switch.ps1'
 $parseErrors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile($core, [ref]$null, [ref]$parseErrors)
 if ($parseErrors.Count) { throw $parseErrors[0].Message }
-foreach ($name in @('Test-CheckDisabled', 'Format-OptionalResult')) {
+foreach ($name in @('Invoke-ProbeText', 'Test-ProxyPathAlive', 'Test-CheckDisabled', 'Format-OptionalResult')) {
     $fn = $ast.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name }, $true)
     . ([scriptblock]::Create($fn.Extent.Text))
 }
+# ASN 查询要把出口 IP 交给第三方,生产实现要求路径存活才发请求。
+# 这里打桩环境信号,组合逻辑(Test-ProxyPathAlive)用生产实现。
+function Test-ProxyAlive { return $true }
+function Test-TunUp { return $true }
 $detail = $ast.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Invoke-CheckDetail' }, $true)
 $statement = $detail.Body.EndBlock.Statements | Where-Object {
     $_ -is [Management.Automation.Language.IfStatementAst] -and $_.Clauses[0].Item1.Extent.Text -eq "Test-CheckDisabled 'ASN属性'"
@@ -74,4 +78,10 @@ $e.ip = '198.51.100.24'
 $script:CheckConfig.disabled = @('ASN属性')
 Assert '禁用检查显示 skip' '^ASN属性=skip:用户已禁用$'
 if ($script:calls.Count) { throw '禁用检查仍触发查询' }
+
+# 现有 CI 已分别在 PS 5.1 / pwsh 7 执行本文件；在此调用出口探测重试回归，
+# 避免为了一个测试步骤额外修改 workflow 文件。
+$egressTest = Join-Path $PSScriptRoot 'windows-egress-retry-integration.ps1'
+& (Get-Process -Id $PID).Path -NoProfile -ExecutionPolicy Bypass -File $egressTest
+if ($LASTEXITCODE -ne 0) { throw "出口探测重试回归失败: $LASTEXITCODE" }
 'ALL PASS'
