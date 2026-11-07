@@ -158,6 +158,33 @@ class SetClientTests(unittest.TestCase):
         kill_args = (self.root / "kill-args").read_text(encoding="utf-8").strip()
         self.assertEqual(kill_args, "-TERM 201 203", "非 root 下应以自身 UID 过滤,而非 __HOME__ 属主")
 
+    def test_clashx_variants_are_detected_by_app_path(self):
+        core = self.copy.read_text(encoding="utf-8")
+        match = re.search(r"(?ms)^clashx_alive\(\) \{\n.*?^\}", core)
+        self.assertIsNotNone(match, "核心需要独立的 ClashX/Pro/Meta 进程识别助手")
+        script = match.group(0) + r'''
+            pgrep() { case "$*" in *"/Contents/MacOS/ClashX"*) return 0 ;; *) return 1 ;; esac; }
+            clashx_alive
+        '''
+        env = dict(os.environ, HOME=str(self.root), PATH=f"{self.fakebin}:/usr/bin:/bin")
+        run = subprocess.run(["/bin/bash", "-c", script],
+                             env=env, text=True, capture_output=True, timeout=10)
+        self.assertEqual(run.returncode, 0, "ClashX Pro/Meta 的 /Contents/MacOS/ClashX 主进程应被识别")
+
+    def test_clashx_variant_keeps_guard_online(self):
+        script = self.install_guard("clashx")
+        self.stub("ifconfig", "#!/bin/sh\necho 'inet 198.18.0.1'\n")
+        self.stub("pgrep", "#!/bin/sh\ncase \"$*\" in *Claude.app*|*/Contents/MacOS/ClashX*) exit 0 ;; *) exit 1 ;; esac\n")
+        self.stub("pkill", "#!/bin/sh\ntouch \"$CLAUDE_SWITCHER_TEST_ROOT/pkill-called\"\n")
+        self.stub("id", "#!/bin/sh\necho 502\n")
+        self.stub("ps", "#!/bin/sh\ncat <<'EOF'\n"
+                        "  301   502 node            /Users/u/project/server.js\n"
+                        "EOF\n")
+        run = self.run_guard(script)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertFalse((self.root / "pkill-called").exists(),
+                         "ClashX Pro/Meta 在线时保镖不得误判离线并关闭 Claude")
+
     def test_bodyguard_offline_still_kills_desktop_claude(self):
         script = self.install_guard("clash-verge")
         self.stub("ifconfig", "#!/bin/sh\necho 'inet 192.168.1.2'\n")

@@ -1009,6 +1009,15 @@ shadowrocket_up() {
     fi
 }
 
+# ClashX / ClashX Pro / ClashX Meta 的主可执行文件都在 .../Contents/MacOS/ClashX。
+# 只按 -x ClashX 会漏掉 Pro/Meta，按小写 "clash" 又匹配不到大写主进程。
+clashx_alive() {
+    pgrep -f '/Contents/MacOS/ClashX' >/dev/null 2>&1 \
+        || pgrep -x ClashX >/dev/null 2>&1 \
+        || pgrep -x 'ClashX Pro' >/dev/null 2>&1 \
+        || pgrep -x 'ClashX Meta' >/dev/null 2>&1
+}
+
 # 代理内核在线判定:按安装时识别的客户端分派;auto 时任一命中即活
 proxy_alive() {
     case "$PROXY_MODE" in
@@ -1016,11 +1025,11 @@ proxy_alive() {
         flclash)      pgrep -f FlClashCore >/dev/null 2>&1 || pgrep -x FlClash >/dev/null 2>&1 ;;
         shadowrocket) shadowrocket_up ;;
         sing-box)     pgrep -f sing-box >/dev/null 2>&1 ;;
-        clashx)       pgrep -x ClashX >/dev/null 2>&1 || pgrep -f clash >/dev/null 2>&1 ;;
+        clashx)       clashx_alive ;;
         surge)        pgrep -f Surge >/dev/null 2>&1 ;;
         auto)         pgrep -f verge-mihomo >/dev/null 2>&1 || shadowrocket_up \
                       || pgrep -f sing-box >/dev/null 2>&1 \
-                      || pgrep -x ClashX >/dev/null 2>&1 || pgrep -f clash >/dev/null 2>&1 \
+                      || clashx_alive \
                       || pgrep -f Surge >/dev/null 2>&1 ;;
         *)            pgrep -f verge-mihomo >/dev/null 2>&1 ;;
     esac

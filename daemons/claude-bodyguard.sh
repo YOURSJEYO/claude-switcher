@@ -15,6 +15,14 @@ fi
 
 ok=1
 
+# ClashX / Pro / Meta 共用 .../Contents/MacOS/ClashX 主进程路径。
+clashx_alive() {
+    pgrep -f '/Contents/MacOS/ClashX' >/dev/null 2>&1 \
+        || pgrep -x ClashX >/dev/null 2>&1 \
+        || pgrep -x 'ClashX Pro' >/dev/null 2>&1 \
+        || pgrep -x 'ClashX Meta' >/dev/null 2>&1
+}
+
 # TUN 在线判定:存在 fake-ip 网段地址即视为 TUN 已接管
 ifconfig 2>/dev/null | grep -q 'inet 198\.18\.' || ok=0
 
@@ -33,7 +41,7 @@ case "$MODE" in
     sing-box)
         pgrep -f sing-box >/dev/null 2>&1 || ok=0 ;;
     clashx)
-        { pgrep -x ClashX >/dev/null 2>&1 || pgrep -f clash >/dev/null 2>&1; } || ok=0 ;;
+        clashx_alive || ok=0 ;;
     surge)
         pgrep -f Surge >/dev/null 2>&1 || ok=0 ;;
     auto)
