@@ -147,13 +147,15 @@ if [ -d "$CLASH_DIR" ]; then
     MODE="clash-verge"
 elif [ -d "$FLCLASH_DIR" ]; then
     MODE="flclash"
+elif [ -d "/Applications/Bettbox.app" ]; then
+    MODE="bettbox"
 elif scutil --nc list 2>/dev/null | grep -q 'com.liguangming.Shadowrocket'; then
     MODE="shadowrocket"
 else
     echo "未自动识别到代理客户端,请手动选择:"
     echo "  1) clash-verge    2) flclash         3) shadowrocket"
     echo "  4) sing-box       5) clashx          6) surge"
-    echo "  7) auto(任一命中即活)"
+    echo "  7) bettbox        8) auto(任一命中即活)"
     read -r -p "请输入序号或名称: " pick
     case "$pick" in
         1|clash-verge)  MODE="clash-verge" ;;
@@ -162,7 +164,8 @@ else
         4|sing-box)      MODE="sing-box" ;;
         5|clashx)        MODE="clashx" ;;
         6|surge)         MODE="surge" ;;
-        7|auto)          MODE="auto" ;;
+        7|bettbox)       MODE="bettbox" ;;
+        8|auto)          MODE="auto" ;;
         *) echo "未识别的选择,退出"; exit 1 ;;
     esac
 fi

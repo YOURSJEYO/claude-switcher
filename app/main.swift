@@ -96,6 +96,7 @@ final class VM: ObservableObject {
     static let clientChoices: [(key: String, label: String)] = [
         ("clash-verge", "Clash Verge"),
         ("flclash", "FlClash"),
+        ("bettbox", "Bettbox"),
         ("shadowrocket", "Shadowrocket"),
         ("sing-box", "sing-box"),
         ("clashx", "ClashX"),
