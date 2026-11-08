@@ -651,8 +651,9 @@ def api_get(endpoint, secret, path):
         response = connection.getresponse()
         if response.status != 200:
             fail("Clash 内核接口未返回成功状态")
-        data = response.read(2 * 1024 * 1024 + 1)
-        if len(data) > 2 * 1024 * 1024:
+        # 本地内核接口(仅 unix socket/127.0.0.1);大订阅的 /rules 可超 2 MiB,上限放宽到 16 MiB,仍保留安全边界
+        data = response.read(16 * 1024 * 1024 + 1)
+        if len(data) > 16 * 1024 * 1024:
             fail("Clash 内核接口响应过大")
         value = json.loads(data.decode("utf-8"))
         if not isinstance(value, dict):
