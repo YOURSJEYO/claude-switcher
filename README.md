@@ -109,11 +109,13 @@ AI 服务平台的风控已经从"看 IP"进化到**全维度环境画像**：�
 
 到 [Releases](https://github.com/YOURSJEYO/claude-switcher/releases/latest) 下载最新版本，按用途选择：
 
-- `ClaudeSwitcher-<版本>-installer-kit.zip`：**首次安装推荐**。解压后双击 `installer/安装.command`，安装核心脚本、守护进程与桌面 App。
+- `ClaudeSwitcher-<版本>-installer-kit.zip`：**首次安装推荐**。解压后双击 `installer/安装.command`，安装核心脚本、守护进程，并将 App 安装到 `/Applications/Claude切换器.app`。
 - `ClaudeSwitcher-<版本>-macos-arm64-app-only.dmg` / `.zip`：**仅包含界面 App**（不含核心脚本）；已安装核心脚本时可用于替换旧版界面。首次安装请用上面的 installer-kit。
 - `ClaudeSwitcher-<版本>-windows.zip` / `ClaudeSwitcher-<版本>-linux.tar.gz`：Windows / Linux 脚本包（Beta），说明见各自目录的 README。
 
 > macOS 产物为 ad-hoc 签名、未公证。首次打开若被 Gatekeeper 拦截，请右键打开，或在「系统设置 → 隐私与安全性」中放行。每个 Release 附带 `SHA256SUMS-release.txt`，可用 `shasum -a 256 -c` 校验下载文件。
+
+安装器先编译并验证签名，成功后才替换应用程序中的旧版；权限不足时请求管理员密码。重复安装会保留旧版 App 备份，失败会尝试恢复。旧版桌面副本和账号存档不会自动删除。
 
 ### 从源码安装
 
@@ -140,7 +142,7 @@ git clone https://github.com/YOURSJEYO/claude-switcher.git
 
 ## 使用
 
-1. 双击桌面「Claude切换器」→ 等待 14 项检查
+1. 从「应用程序」、启动台或 Spotlight 打开「Claude切换器」→ 等待 14 项检查
 2. 硬性安全项全部通过 → 选账号启动；有红项 → 「一键修复」自动处理。灰色跳过项仅代表用户明确关闭了对应非关键检查
 3. B/C/D 账号首次使用登录一次，以后 A–D 随切随用、互不干扰
 4. 换了其他国家的节点 → 跑一次 `~/.local/bin/claude-switch.sh set-region`，国家/时区/地区格式一键重新锁定

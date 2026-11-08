@@ -48,7 +48,7 @@ Open the [latest release](https://github.com/YOURSJEYO/claude-switcher/releases/
 
 | Asset | Use |
 |---|---|
-| `ClaudeSwitcher-<version>-installer-kit.zip` | Full first-time install. Unzip and double-click `installer/安装.command`; it installs the core script, daemons, and desktop app. |
+| `ClaudeSwitcher-<version>-installer-kit.zip` | Full first-time install. Unzip and double-click `installer/安装.command`; it installs the core script and daemons, and places the app in `/Applications/Claude切换器.app`. |
 | `ClaudeSwitcher-<version>-macos-arm64-app-only.dmg` / `.zip` | The macOS app bundle only (no core scripts); for machines where the core is already installed. First-time installs should use the installer kit. |
 | `ClaudeSwitcher-<version>-windows.zip` | Windows scripts (beta). See `windows/README.md`. |
 | `ClaudeSwitcher-<version>-linux.tar.gz` | Linux scripts (beta). See `linux/README.md`. |
@@ -119,3 +119,5 @@ License, version 3 only (AGPL-3.0-only); you are responsible for how you use it.
 AGPL-3.0-only © 2026 Claude Switcher Contributors
 
 > New releases from November 2, 2026 are licensed under AGPL-3.0-only. Earlier releases remain available under the MIT license; rights already granted are unaffected.
+
+The macOS installer builds and verifies the app before replacement, requests administrator permission when necessary, and preserves the previous app for recovery. Open it from Applications, Launchpad, or Spotlight. Existing Desktop copies and account archives are retained.

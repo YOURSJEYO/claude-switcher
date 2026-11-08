@@ -7,7 +7,7 @@
 
 ## 你的任务
 
-帮助用户在 macOS 上安装并配置「Claude 切换器」：一个带环境安检的 Claude 账号启动/切换工具。目标状态是：**用户双击桌面图标，14 项检查均已完成，硬性安全项全部通过；仅用户显式配置的非关键项可显示跳过或警告，且可以正常启动 Claude**。
+帮助用户在 macOS 上安装并配置「Claude 切换器」：一个带环境安检的 Claude 账号启动/切换工具。目标状态是：**用户从应用程序打开 App，14 项检查均已完成，硬性安全项全部通过；仅用户显式配置的非关键项可显示跳过或警告，且可以正常启动 Claude**。
 
 ## 开始之前：必须先确认的前置条件
 
@@ -28,7 +28,7 @@
 3. Clash Verge 模式下，从 `clash-verge.yaml` 的 `proxy-groups:` 找第一个 `type: select` 的组名写进 `PROXY_GROUP="..."`（其他客户端跳过）
 4. 按出口 IP 自动锁定地区目标：多源依次尝试 ipinfo.io（country/timezone）→ ipapi.co（country_code/timezone）→ ifconfig.co（country_iso/timezone）→ Cloudflare trace（loc，时区用国家默认映射），全失败时让用户在 US/JP/TW/HK/SG/GB/DE/FR/KR/AU/CA 中手动选，`FORCE=1` 按 US + America/New_York；country → `COUNTRY_TARGET`，timezone → `TZ_TARGET`，country 经映射表（US→en_US、JP→ja_JP、TW→zh_TW、HK→zh_HK、SG→en_SG、GB→en_GB、DE→de_DE、FR→fr_FR、KR→ko_KR、AU→en_AU、CA→en_CA，其余→en_US）→ `LOCALE_TARGET`，三项都写进脚本头部
 5. 参照 `daemons/` 目录的模板，物化保镖与时区看门狗脚本（把 `__HOME__` / `__TZ_TARGET__` / `__PROXY_MODE__` 替换为实际值），用 sudo 装入 **root 所有的** `/Library/Application Support/claude-switcher/`（chown root:wheel、chmod 755，用户态不可写防提权）；`local.claude-bodyguard` / `local.tz-watchdog` 两个 LaunchDaemon 安装到 `/Library/LaunchDaemons/`（plist 的 ProgramArguments 已写死指向系统目录，直接 cp 即可）。自动更新 `local.claude-update` 是**用户态 LaunchAgent**：plist 放 `~/Library/LaunchAgents/`，用 `launchctl bootstrap gui/$(id -u)` 注册，不走 root（模板 `daemons/local.claude-update.plist`，每 12 小时跑一次 `update --auto`）
-6. 现场编译界面 App（需要 Xcode 命令行工具，必须带 `-target` 否则新 SDK 产物在老系统拒启动）：
+6. 现场编译界面 App 后安装到 `/Applications/Claude切换器.app`，通过 `installer/install-app.sh` 保留旧版并处理权限（需要 Xcode 命令行工具，必须带 `-target` 否则新 SDK 产物在老系统拒启动）：
    ```bash
    swiftc -O -parse-as-library -target "$(uname -m)-apple-macos13.0" app/main.swift -o Claude切换器.app/Contents/MacOS/ClaudeSwitcher -framework SwiftUI -framework AppKit
    ```
@@ -54,7 +54,7 @@
 ## 验收标准（全部满足才算装完）
 
 - 终端执行 `~/.local/bin/claude-switch.sh checkdetail` 输出完整 14 行；硬性安全项全部 `=ok`，非关键项只能是 `=ok`、既有警告，或用户显式配置的 `=skip`/降级警告
-- 双击桌面 App，无红色硬性安全项，能正常启动 Claude；灰色 `skip` 不得当成绿色通过
+- 打开 `/Applications/Claude切换器.app`，无红色硬性安全项，能正常启动 Claude；灰色 `skip` 不得当成绿色通过
 - `launchctl print system/local.claude-bodyguard`、`system/local.tz-watchdog` 与 `gui/$(id -u)/local.claude-update` 均能查到（服务已注册）
 - `/Library/Application Support/claude-switcher/` 下两个守护脚本属 root:wheel、权限 755，当前用户不可写
 - 切换一次账号 B 再切回 A，A 的登录态完好

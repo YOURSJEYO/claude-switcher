@@ -300,11 +300,10 @@ cp "$REPO/daemons/local.claude-bodyguard.plist" "$REPO/daemons/local.tz-watchdog
 sed "s|__HOME__|$H|g" "$REPO/daemons/local.claude-update.plist" > "$H/.local/bin/local.claude-update.plist"
 echo "✓ 核心文件已安装"
 
-# ---- 4. 现场编译 App 到桌面 ----
-APP="$H/Desktop/Claude切换器.app"
-mkdir -p "$H/Desktop"
-pkill -x ClaudeSwitcher 2>/dev/null
-rm -rf "$APP"
+# ---- 4. 编译验证完成后安装到应用程序 ----
+APP_BUILD=$(mktemp -d)
+APP="$APP_BUILD/Claude切换器.app"
+trap 'rm -rf "$APP_BUILD"' EXIT
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 # 必须带 -target,否则新 SDK 编出的二进制在老系统被拒启动
 if swiftc -O -parse-as-library -target "$(uname -m)-apple-macos13.0" \
@@ -347,8 +346,20 @@ cat > "$APP/Contents/Info.plist" <<EOF
 </dict>
 </plist>
 EOF
-codesign --force --deep -s - "$APP" >/dev/null 2>&1 || true
-echo "✓ App 已放到桌面"
+if ! codesign --force --deep -s - "$APP" || ! codesign --verify --deep --strict "$APP"; then
+    echo "✗ App 签名验证失败，未替换已安装的 App"; exit 1
+fi
+if [ -n "$DRYRUN" ]; then
+    echo "[演练模式] App 已编译验证，跳过安装到应用程序"
+else
+    pkill -x ClaudeSwitcher 2>/dev/null || true
+    if ! bash "$REPO/installer/install-app.sh" "$APP"; then
+        echo "✗ 无法安装 App 到应用程序，请检查权限后重试"; exit 1
+    fi
+    APP="/Applications/Claude切换器.app"
+    /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$APP" || true
+    echo "✓ App 已安装到 $APP"
+fi
 
 # ---- 5. 生成全局扩展脚本(仅 Clash Verge;保留已有 main 与无关配置) ----
 if [ "$MODE" = "clash-verge" ]; then
@@ -423,7 +434,7 @@ echo "=================================="
 echo ""
 echo "=================================="
 echo "  ✅ 安装完成!"
-echo "  使用: 双击桌面「Claude切换器」"
+echo "  使用: 从「应用程序」、启动台或 Spotlight 打开「Claude切换器」"
 echo "  首次使用: 打开后选账号A(自动收编当前登录)"
 echo "  换了其他国家节点后: 运行 claude-switch.sh set-region 一键重新适配"
 echo "  自动更新已启用(每12小时检查一次),也可手动: claude-switch.sh update"

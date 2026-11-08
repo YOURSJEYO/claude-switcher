@@ -9,6 +9,7 @@ shasum -a 256 \
     daemons/local.claude-bodyguard.plist \
     daemons/local.tz-watchdog.plist \
     daemons/local.claude-update.plist \
+    installer/install-app.sh \
     installer/安装.command \
     installer/卸载.command \
     linux/*.sh linux/*.py linux/monitor.css linux/claude-switcher-shield-symbolic.svg > SHA256SUMS
