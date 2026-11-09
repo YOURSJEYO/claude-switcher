@@ -35,10 +35,10 @@ The close icon and Escape leave the notice unread. “知道了” (including it
 - [x] Document isolated UI acceptance for unread restart, acknowledged restart, hidden-window manual access, existing security content, Issue opening and sheet conflicts.
 - [x] Run focused static tests and applicable repository checks; inspect the diff for encoding and unrelated changes. All 106 static checks pass in an isolated checkout using the repository's LF endings; two unrelated working-copy CRLF assertions fail locally. Swift scenarios are skipped on Windows.
 - [x] Review the implementation and resolve actionable findings. Add actual attached-sheet assertions to the launch/manual lifecycle scenario; physical button interaction remains part of manual macOS acceptance.
-- [ ] Verify the macOS model tests and strict Swift build on a macOS runner when available.
+- [x] Verify the macOS model tests and strict Swift build on a macOS runner. GitHub Actions checks run 42577503499 passed for implementation commit c8441cb, including the model regressions, production build, isolated demo build, checksums, and the Windows/Linux jobs.
 - [x] Record any remaining manual macOS UI acceptance limitation: this Windows host cannot perform macOS manual UI/VoiceOver acceptance. Follow tests/MENU-BAR-TESTING.md in the isolated demo.
 
 ## 4. Delivery
 
-- [ ] Fetch origin/main, preserve concurrent work and commit the implementation with its tests and documentation.
-- [ ] Push main, inspect the resulting checks and report their actual outcome. Do not publish a release or deploy locally.
+- [x] Fetch origin/main, preserve concurrent work and commit the implementation with its tests and documentation.
+- [x] Push main and inspect the resulting checks: all three platform jobs passed for c8441cb. No release was published and no local installation was changed.
