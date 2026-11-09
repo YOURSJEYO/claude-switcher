@@ -8,6 +8,7 @@ import unittest
 
 PROJECT = Path(__file__).resolve().parents[1]
 SCENARIOS = (
+    "official_release_acknowledgement", "official_release_modal_guard", "official_release_window_lifecycle",
     "startup_once", "multi_account_status", "first_use_cd_note", "legacy_status_fallback",
     "invalid_multi_account_status", "warnings_allowed", "skipped_optional_allowed", "settings_round_trip", "local_status_refresh", "fresh_audit", "failed_check",
     "incomplete_check", "duplicate_check", "duplicate_overwrite", "empty_check",

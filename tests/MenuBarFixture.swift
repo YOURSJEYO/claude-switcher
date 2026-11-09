@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import CryptoKit
 
 // 仅供隔离 UI 验证。没有路径参数就拒绝启动，绝不回退到真实安装的核心脚本。
 final class FixtureDelegate: AppDelegate {
@@ -8,7 +9,17 @@ final class FixtureDelegate: AppDelegate {
               FileManager.default.fileExists(atPath: CommandLine.arguments[1]) else {
             fatalError("隔离演示需要显式传入 fake-core.sh 路径")
         }
-        super.init(vm: VM(core: CommandLine.arguments[1]))
+        let core = URL(fileURLWithPath: CommandLine.arguments[1]).standardizedFileURL.path
+        let digest = SHA256.hash(data: Data(core.utf8)).map { String(format: "%02x", $0) }.joined()
+        let suiteName = "claude-switcher-demo.\(digest)"
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            fatalError("无法创建隔离演示偏好存储")
+        }
+        // 相同假脚本路径复用演示偏好，重启可验证持久化；不会读取生产偏好。
+        if CommandLine.arguments.contains("--reset-notice") {
+            defaults.removePersistentDomain(forName: suiteName)
+        }
+        super.init(vm: VM(core: core, noticeDefaults: defaults))
     }
 
     override func applicationDidFinishLaunching(_ notification: Notification) {

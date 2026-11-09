@@ -53,6 +53,10 @@ jobs:
             -target "$(uname -m)-apple-macos13.0" \
             app/main.swift -o /tmp/ClaudeSwitcher \
             -framework SwiftUI -framework AppKit
+          swiftc -O -parse-as-library -warnings-as-errors -D CLAUDE_SWITCHER_TESTS \
+            -target "$(uname -m)-apple-macos13.0" \
+            app/main.swift tests/MenuBarFixture.swift -o /tmp/MenuBarFixture \
+            -framework SwiftUI -framework AppKit
 
       - name: Verify checksums
         run: shasum -a 256 -c SHA256SUMS

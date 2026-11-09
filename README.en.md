@@ -110,6 +110,8 @@ The official version of this project is provided free of charge. The maintainers
 
 AGPL-3.0-only permits redistribution and charging a fee when its obligations are met, so charging alone is not necessarily a violation. If you find an impersonating seller, or a distribution that omits the corresponding source, removes the license notice, or hides modifications, please report it through an [Issue](https://github.com/YOURSJEYO/claude-switcher/issues) with the listing URL, screenshots, and version details. Do not publish buyers’ personal information, order details, or account credentials.
 
+The macOS app shows this notice on first launch, including the first launch after upgrading to a version with this feature. Select “知道了” (Got it) to acknowledge it and stop automatic reminders. Closing it without acknowledgement leaves it pending for the next launch. Reopen it at any time from the main window’s information menu or the menu-bar item “官方版本免费与举报”. The existing security bulletin remains available in the information menu.
+
 ## Links
 
 - [中文说明](README.md)

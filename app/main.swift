@@ -16,6 +16,23 @@ struct CheckRow: Identifiable {
 
 enum Phase { case checking, ready, failed, switching, done, fixing }
 
+enum NoticePage: String, Identifiable {
+    case officialRelease, security
+    var id: String { rawValue }
+}
+
+enum OfficialReleaseReminder {
+    static let seenKey = "officialReleaseReminderSeen.v1"
+
+    static func shouldShow(in defaults: UserDefaults) -> Bool {
+        !defaults.bool(forKey: seenKey)
+    }
+
+    static func markSeen(in defaults: UserDefaults) {
+        defaults.set(true, forKey: seenKey)
+    }
+}
+
 struct CoreResult {
     let output: String
     let succeeded: Bool
@@ -83,6 +100,9 @@ final class VM: ObservableObject {
     @Published var settingsMessage = ""
     @Published private(set) var settingsBusy = false
     @Published var showSettingsSheet = false
+    @Published var activeNotice: NoticePage?
+    @Published var showFingerprint = false
+    @Published var showAIPrompt = false
 
     static let optionalChecks: [(key: String, label: String)] = [
         ("IP一致", "IP 与上次一致"),
@@ -106,6 +126,8 @@ final class VM: ObservableObject {
     let core: String
     private let checkTimeout: TimeInterval
     private let operationTimeout: TimeInterval
+    private let noticeDefaults: UserDefaults
+    private var consideredStartupNotice = false
     private var started = false
     private var switchRequested = false
     private var checkingUpdate = false
@@ -113,10 +135,12 @@ final class VM: ObservableObject {
     var onSwitchCompleted: (() -> Void)?
 
     init(core: String = NSHomeDirectory() + "/.local/bin/claude-switch.sh",
-         checkTimeout: TimeInterval = 45, operationTimeout: TimeInterval = 180) {
+         checkTimeout: TimeInterval = 45, operationTimeout: TimeInterval = 180,
+         noticeDefaults: UserDefaults = .standard) {
         self.core = core
         self.checkTimeout = checkTimeout
         self.operationTimeout = operationTimeout
+        self.noticeDefaults = noticeDefaults
     }
 
     var canQuit: Bool { !switchRequested && phase != .fixing && phase != .switching }
@@ -130,6 +154,29 @@ final class VM: ObservableObject {
     func prepareToShow() {
         hideAfterSwitch?.cancel()
         if phase == .done { phase = .ready }
+    }
+
+    var hasPresentedSheet: Bool {
+        activeNotice != nil || showSettingsSheet || showUpdateSheet || showFingerprint || showAIPrompt
+    }
+
+    func prepareOfficialReleaseNotice() {
+        guard !consideredStartupNotice else { return }
+        consideredStartupNotice = true
+        if OfficialReleaseReminder.shouldShow(in: noticeDefaults) {
+            presentNotice(.officialRelease)
+        }
+    }
+
+    func presentNotice(_ page: NoticePage) {
+        guard !hasPresentedSheet else { return }
+        activeNotice = page
+    }
+
+    func acknowledgeOfficialReleaseNotice() {
+        guard activeNotice == .officialRelease else { return }
+        OfficialReleaseReminder.markSeen(in: noticeDefaults)
+        activeNotice = nil
     }
 
     private func run(_ args: [String], timeout: TimeInterval = 45, done: @escaping (CoreResult) -> Void) {
@@ -630,9 +677,6 @@ struct ClaudeIconButton: View {
 struct ContentView: View {
     @ObservedObject var vm: VM
     var height: CGFloat = 900
-    @State private var showNotice = false
-    @State private var showFingerprint = false
-    @State private var showAIPrompt = false
 
     var body: some View {
         ZStack {
@@ -663,8 +707,16 @@ struct ContentView: View {
             }
             .padding(16)
         }
-        .sheet(isPresented: $showAIPrompt) { AIPromptSheet(text: vm.aiPrompt) }
+        .sheet(isPresented: $vm.showAIPrompt) { AIPromptSheet(text: vm.aiPrompt) }
         .sheet(isPresented: $vm.showSettingsSheet) { CheckSettingsView(vm: vm) }
+        .sheet(item: $vm.activeNotice) { page in
+            switch page {
+            case .officialRelease:
+                OfficialReleaseNoticeView(onAcknowledge: vm.acknowledgeOfficialReleaseNotice)
+            case .security:
+                NoticeView()
+            }
+        }
         .frame(width: 440, height: height)
         .preferredColorScheme(.light)
     }
@@ -709,7 +761,7 @@ struct ContentView: View {
                 help: "设备指纹体检(字体/GPU/虚拟机)",
                 disabled: vm.isBusy
             ) {
-                showFingerprint = true
+                vm.showFingerprint = true
                 vm.inspectFingerprint()
             }
 
@@ -720,16 +772,26 @@ struct ContentView: View {
                 vm.showSettingsSheet = true
             }
 
-            ClaudeIconButton(
-                systemName: "info.circle",
-                help: "安全防护体系公告"
-            ) {
-                showNotice = true
+            Menu {
+                Button("官方版本免费与举报") { vm.presentNotice(.officialRelease) }
+                Button("安全防护体系公告") { vm.presentNotice(.security) }
+            } label: {
+                Image(systemName: "info.circle")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundColor(ClaudeTheme.muted)
+                    .frame(width: 28, height: 28)
+                    .background(ClaudeTheme.card.opacity(0.85))
+                    .clipShape(RoundedRectangle(cornerRadius: 7.5))
             }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .disabled(vm.hasPresentedSheet)
+            .accessibilityLabel("官方版本免费与举报、安全防护体系公告")
+            .help("官方版本免费与举报 · 安全防护体系公告")
 
         }
-        .sheet(isPresented: $showNotice) { NoticeView() }
-        .sheet(isPresented: $showFingerprint) { FingerprintView(text: vm.fingerprint) }
+        .sheet(isPresented: $vm.showFingerprint) { FingerprintView(text: vm.fingerprint) }
     }
 
     var statusPill: some View {
@@ -1017,7 +1079,7 @@ struct ContentView: View {
             }
             .buttonStyle(.plain)
             .accessibilityLabel("检查更新")
-            Button { showAIPrompt = true } label: {
+            Button { vm.showAIPrompt = true } label: {
                 Text("AI 配置").font(.caption2).foregroundColor(ClaudeTheme.muted)
             }
             .buttonStyle(.plain)
@@ -1287,6 +1349,70 @@ struct AIPromptSheet: View {
 
 // MARK: - 公告页
 
+struct OfficialReleaseNoticeView: View {
+    @Environment(\.dismiss) private var dismiss
+    let onAcknowledge: () -> Void
+
+    var body: some View {
+        ZStack {
+            ClaudeBackground()
+            VStack(alignment: .leading, spacing: 16) {
+                HStack {
+                    Text("官方版本免费与举报")
+                        .font(.title3.bold())
+                        .foregroundColor(ClaudeTheme.ink)
+                    Spacer()
+                    Button { dismiss() } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.title2)
+                            .foregroundColor(ClaudeTheme.muted)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("关闭提醒")
+                    .help("关闭不会标记已读")
+                    .keyboardShortcut(.cancelAction)
+                }
+
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 14) {
+                        Text("官方版本免费提供")
+                            .font(.headline)
+                            .foregroundColor(ClaudeTheme.terracottaDeep)
+                        Text("维护者不会出售官方安装包或账号服务。请勿冒充官方、维护者或授权渠道收费销售。")
+                        Text("发现冒充官方销售、删除版权或许可证声明、隐瞒修改，或未按许可证要求提供对应源码等疑似违规行为，欢迎举报。")
+                        Text("本项目采用 AGPL-3.0-only。履行许可证义务后可以再分发和收费，单纯收费不自动等于违规。")
+                        Text("举报时请附商品链接、页面截图和版本信息。请勿公开买家个人信息、订单信息或账号凭据。")
+                            .foregroundColor(ClaudeTheme.muted)
+                    }
+                    .font(.callout)
+                    .foregroundColor(ClaudeTheme.ink)
+                    .lineSpacing(3)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+
+                Text("点击「知道了」后不再自动提醒，可从信息按钮或菜单栏再次查看。")
+                    .font(.caption)
+                    .foregroundColor(ClaudeTheme.muted)
+                HStack {
+                    Button("前往 Issues 举报") {
+                        if let url = URL(string: "https://github.com/YOURSJEYO/claude-switcher/issues") {
+                            NSWorkspace.shared.open(url)
+                        }
+                    }
+                    Spacer()
+                    Button("知道了", action: onAcknowledge)
+                        .buttonStyle(.borderedProminent)
+                        .tint(ClaudeTheme.terracottaDeep)
+                        .keyboardShortcut(.defaultAction)
+                }
+            }
+            .padding(20)
+        }
+        .frame(width: 420, height: 460)
+        .preferredColorScheme(.light)
+    }
+}
+
 struct NoticeView: View {
     @Environment(\.dismiss) private var dismiss
 
@@ -1372,6 +1498,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         vm.onSwitchCompleted = { [weak self] in self?.mainWindow?.orderOut(nil) }
         showMainWindow()
         vm.start()
+        // 等窗口与 SwiftUI 宿主就绪后展示；重开隐藏窗口不走此启动路径。
+        DispatchQueue.main.async { [weak self] in
+            self?.vm.prepareOfficialReleaseNotice()
+        }
     }
 
     func showMainWindow() {
@@ -1436,17 +1566,24 @@ struct MenuBarContent: View {
             vm.refresh()
         }
         .disabled(vm.isBusy)
+        Button("官方版本免费与举报") {
+            showWindow()
+            vm.presentNotice(.officialRelease)
+        }
+        .disabled(vm.hasPresentedSheet)
         Button("检查更新") {
             showWindow()
             vm.checkUpdate()
             vm.showUpdateSheet = true
         }
+        .disabled(vm.hasPresentedSheet)
         Button("检查设置") {
             showWindow()
             vm.showSettingsSheet = true
         }
+        .disabled(vm.hasPresentedSheet)
         Button("导出诊断日志") { vm.exportDiagnostics() }
-            .disabled(vm.settingsBusy)
+            .disabled(vm.settingsBusy || vm.hasPresentedSheet)
         Divider()
         Button("退出 Claude 切换器") { NSApplication.shared.terminate(nil) }
             .keyboardShortcut("q")

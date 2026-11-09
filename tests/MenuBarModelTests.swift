@@ -26,8 +26,15 @@ private func pump(_ seconds: TimeInterval) {
 private final class Fixture {
     let root: URL
     let core: URL
+    let suiteName = "claude-switcher-tests.\(UUID().uuidString)"
+    let noticeDefaults: UserDefaults
 
     init() throws {
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            throw TestFailure(description: "无法创建隔离偏好存储")
+        }
+        noticeDefaults = defaults
+        noticeDefaults.removePersistentDomain(forName: suiteName)
         let trash = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("_trash")
         root = trash.appendingPathComponent("menu-bar-model-\(UUID().uuidString)")
         core = root.appendingPathComponent("fake-core.sh")
@@ -56,7 +63,10 @@ private final class Fixture {
         try FileManager.default.moveItem(at: root.appendingPathComponent("core-script"), to: core)
     }
 
-    deinit { try? FileManager.default.removeItem(at: root) }
+    deinit {
+        noticeDefaults.removePersistentDomain(forName: suiteName)
+        try? FileManager.default.removeItem(at: root)
+    }
 
     func write(_ name: String, _ value: String) throws {
         try value.write(to: root.appendingPathComponent(name), atomically: true, encoding: .utf8)
@@ -67,7 +77,8 @@ private final class Fixture {
     }
 
     func vm(checkTimeout: TimeInterval = 2, operationTimeout: TimeInterval = 2) -> VM {
-        VM(core: core.path, checkTimeout: checkTimeout, operationTimeout: operationTimeout)
+        VM(core: core.path, checkTimeout: checkTimeout, operationTimeout: operationTimeout,
+           noticeDefaults: noticeDefaults)
     }
 
     var calls: [String] {
@@ -100,6 +111,84 @@ struct MenuBarModelTests {
                 try f.idle(vm)
                 try expect(f.calls == ["checkdetail", "get-client", "status"], "启动不应重复检查")
                 try expect(vm.phase == .ready && vm.lastCheckSummary == "通过" && vm.current == "A", "初始状态不一致")
+            case "official_release_acknowledgement":
+                let vm = f.vm()
+                vm.prepareOfficialReleaseNotice()
+                try expect(vm.activeNotice == .officialRelease, "首次应展示免费提醒")
+                try expect(OfficialReleaseReminder.shouldShow(in: f.noticeDefaults), "显示不等于已读")
+                vm.activeNotice = nil // 关闭按钮或系统关闭，不等于点击「知道了」。
+                vm.prepareOfficialReleaseNotice()
+                try expect(vm.activeNotice == nil, "同次运行不应重复自动提醒")
+
+                let restarted = f.vm()
+                restarted.prepareOfficialReleaseNotice()
+                try expect(restarted.activeNotice == .officialRelease, "未确认时下次启动仍应提醒")
+                restarted.acknowledgeOfficialReleaseNotice()
+                try expect(restarted.activeNotice == nil, "确认应关闭提醒")
+
+                guard let freshDefaults = UserDefaults(suiteName: f.suiteName) else {
+                    throw TestFailure(description: "无法重新打开隔离偏好存储")
+                }
+                let acknowledged = VM(core: f.core.path, noticeDefaults: freshDefaults)
+                acknowledged.prepareOfficialReleaseNotice()
+                try expect(acknowledged.activeNotice == nil, "新模型和偏好实例应保留确认状态")
+                acknowledged.presentNotice(.officialRelease)
+                try expect(acknowledged.activeNotice == .officialRelease, "已读后仍可手动复看")
+                acknowledged.activeNotice = nil
+                acknowledged.presentNotice(.security)
+                try expect(acknowledged.activeNotice == .security, "安全公告仍应可访问")
+                try expect(f.calls.isEmpty, "查看提醒不应调用核心脚本")
+            case "official_release_modal_guard":
+                let vm = f.vm()
+                vm.showSettingsSheet = true
+                vm.presentNotice(.officialRelease)
+                try expect(vm.activeNotice == nil, "设置未关闭时不能叠加公告")
+                vm.showSettingsSheet = false
+                vm.showUpdateSheet = true
+                vm.presentNotice(.officialRelease)
+                try expect(vm.activeNotice == nil, "更新未关闭时不能叠加公告")
+                vm.showUpdateSheet = false
+                vm.showFingerprint = true
+                vm.presentNotice(.officialRelease)
+                try expect(vm.activeNotice == nil, "指纹未关闭时不能叠加公告")
+                vm.showFingerprint = false
+                vm.showAIPrompt = true
+                vm.presentNotice(.officialRelease)
+                try expect(vm.activeNotice == nil, "提示词未关闭时不能叠加公告")
+                vm.showAIPrompt = false
+                vm.presentNotice(.security)
+                vm.presentNotice(.officialRelease)
+                try expect(vm.activeNotice == .security, "不能覆盖已打开的安全公告")
+                vm.activeNotice = nil
+                vm.presentNotice(.officialRelease)
+                try expect(vm.activeNotice == .officialRelease, "其他面板关闭后可查看提醒")
+                try expect(OfficialReleaseReminder.shouldShow(in: f.noticeDefaults), "手动查看不应自动标记已读")
+            case "official_release_window_lifecycle":
+                let vm = f.vm()
+                let delegate = AppDelegate(vm: vm)
+                delegate.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+                try spin { vm.activeNotice == .officialRelease }
+                try spin { delegate.mainWindow?.attachedSheet != nil }
+                try f.idle(vm)
+                try expect(delegate.mainWindow?.isVisible == true, "首次提醒需要可见窗口")
+                try expect(f.calls == ["checkdetail", "get-client", "status"], "提醒不得中断或重复启动检查")
+                vm.acknowledgeOfficialReleaseNotice()
+                try spin { delegate.mainWindow?.attachedSheet == nil }
+                let first = delegate.mainWindow
+                first?.performClose(nil)
+                delegate.showMainWindow()
+                _ = delegate.applicationShouldHandleReopen(NSApplication.shared, hasVisibleWindows: false)
+                try expect(delegate.mainWindow === first && first?.isVisible == true, "重开仍应复用窗口")
+                try expect(vm.activeNotice == nil, "确认后重开不自动提醒")
+                first?.orderOut(nil)
+                delegate.showMainWindow()
+                vm.presentNotice(.officialRelease)
+                try spin { first?.attachedSheet != nil }
+                try expect(first?.isVisible == true && vm.activeNotice == .officialRelease, "隐藏窗口后可手动复看")
+                try expect(f.calls == ["checkdetail", "get-client", "status"], "手动查看不得重复审计")
+                vm.activeNotice = nil
+                try spin { first?.attachedSheet == nil }
+                first?.orderOut(nil)
             case "multi_account_status":
                 try f.write("status", "current=A hasA=1 hasB=1 hasC=1 hasD=0 accounts=A,B,C accA=1.2G@2026-10-20 accB=900M@2026-10-19 accC=2.0G@2026-10-18\n")
                 try f.write("switch-output", "OK:已切换到账号 C\n")
