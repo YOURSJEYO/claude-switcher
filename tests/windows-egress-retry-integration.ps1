@@ -6,7 +6,7 @@
 # 2. 链路失败时 Get-Egress 降级成"未取到",不再抛异常中断整轮检查;
 # 3. 路径在线时,出口探测摊在多个服务商上:主端点被掐时由备用端点兜住,
 #    不会把一次隧道内故障直接判成 fail;
-# 4. 每个端点只试一次 —— 预算是用来换端点,不是在同一个脆弱端点上反复重试。
+# 4. 每个端点的重试次数有界 —— 整体存活时间要盖得住实测的中断脉冲周期。
 $ErrorActionPreference = 'Stop'
 $core = Join-Path (Split-Path -Parent $PSScriptRoot) 'windows\claude-switch.ps1'
 $parseErrors = $null
@@ -118,7 +118,7 @@ $script:pathAlive = $true
 Reset 99
 $e = Get-Egress
 Assert-Like '链路完全失败时降级为空而不是抛异常' '^$' "$($e.ip)$($e.loc)"
-Assert-Equal '链路完全失败时每个端点各试一次' 4 $script:calls
+Assert-Equal '链路完全失败时四个端点各试两次' 8 $script:calls
 
 Reset 1
 $e = Get-Egress
@@ -133,7 +133,9 @@ Assert-Equal '一次成功时不重试' 1 $script:calls
 Reset 0
 $script:degraded = $true
 $e = Get-Egress
-Assert-Equal '所有端点都缺地区时探测次数' 4 $script:calls
+# trace 端点的 Valid 要求 ip 与 loc 同时出现,缺地区就会试满两次;
+# JSON 端点的 Valid 只看 ip 字段(有就返回),解析后缺国家码再换下一个端点。
+Assert-Equal '所有端点都缺地区时探测次数' 5 $script:calls
 Assert-Equal '所有端点都缺地区时 IP 视为未取到' '' $e.ip
 Assert-Equal '所有端点都缺地区时地区为空' '' $e.loc
 
@@ -143,21 +145,21 @@ $script:failUrls = @('https://www.cloudflare.com/cdn-cgi/trace')
 $e = Get-Egress
 Assert-Equal '主端点被掐时备用端点能取到出口 IP' '198.51.100.24' $e.ip
 Assert-Equal '主端点被掐时备用端点能取到地区' 'US' $e.loc
-Assert-Equal '主端点被掐时只多花一次请求' 2 $script:calls
-Assert-Equal '主端点只被试一次' 1 $script:perUrl['https://www.cloudflare.com/cdn-cgi/trace']
-Assert-Equal '备用端点被试一次' 1 $script:perUrl['https://ipinfo.io/json']
+Assert-Equal '主端点被掐时总请求数为三次' 3 $script:calls
+Assert-Equal '主端点被掐时主端点试满两次' 2 $script:perUrl['https://www.cloudflare.com/cdn-cgi/trace']
+Assert-Equal '主端点被掐时备用端点试一次' 1 $script:perUrl['https://ipinfo.io/json']
 
 Reset 0
 $script:failUrls = @('https://www.cloudflare.com/cdn-cgi/trace', 'https://ipinfo.io/json', 'https://ipwho.is/')
 $e = Get-Egress
 Assert-Equal '前三个端点被掐时第四个仍能兜住' '198.51.100.24' $e.ip
 Assert-Equal '前三个端点被掐时地区仍可取到' 'US' $e.loc
-Assert-Equal '前三个端点被掐时探测次数' 4 $script:calls
+Assert-Equal '前三个端点被掐时探测次数' 7 $script:calls
 
 Reset 0
 $script:failUrls = @('https://www.cloudflare.com/cdn-cgi/trace', 'https://ipinfo.io/json', 'https://ipwho.is/', 'https://api.ip.sb/geoip')
 $e = Get-Egress
-Assert-Equal '所有端点都被掐时探测次数' 4 $script:calls
+Assert-Equal '所有端点都被掐时探测次数' 8 $script:calls
 Assert-Like '所有端点都被掐时降级为空而不是抛异常' '^$' "$($e.ip)$($e.loc)"
 Assert-Equal '所有端点都被掐时不算已跳过' $false $e.skipped
 

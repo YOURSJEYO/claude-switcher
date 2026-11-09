@@ -51,12 +51,19 @@ class WindowsEgressMultiEndpointStaticTests(unittest.TestCase):
             "每个端点应当是不同主机,否则冗余只是同一个服务的多个路径",
         )
 
-    def test_each_endpoint_is_tried_once(self):
-        """每个端点只试一次:预算是用来换端点,不是在同一个端点上反复重试。"""
+    def test_each_endpoint_has_a_bounded_attempt_count(self):
+        """每个端点的重试次数必须有界。
+
+        实测中断是周期性脉冲:单次约 12~20 秒,整个周期约 40~60 秒。
+        每个端点只试一次的话,四个端点连打只够约 22 秒,跨不完一个脉冲就会误报;
+        所以每个端点允许试两次,整体存活时间约 45 秒,能盖住一个完整周期。
+        但也不能无界 —— 预算是用来换端点,不是无限重试。
+        """
         attempts = re.findall(r"Invoke-ProbeText\s+-Url\s+\$probe\.Url\s+-Attempts\s+(\d+)", self.body)
         self.assertTrue(attempts, "找不到按端点循环的探测调用")
         for value in attempts:
-            self.assertEqual(value, "1", "每个端点只应试一次")
+            self.assertGreaterEqual(int(value), 1, "每个端点至少要试一次")
+            self.assertLessEqual(int(value), 2, "每个端点的重试次数必须有界(最多两次)")
 
     def test_fail_closed_gate_stays_in_front(self):
         """路径可能失效时仍然零请求、立刻失败 —— 这段闸门必须在任何探测之前。"""
