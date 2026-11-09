@@ -392,13 +392,42 @@ function Get-Egress {
     }
     # 响应为空时不能对空数组调用 Trim —— 链路失败必须降级成"未取到",
     # 而不是抛异常中断整轮检查(ip/loc 都取到才算有效答案)。
-    $trace = Invoke-ProbeText -Url 'https://www.cloudflare.com/cdn-cgi/trace' -Valid {
-            param($body)
-            return ($body -match '(?m)^ip=') -and ($body -match '(?m)^loc=')
+    # 多个出口查询服务互为备份:链路中断常常只掐特定目标而不是全面断网,
+    # 把探测摊到几个服务商上,任一拿到答案即可。它们查的都是同一个出口,IP 不变。
+    # 每个端点只试一次:预算是用来换端点,而不是在同一个脆弱端点上反复重试
+    # (被掐的形态是连接建立后被掐断,重试只会原地打转)。
+    foreach ($probe in @(
+            @{ Url = 'https://www.cloudflare.com/cdn-cgi/trace'; Kind = 'trace' },
+            @{ Url = 'https://ipinfo.io/json'; Kind = 'json' },
+            @{ Url = 'https://ipwho.is/'; Kind = 'json' },
+            @{ Url = 'https://api.ip.sb/geoip'; Kind = 'json' }
+        )) {
+        if ($probe.Kind -eq 'trace') {
+            $body = Invoke-ProbeText -Url $probe.Url -Attempts 1 -Valid {
+                    param($b)
+                    return ($b -match '(?m)^ip=') -and ($b -match '(?m)^loc=')
+                }
+            $ip  = (((($body -split "`n") | Where-Object { $_ -like 'ip=*' })  -replace 'ip=','') -join '')
+            $loc = (((($body -split "`n") | Where-Object { $_ -like 'loc=*' }) -replace 'loc=','') -join '')
+        } else {
+            $body = Invoke-ProbeText -Url $probe.Url -Attempts 1 -Valid {
+                    param($b)
+                    return ($b -match '"ip"\s*:')
+                }
+            $ip = ''; $loc = ''
+            try {
+                $j = $body | ConvertFrom-Json -ErrorAction Stop
+                $ip = [string]$j.ip
+                if ($j.PSObject.Properties.Name -contains 'country_code') { $loc = [string]$j.country_code }
+                elseif ($j.PSObject.Properties.Name -contains 'country') { $loc = [string]$j.country }
+            } catch { $ip = ''; $loc = '' }
         }
-    $ip  = (((($trace -split "`n") | Where-Object { $_ -like 'ip=*' })  -replace 'ip=','') -join '').Trim()
-    $loc = (((($trace -split "`n") | Where-Object { $_ -like 'loc=*' }) -replace 'loc=','') -join '').Trim()
-    return @{ ip = $ip; loc = $loc; skipped = $false }
+        # 空值一律不调用 Trim:空数组上调方法会抛异常。
+        if ($ip)  { $ip  = $ip.Trim() }
+        if ($loc) { $loc = $loc.Trim() }
+        if ($ip -and $loc) { return @{ ip = $ip; loc = $loc; skipped = $false } }
+    }
+    return @{ ip = ''; loc = ''; skipped = $false }
 }
 
 # ============ 地区映射(安装器与 set-region 共用同一套目标) ============
