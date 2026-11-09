@@ -352,10 +352,16 @@ function Test-ProxyPathAlive {
 #
 # 路径可能失效时(见 Get-Egress)一个探测包都不发,直接失败 ——
 # 那正是保镖会立刻杀 Claude 的条件,不能在可能泄漏的路径上继续敲门。
+#
+# 重试轮数按实测的链路中断时长定,不是拍脑袋:失败请求每次约 5.7 秒
+# (连上之后被掐断,不是快速拒绝),一次中断持续约 34 秒后自行恢复。
+#   3 轮 ≈ 18 秒 —— 整段落在 34 秒的中断窗口内,起不到兜底作用,必然误报;
+#   6 轮 ≈ 40 秒 —— 能盖住实测中断。
+# 代价只在失败路径上:健康时第一轮就返回,耗时不变。
 function Invoke-ProbeText {
     param(
         [Parameter(Mandatory = $true)][string]$Url,
-        [int]$Attempts = 3,
+        [int]$Attempts = 6,
         [int]$TimeoutSec = 8,
         [scriptblock]$Valid = { param($body) return [bool]$body }
     )
@@ -372,7 +378,7 @@ function Invoke-ProbeText {
 function Invoke-ProbeCode {
     param(
         [Parameter(Mandatory = $true)][string]$Url,
-        [int]$Attempts = 3,
+        [int]$Attempts = 6,
         [int]$TimeoutSec = 8
     )
     $code = '000'
