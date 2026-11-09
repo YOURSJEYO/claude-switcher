@@ -2675,6 +2675,10 @@ $summary = ''
 try {
     switch ($command) {
         'checkdetail' {
+            # 先清空:检查过程异常中断时,不能把上一次的结果留在文件里。
+            # UI 用 last-check.txt 渲染逐项颜色、用退出码决定整体结论,
+            # 两者一旦来自不同轮次,就会出现「逐项全绿、整体红」的误导画面。
+            '' | Out-File -Encoding utf8 "$BASE\last-check.txt"
             $r = @(Invoke-CheckDetail)
             $r | Out-File -Encoding utf8 "$BASE\last-check.txt"
             $summary = (($r | ForEach-Object {
