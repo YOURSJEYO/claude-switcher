@@ -84,4 +84,8 @@ if ($script:calls.Count) { throw '禁用检查仍触发查询' }
 $egressTest = Join-Path $PSScriptRoot 'windows-egress-retry-integration.ps1'
 & (Get-Process -Id $PID).Path -NoProfile -ExecutionPolicy Bypass -File $egressTest
 if ($LASTEXITCODE -ne 0) { throw "出口探测重试回归失败: $LASTEXITCODE" }
+
+$staleResultTest = Join-Path $PSScriptRoot 'windows-checkdetail-result-file-integration.ps1'
+& (Get-Process -Id $PID).Path -NoProfile -ExecutionPolicy Bypass -File $staleResultTest
+if ($LASTEXITCODE -ne 0) { throw "检查结果文件回归失败: $LASTEXITCODE" }
 'ALL PASS'

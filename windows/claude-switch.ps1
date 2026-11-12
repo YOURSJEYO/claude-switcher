@@ -352,16 +352,24 @@ function Test-ProxyPathAlive {
 #
 # 路径可能失效时(见 Get-Egress)一个探测包都不发,直接失败 ——
 # 那正是保镖会立刻杀 Claude 的条件,不能在可能泄漏的路径上继续敲门。
+#
+# 重试轮数按实测的链路中断时长定,不是拍脑袋:失败请求每次约 5.7 秒
+# (连上之后被掐断,不是快速拒绝)。最初实测一次中断约 34 秒后恢复,
+# 3 轮(约 18 秒)整段落在中断窗口内,必然误报,因此提到 6 轮(约 40 秒)。
+# 之后又观测到一次 >=46.4 秒的中断 —— 6 轮仍可能耗尽,这是更宽的兜底,
+# 不是绝对保证;出口探测另有 Get-Egress 的多端点冗余。
+# 代价只在失败路径上:健康时第一轮就返回,耗时不变。
 function Invoke-ProbeText {
     param(
         [Parameter(Mandatory = $true)][string]$Url,
-        [int]$Attempts = 3,
+        [int]$Attempts = 6,
         [int]$TimeoutSec = 8,
         [scriptblock]$Valid = { param($body) return [bool]$body }
     )
     $body = ''
     for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
-        $body = (& curl.exe -s --max-time $TimeoutSec $Url 2>$null) -join "`n"
+        # 固定 UA:部分出口查询服务(如 api.ip.sb)会拒绝 curl 的默认 UA。
+        $body = (& curl.exe -s -A 'claude-switcher/1.0' --max-time $TimeoutSec $Url 2>$null) -join "`n"
         if ((& $Valid $body)) { return $body }
         if ($attempt -lt $Attempts) { Start-Sleep -Milliseconds (400 * $attempt) }
     }
@@ -372,7 +380,7 @@ function Invoke-ProbeText {
 function Invoke-ProbeCode {
     param(
         [Parameter(Mandatory = $true)][string]$Url,
-        [int]$Attempts = 3,
+        [int]$Attempts = 6,
         [int]$TimeoutSec = 8
     )
     $code = '000'
@@ -2705,6 +2713,10 @@ $summary = ''
 try {
     switch ($command) {
         'checkdetail' {
+            # 先清空:检查过程异常中断时,不能把上一次的结果留在文件里。
+            # UI 用 last-check.txt 渲染逐项颜色、用退出码决定整体结论,
+            # 两者一旦来自不同轮次,就会出现「逐项全绿、整体红」的误导画面。
+            '' | Out-File -Encoding utf8 "$BASE\last-check.txt"
             $r = @(Invoke-CheckDetail)
             $r | Out-File -Encoding utf8 "$BASE\last-check.txt"
             $summary = (($r | ForEach-Object {

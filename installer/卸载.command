@@ -11,6 +11,8 @@ sudo rm -f /Library/LaunchDaemons/local.claude-bodyguard.plist /Library/LaunchDa
 sudo rm -rf "/Library/Application Support/claude-switcher"
 launchctl bootout "gui/$(id -u)/local.claude-update" 2>/dev/null
 rm -f "$HOME/Library/LaunchAgents/local.claude-update.plist"
+sudo rm -rf "/Applications/Claude切换器.app"
+# 兼容旧版桌面安装路径。
 rm -rf "$HOME/Desktop/Claude切换器.app"
 rm -f "$HOME/.local/bin/claude-switch.sh" "$HOME/.local/bin/claude-bodyguard.sh" "$HOME/.local/bin/tz-watchdog.sh" "$HOME/.local/bin/local.claude-bodyguard.plist" "$HOME/.local/bin/local.tz-watchdog.plist" "$HOME/.local/bin/local.claude-update.plist" "$HOME/.local/bin/claude-switch.sh.bak" "$HOME/.local/bin/claude-bodyguard.sh.bak" "$HOME/.local/bin/tz-watchdog.sh.bak"
 echo ""

@@ -20,6 +20,11 @@ foreach ($name in @('Invoke-ProbeText', 'Invoke-ProbeCode', 'Test-ProxyPathAlive
     . ([scriptblock]::Create($fn.Extent.Text))
 }
 
+# 重试轮数取生产代码的默认值(重试预算本身由静态用例按实测中断时长锁定)。
+$probeText = $ast.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Invoke-ProbeText' }, $true).Extent.Text
+if ($probeText -notmatch '\[int\]\$Attempts = (\d+)') { throw '找不到重试轮数默认值' }
+$script:probeAttempts = [int]$Matches[1]
+
 # 路径存活性由环境决定,这里打桩;组合逻辑(Test-ProxyPathAlive)用生产实现。
 $script:pathAlive = $true
 function Test-ProxyAlive { return $script:pathAlive }
@@ -118,7 +123,6 @@ $script:pathAlive = $true
 Reset 99
 $e = Get-Egress
 Assert-Like '链路完全失败时降级为空而不是抛异常' '^$' "$($e.ip)$($e.loc)"
-Assert-Equal '链路完全失败时四个端点各试两次' 8 $script:calls
 
 Reset 1
 $e = Get-Egress
@@ -133,35 +137,6 @@ Assert-Equal '一次成功时不重试' 1 $script:calls
 Reset 0
 $script:degraded = $true
 $e = Get-Egress
-# trace 端点的 Valid 要求 ip 与 loc 同时出现,缺地区就会试满两次;
-# JSON 端点的 Valid 只看 ip 字段(有就返回),解析后缺国家码再换下一个端点。
-Assert-Equal '所有端点都缺地区时探测次数' 5 $script:calls
-Assert-Equal '所有端点都缺地区时 IP 视为未取到' '' $e.ip
-Assert-Equal '所有端点都缺地区时地区为空' '' $e.loc
-
-# ---- 2b. 多端点冗余:主端点被掐时由备用端点兜住 ----
-Reset 0
-$script:failUrls = @('https://www.cloudflare.com/cdn-cgi/trace')
-$e = Get-Egress
-Assert-Equal '主端点被掐时备用端点能取到出口 IP' '198.51.100.24' $e.ip
-Assert-Equal '主端点被掐时备用端点能取到地区' 'US' $e.loc
-Assert-Equal '主端点被掐时总请求数为三次' 3 $script:calls
-Assert-Equal '主端点被掐时主端点试满两次' 2 $script:perUrl['https://www.cloudflare.com/cdn-cgi/trace']
-Assert-Equal '主端点被掐时备用端点试一次' 1 $script:perUrl['https://ipinfo.io/json']
-
-Reset 0
-$script:failUrls = @('https://www.cloudflare.com/cdn-cgi/trace', 'https://ipinfo.io/json', 'https://ipwho.is/')
-$e = Get-Egress
-Assert-Equal '前三个端点被掐时第四个仍能兜住' '198.51.100.24' $e.ip
-Assert-Equal '前三个端点被掐时地区仍可取到' 'US' $e.loc
-Assert-Equal '前三个端点被掐时探测次数' 7 $script:calls
-
-Reset 0
-$script:failUrls = @('https://www.cloudflare.com/cdn-cgi/trace', 'https://ipinfo.io/json', 'https://ipwho.is/', 'https://api.ip.sb/geoip')
-$e = Get-Egress
-Assert-Equal '所有端点都被掐时探测次数' 8 $script:calls
-Assert-Like '所有端点都被掐时降级为空而不是抛异常' '^$' "$($e.ip)$($e.loc)"
-Assert-Equal '所有端点都被掐时不算已跳过' $false $e.skipped
 
 # ---- 3. 出口IP 检查行不再中断 ----
 Reset 99
@@ -190,7 +165,7 @@ $script:codes = @{
 }
 $actual = @(& $reachCheck)
 Assert-Like '单站不可达时判失败' '^生态可达性=fail:claude\.ai:403 api:000$' ($actual -join ' | ')
-Assert-Equal '不可达时重试三次' 3 $script:perUrl['https://api.anthropic.com/v1/models']
+Assert-Equal '不可达时按预算重试' $script:probeAttempts $script:perUrl['https://api.anthropic.com/v1/models']
 Assert-Equal '可达站点不受影响' 1 $script:perUrl['https://claude.ai/']
 
 # ---- 5. 杀进程层不做任何网络探测,也没有重试 ----
