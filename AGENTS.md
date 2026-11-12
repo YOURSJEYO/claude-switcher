@@ -152,7 +152,7 @@ Linux 用户使用 `linux/` 下的 bash 版本。**开始之前必须先理解�
 **除非维护者在当次对话中明确说明，否则一律不得改动维护者本机的任何安装态、真实配置与系统设置——无论是什么性质的修复或更改。** 下面是常见例子而非穷尽列举；判断标准是"维护者没在当次对话明确要求就不动"，而不是"清单里没写就能动"：
 
 - 不得覆盖 `~/.local/bin/claude-switch.sh`、`~/.local/bin/local.claude-*.plist`
-- 不得重新编译或替换桌面 App（`~/Desktop/Claude切换器.app`）
+- 不得重新编译或替换已安装 App（`/Applications/Claude切换器.app`，以及历史桌面副本 `~/Desktop/Claude切换器.app`）
 - 不得改动 `/Library/Application Support/claude-switcher/`、`/Library/LaunchDaemons/local.claude-*`、`~/Library/LaunchAgents/local.claude-*`
 - 不得触发本机 `update`、不得执行安装器/卸载器
 - 不得改动 `~/.claude-switcher/` 下的真实账号数据与任何配置文件
