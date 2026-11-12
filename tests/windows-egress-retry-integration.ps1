@@ -18,6 +18,11 @@ foreach ($name in @('Invoke-ProbeText', 'Invoke-ProbeCode', 'Test-ProxyPathAlive
     . ([scriptblock]::Create($fn.Extent.Text))
 }
 
+# 重试轮数取生产代码的默认值(重试预算本身由静态用例按实测中断时长锁定)。
+$probeText = $ast.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Invoke-ProbeText' }, $true).Extent.Text
+if ($probeText -notmatch '\[int\]\$Attempts = (\d+)') { throw '找不到重试轮数默认值' }
+$script:probeAttempts = [int]$Matches[1]
+
 # 路径存活性由环境决定,这里打桩;组合逻辑(Test-ProxyPathAlive)用生产实现。
 $script:pathAlive = $true
 function Test-ProxyAlive { return $script:pathAlive }
@@ -102,7 +107,7 @@ $script:pathAlive = $true
 Reset 99
 $e = Get-Egress
 Assert-Like '链路完全失败时降级为空而不是抛异常' '^$' "$($e.ip)$($e.loc)"
-Assert-Equal '链路完全失败时探测次数' 3 $script:calls
+Assert-Equal '链路完全失败时探测次数' $script:probeAttempts $script:calls
 
 Reset 1
 $e = Get-Egress
@@ -117,7 +122,7 @@ Assert-Equal '一次成功时不重试' 1 $script:calls
 Reset 0
 $script:trace = @('ip=198.51.100.24')
 $e = Get-Egress
-Assert-Equal '响应缺少地区时不算有效答案' 3 $script:calls
+Assert-Equal '响应缺少地区时不算有效答案' $script:probeAttempts $script:calls
 Assert-Equal '响应缺少地区时 IP 仍可读出' '198.51.100.24' $e.ip
 Assert-Equal '响应缺少地区时地区为空' '' $e.loc
 
@@ -148,7 +153,7 @@ $script:codes = @{
 }
 $actual = @(& $reachCheck)
 Assert-Like '单站不可达时判失败' '^生态可达性=fail:claude\.ai:403 api:000$' ($actual -join ' | ')
-Assert-Equal '不可达时重试三次' 3 $script:perUrl['https://api.anthropic.com/v1/models']
+Assert-Equal '不可达时按预算重试' $script:probeAttempts $script:perUrl['https://api.anthropic.com/v1/models']
 Assert-Equal '可达站点不受影响' 1 $script:perUrl['https://claude.ai/']
 
 # ---- 5. 杀进程层不做任何网络探测,也没有重试 ----
