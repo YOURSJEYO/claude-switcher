@@ -354,9 +354,10 @@ function Test-ProxyPathAlive {
 # 那正是保镖会立刻杀 Claude 的条件,不能在可能泄漏的路径上继续敲门。
 #
 # 重试轮数按实测的链路中断时长定,不是拍脑袋:失败请求每次约 5.7 秒
-# (连上之后被掐断,不是快速拒绝),一次中断持续约 34 秒后自行恢复。
-#   3 轮 ≈ 18 秒 —— 整段落在 34 秒的中断窗口内,起不到兜底作用,必然误报;
-#   6 轮 ≈ 40 秒 —— 能盖住实测中断。
+# (连上之后被掐断,不是快速拒绝)。最初实测一次中断约 34 秒后恢复,
+# 3 轮(约 18 秒)整段落在中断窗口内,必然误报,因此提到 6 轮(约 40 秒)。
+# 之后又观测到一次 >=46.4 秒的中断 —— 6 轮仍可能耗尽,这是更宽的兜底,
+# 不是绝对保证;出口探测另有 Get-Egress 的多端点冗余。
 # 代价只在失败路径上:健康时第一轮就返回,耗时不变。
 function Invoke-ProbeText {
     param(
@@ -367,7 +368,8 @@ function Invoke-ProbeText {
     )
     $body = ''
     for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
-        $body = (& curl.exe -s --max-time $TimeoutSec $Url 2>$null) -join "`n"
+        # 固定 UA:部分出口查询服务(如 api.ip.sb)会拒绝 curl 的默认 UA。
+        $body = (& curl.exe -s -A 'claude-switcher/1.0' --max-time $TimeoutSec $Url 2>$null) -join "`n"
         if ((& $Valid $body)) { return $body }
         if ($attempt -lt $Attempts) { Start-Sleep -Milliseconds (400 * $attempt) }
     }
@@ -398,13 +400,43 @@ function Get-Egress {
     }
     # 响应为空时不能对空数组调用 Trim —— 链路失败必须降级成"未取到",
     # 而不是抛异常中断整轮检查(ip/loc 都取到才算有效答案)。
-    $trace = Invoke-ProbeText -Url 'https://www.cloudflare.com/cdn-cgi/trace' -Valid {
-            param($body)
-            return ($body -match '(?m)^ip=') -and ($body -match '(?m)^loc=')
+    # 多个出口查询服务互为备份:链路中断常常只掐特定目标而不是全面断网,
+    # 把探测摊到几个服务商上,任一拿到答案即可。它们查的都是同一个出口,IP 不变。
+    # 每个端点试两次:一是容忍单个端点的瞬时抖动,二是把整体存活时间拉回
+    # 约 45 秒 —— 实测中断是周期性脉冲(单次约 12~20 秒,整个周期约 40~60 秒),
+    # 每个端点只试一次的话 4 次连续请求只够 22 秒,跨不完一个脉冲就会误报。
+    foreach ($probe in @(
+            @{ Url = 'https://www.cloudflare.com/cdn-cgi/trace'; Kind = 'trace' },
+            @{ Url = 'https://ipinfo.io/json'; Kind = 'json' },
+            @{ Url = 'https://ipwho.is/'; Kind = 'json' },
+            @{ Url = 'https://api.ip.sb/geoip'; Kind = 'json' }
+        )) {
+        if ($probe.Kind -eq 'trace') {
+            $body = Invoke-ProbeText -Url $probe.Url -Attempts 2 -Valid {
+                    param($b)
+                    return ($b -match '(?m)^ip=') -and ($b -match '(?m)^loc=')
+                }
+            $ip  = (((($body -split "`n") | Where-Object { $_ -like 'ip=*' })  -replace 'ip=','') -join '')
+            $loc = (((($body -split "`n") | Where-Object { $_ -like 'loc=*' }) -replace 'loc=','') -join '')
+        } else {
+            $body = Invoke-ProbeText -Url $probe.Url -Attempts 2 -Valid {
+                    param($b)
+                    return ($b -match '"ip"\s*:')
+                }
+            $ip = ''; $loc = ''
+            try {
+                $j = $body | ConvertFrom-Json -ErrorAction Stop
+                $ip = [string]$j.ip
+                if ($j.PSObject.Properties.Name -contains 'country_code') { $loc = [string]$j.country_code }
+                elseif ($j.PSObject.Properties.Name -contains 'country') { $loc = [string]$j.country }
+            } catch { $ip = ''; $loc = '' }
         }
-    $ip  = (((($trace -split "`n") | Where-Object { $_ -like 'ip=*' })  -replace 'ip=','') -join '').Trim()
-    $loc = (((($trace -split "`n") | Where-Object { $_ -like 'loc=*' }) -replace 'loc=','') -join '').Trim()
-    return @{ ip = $ip; loc = $loc; skipped = $false }
+        # 空值一律不调用 Trim:空数组上调方法会抛异常。
+        if ($ip)  { $ip  = $ip.Trim() }
+        if ($loc) { $loc = $loc.Trim() }
+        if ($ip -and $loc) { return @{ ip = $ip; loc = $loc; skipped = $false } }
+    }
+    return @{ ip = ''; loc = ''; skipped = $false }
 }
 
 # ============ 地区映射(安装器与 set-region 共用同一套目标) ============

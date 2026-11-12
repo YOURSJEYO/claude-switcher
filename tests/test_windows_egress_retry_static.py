@@ -158,10 +158,12 @@ class WindowsEgressRetryStaticTests(unittest.TestCase):
         self.assertIn("(?m)^loc=", body)
 
     def test_get_egress_does_not_trim_a_possibly_empty_array(self):
-        """空响应时对空数组调 .Trim() 会抛异常中断整轮检查,必须先 join 成字符串。"""
+        """空响应时对空数组调 .Trim() 会抛异常中断整轮检查,必须先 join 成字符串或先判空。"""
         body = function_body(self.text, "Get-Egress")
         self.assertNotRegex(body, r"-replace 'ip=',''\)\.Trim\(\)")
-        self.assertIn("-join '').Trim()", body)
+        self.assertNotRegex(body, r"-join ''\)\.Trim\(\)")
+        # Trim 之前必须先判空:空值一律不调用 Trim
+        self.assertRegex(body, r"if \(\$ip\)\s*\{\s*\$ip\s*=\s*\$ip\.Trim\(\)")
 
     def test_ecosystem_reachability_uses_probe_code(self):
         body = function_body(self.text, "Invoke-CheckDetail")
