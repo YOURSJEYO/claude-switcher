@@ -88,4 +88,8 @@ if ($LASTEXITCODE -ne 0) { throw "出口探测重试回归失败: $LASTEXITCODE"
 $staleResultTest = Join-Path $PSScriptRoot 'windows-checkdetail-result-file-integration.ps1'
 & (Get-Process -Id $PID).Path -NoProfile -ExecutionPolicy Bypass -File $staleResultTest
 if ($LASTEXITCODE -ne 0) { throw "检查结果文件回归失败: $LASTEXITCODE" }
+
+$ipReputationTest = Join-Path $PSScriptRoot 'windows-ip-reputation-integration.ps1'
+& (Get-Process -Id $PID).Path -NoProfile -ExecutionPolicy Bypass -File $ipReputationTest
+if ($LASTEXITCODE -ne 0) { throw "IP 信誉回归失败: $LASTEXITCODE" }
 'ALL PASS'
