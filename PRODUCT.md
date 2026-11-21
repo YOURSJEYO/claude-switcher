@@ -20,7 +20,7 @@ adaptive
 
 ## Operating Context
 
-现有 Windows 版本使用 PowerShell 5.1+ 与原生 WPF。主要任务包括查看 14 项检查、选择 A–D 账号、重新检查、一键修复、切换代理客户端以及使用维护和快照工具。macOS 与 Linux 版本保留各自既有界面机制。
+现有 Windows 版本使用 PowerShell 5.1+ 与原生 WPF。主要任务包括查看 18 项检查、选择 A–D 账号、重新检查、一键修复、切换代理客户端以及使用维护和快照工具。macOS 与 Linux 版本保留各自既有界面机制。
 
 ## Capabilities and Constraints
 

@@ -244,7 +244,7 @@ $xaml = @"
                             </Border>
                             <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="0,0,12,0">
                                 <TextBlock Text="环境安全状态" FontSize="16" FontWeight="SemiBold"/>
-                                <TextBlock Text="14 项检查 · 硬性项必须通过" FontSize="11" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" Margin="0,4,0,0"/>
+                                <TextBlock Text="18 项检查 · 硬性项必须通过" FontSize="11" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" Margin="0,4,0,0"/>
                             </StackPanel>
                             <Border x:Name="StatusPill" Grid.Column="2" VerticalAlignment="Center" Padding="10,5" CornerRadius="12" Background="#33F59E0B">
                                 <TextBlock x:Name="StatusText" Text="等待检查" FontSize="11" FontWeight="Bold" Foreground="#FFFBBE24"/>
@@ -316,7 +316,7 @@ $xaml = @"
                         <StackPanel>
                             <Grid Margin="0,0,0,8">
                                 <TextBlock Text="环境检查" FontSize="15" FontWeight="SemiBold"/>
-                                <TextBlock Text="全部 14 项" FontSize="10" Foreground="{StaticResource MutedBrush}" HorizontalAlignment="Right" VerticalAlignment="Center"/>
+                                <TextBlock Text="全部 18 项" FontSize="10" Foreground="{StaticResource MutedBrush}" HorizontalAlignment="Right" VerticalAlignment="Center"/>
                             </Grid>
                             <ListBox x:Name="CheckList" Background="Transparent" BorderThickness="0" Foreground="#FFE6EDF7" FontSize="11">
                                 <ListBox.ItemTemplate>
@@ -378,7 +378,7 @@ $reader = New-Object System.Xml.XmlNodeReader ([xml]$xaml)
 $win = [Windows.Markup.XamlReader]::Load($reader)
 $rows = New-Object System.Collections.ObjectModel.ObservableCollection[Object]
 $win.FindName('CheckList').ItemsSource = $rows
-$checkNames = @('代理内核','TUN网卡','出口IP','IP一致','时区','地区','IPv6','DNS','WebRTC','保镖','规则置顶','客户端语言','ASN属性','生态可达性')
+$checkNames = @('代理内核','TUN网卡','出口IP','IP一致','时区','地区','IPv6','DNS','WebRTC','保镖','规则置顶','客户端语言','ASN属性','生态可达性','IP纯净度','IP代理标记','IP机房属性','IP黑名单')
 $clientModes = @('clash-verge','flclash','sing-box','clashx','surge','wireguard','other','auto')
 $script:isBusy = $false
 $script:environmentReady = $false
@@ -775,9 +775,10 @@ function Show-CheckSettings {
             <Border CornerRadius="10" Background="#0DFFFFFF" Padding="14" Margin="0,0,0,12"><StackPanel><TextBlock Text="可自定义的非关键检查" FontWeight="Bold" Margin="0,0,0,10"/>
                 <CheckBox x:Name="Check_IP" Content="IP 与上次一致" Margin="0,5"/><CheckBox x:Name="Check_DNS" Content="DNS 走隧道" Margin="0,5"/><CheckBox x:Name="Check_WebRTC" Content="WebRTC" Margin="0,5"/>
                 <CheckBox x:Name="Check_Locale" Content="客户端语言" Margin="0,5"/><CheckBox x:Name="Check_ASN" Content="ASN 属性" Margin="0,5"/><CheckBox x:Name="Check_Eco" Content="生态可达性" Margin="0,5"/>
+                <CheckBox x:Name="Check_Purity" Content="IP 纯净度" Margin="0,5"/><CheckBox x:Name="Check_ProxyFlag" Content="IP 代理标记" Margin="0,5"/><CheckBox x:Name="Check_Datacenter" Content="IP 机房属性" Margin="0,5"/><CheckBox x:Name="Check_Blacklist" Content="IP 黑名单" Margin="0,5"/>
                 <TextBlock Text="关闭后会真正跳过探测，并以灰色显示。出口国家、代理/TUN、Kill-Switch、保镖、账号归档和更新校验不可关闭。" FontSize="11" Foreground="#B3FFFFFF" TextWrapping="Wrap" Margin="0,8,0,0"/>
             </StackPanel></Border>
-            <Border CornerRadius="10" Background="#0DFFFFFF" Padding="14" Margin="0,0,0,12"><StackPanel><CheckBox x:Name="CheckAllow" Content="将上述非关键项的失败降为警告" Margin="0,5"/><TextBlock Text="只影响以上 6 项，不放宽硬性安全项，也不会自动关闭检测。" FontSize="11" Foreground="#B3FFFFFF" TextWrapping="Wrap" Margin="0,0,0,8"/><CheckBox x:Name="CheckLogging" Content="记录脱敏客户端日志" Margin="0,5"/><TextBlock Text="仅记录版本、命令、退出码、耗时和检查状态，不记录 IP、凭据或账号内容。" FontSize="11" Foreground="#B3FFFFFF" TextWrapping="Wrap"/></StackPanel></Border>
+            <Border CornerRadius="10" Background="#0DFFFFFF" Padding="14" Margin="0,0,0,12"><StackPanel><CheckBox x:Name="CheckAllow" Content="将上述非关键项的失败降为警告" Margin="0,5"/><TextBlock Text="只影响以上 10 项，不放宽硬性安全项，也不会自动关闭检测。" FontSize="11" Foreground="#B3FFFFFF" TextWrapping="Wrap" Margin="0,0,0,8"/><CheckBox x:Name="CheckLogging" Content="记录脱敏客户端日志" Margin="0,5"/><TextBlock Text="仅记录版本、命令、退出码、耗时和检查状态，不记录 IP、凭据或账号内容。" FontSize="11" Foreground="#B3FFFFFF" TextWrapping="Wrap"/></StackPanel></Border>
             <Border CornerRadius="10" Background="#0DFFFFFF" Padding="14"><StackPanel><Button x:Name="BtnExportInSettings" Content="导出脱敏诊断日志…" Padding="12,7" HorizontalAlignment="Left"/><TextBlock Text="%USERPROFILE%\.claude-switcher\logs\client.log" FontSize="10" Foreground="#99FFFFFF" Margin="0,8,0,0"/></StackPanel></Border>
         </StackPanel></ScrollViewer>
         <StackPanel Grid.Row="2" Margin="0,14,0,0"><TextBlock x:Name="SettingsMessage" Text="" FontSize="11" Foreground="#FFFACC15" TextWrapping="Wrap" Margin="0,0,0,8"/><StackPanel Orientation="Horizontal"><Button x:Name="BtnDefaults" Content="恢复默认" Padding="12,7"/><Button x:Name="BtnSaveSettings" Content="保存并重新检查" Padding="12,7" Margin="12,0,0,0" FontWeight="Bold" Background="#FF6366F1"/></StackPanel></StackPanel>
@@ -785,14 +786,24 @@ function Show-CheckSettings {
 </Window>
 "@
     $settingsReader = New-Object System.Xml.XmlNodeReader ([xml]$settingsXaml); $settingsWin = [Windows.Markup.XamlReader]::Load($settingsReader); $settingsWin.Owner = $win
-    $map = @(@{ Name = 'IP一致'; Control = 'Check_IP' },@{ Name = 'DNS'; Control = 'Check_DNS' },@{ Name = 'WebRTC'; Control = 'Check_WebRTC' },@{ Name = '客户端语言'; Control = 'Check_Locale' },@{ Name = 'ASN属性'; Control = 'Check_ASN' },@{ Name = '生态可达性'; Control = 'Check_Eco' })
+    $map = @(@{ Name = 'IP一致'; Control = 'Check_IP' },@{ Name = 'DNS'; Control = 'Check_DNS' },@{ Name = 'WebRTC'; Control = 'Check_WebRTC' },@{ Name = '客户端语言'; Control = 'Check_Locale' },@{ Name = 'ASN属性'; Control = 'Check_ASN' },@{ Name = '生态可达性'; Control = 'Check_Eco' },@{ Name = 'IP纯净度'; Control = 'Check_Purity' },@{ Name = 'IP代理标记'; Control = 'Check_ProxyFlag' },@{ Name = 'IP机房属性'; Control = 'Check_Datacenter' },@{ Name = 'IP黑名单'; Control = 'Check_Blacklist' })
     $disabled = @($config.disabled); foreach ($item in $map) { $settingsWin.FindName($item.Control).IsChecked = ($disabled -notcontains $item.Name) }
     $settingsWin.FindName('CheckAllow').IsChecked = [bool]$config.allowOptionalFailures; $settingsWin.FindName('CheckLogging').IsChecked = [bool]$config.logging
     $settingsWin.FindName('BtnDefaults').Add_Click({ foreach ($item in $map) { $settingsWin.FindName($item.Control).IsChecked = $true }; $settingsWin.FindName('CheckAllow').IsChecked = $false; $settingsWin.FindName('CheckLogging').IsChecked = $true; $settingsWin.FindName('SettingsMessage').Text = '已恢复默认选项，点击保存后生效' })
     $settingsWin.FindName('BtnSaveSettings').Add_Click({
         $newDisabled = @(); foreach ($item in $map) { if ($settingsWin.FindName($item.Control).IsChecked -ne $true) { $newDisabled += $item.Name } }
+        # 信誉接口配置不在这个界面里编辑,但保存时必须原样带回 —— 否则用户在
+        # 界面上改一次勾选,配好的信誉接口就被清空了。密钥原样回传,不经界面回显。
         $newConfig = [pscustomobject]@{ disabled = @($newDisabled); allowOptionalFailures = [bool]$settingsWin.FindName('CheckAllow').IsChecked; logging = [bool]$settingsWin.FindName('CheckLogging').IsChecked }
-        $saveResult = Invoke-Core @('set-check-config', ($newConfig | ConvertTo-Json -Depth 3 -Compress))
+        if ($null -ne $config.ipReputation) {
+            $newConfig | Add-Member -NotePropertyName ipReputation -NotePropertyValue ([pscustomobject]@{
+                url = [string]$config.ipReputation.url
+                key = [string]$config.ipReputation.key
+                threshold = [double]$config.ipReputation.threshold
+                cacheDays = [int]$config.ipReputation.cacheDays
+            })
+        }
+        $saveResult = Invoke-Core @('set-check-config', ($newConfig | ConvertTo-Json -Depth 4 -Compress))
         if ($script:lastCoreExit -ne 0 -or $saveResult -notmatch '(?m)^OK:') { $settingsWin.FindName('SettingsMessage').Text = '保存失败，请检查配置后重试'; return }
         $settingsWin.FindName('SettingsMessage').Text = '设置已保存，正在重新检查'; Refresh-Checks
     })
