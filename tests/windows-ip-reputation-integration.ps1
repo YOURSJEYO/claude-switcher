@@ -63,6 +63,8 @@ try {
     function curl.exe {
         $url = [string]$args[-1]
         $script:probeCalls += $url
+        $script:lastCurlArgs = @($args)
+        $script:lastCurlStdin = (@($input) -join "`n")
         if ($url -like '*stub-ok*') {
             return @('{"fraud_score":5,"risk_level":"low","is_proxy":false,"is_vpn":false,"is_tor":false,"is_datacenter":false,"blacklist_count":0}')
         }
@@ -239,6 +241,50 @@ try {
     try { Set-CheckConfigFromJson '{"ipReputation":{"threshold":"25"}}' } catch { $badNum++ }
     try { Set-CheckConfigFromJson '{"ipReputation":{"cacheDays":"7"}}' } catch { $badNum++ }
     Assert-True ($badNum -eq 3) '布尔/字符串形式的阈值与缓存天数都应被拒绝'
+
+    # ---- 15. 四项全部禁用时绝不发外部请求 ----
+    Write-Output 'case 15: 四项全禁用不发网络请求'
+    Set-ReputationConfig 'https://stub-all-disabled.example/ip' 25 @('IP纯净度','IP代理标记','IP机房属性','IP黑名单')
+    $script:probeCalls = @()
+    $actual = @(& $repCheck) -join "`n"
+    Assert-True ($script:probeCalls.Count -eq 0) '四项全禁用时不应发起任何外部请求'
+    foreach ($n in @('IP纯净度','IP代理标记','IP机房属性','IP黑名单')) {
+        Assert-Match $actual ("(?m)^" + $n + "=skip:") "$n 全禁用时应输出 skip"
+    }
+
+    # ---- 16. UI 保存省略 key 时保留同 URL 既有密钥，换 URL 或显式空串清空，拒绝控制字符 ----
+    Write-Output 'case 16: 密钥保留、更换 URL 隔离与控制字符拒绝'
+    Set-CheckConfigFromJson '{"ipReputation":{"url":"https://stub-ok.example/ip","key":"keep-me-123","threshold":25,"cacheDays":7}}'
+    Set-CheckConfigFromJson '{"disabled":["DNS"],"ipReputation":{"url":"https://stub-ok.example/ip","threshold":30,"cacheDays":7}}'
+    $kept = Get-CheckConfig
+    Assert-True ([string]$kept.ipReputation.key -eq 'keep-me-123') '同 URL 省略 key 保存应保留既有密钥'
+    Set-CheckConfigFromJson '{"ipReputation":{"url":"https://stub-other.example/ip","threshold":30,"cacheDays":7}}'
+    $switched = Get-CheckConfig
+    Assert-True ([string]$switched.ipReputation.key -eq '') '更换 URL 时不应把旧接口密钥带给新接口'
+    Set-CheckConfigFromJson '{"ipReputation":{"url":"https://stub-ok.example/ip","key":"to-clear","threshold":25,"cacheDays":7}}'
+    Set-CheckConfigFromJson '{"ipReputation":{"url":"https://stub-ok.example/ip","key":"","threshold":25,"cacheDays":7}}'
+    $cleared = Get-CheckConfig
+    Assert-True ([string]$cleared.ipReputation.key -eq '') '显式传空串 key 应清空密钥'
+    $badCtrl = 0
+    try { Set-CheckConfigFromJson '{"ipReputation":{"url":"https://stub-ok.example/ip","key":"bad\r\nX-Evil: 1"}}' } catch { $badCtrl++ }
+    try { Set-CheckConfigFromJson '{"ipReputation":{"url":"https://stub-ok.example/ip bad"}}' } catch { $badCtrl++ }
+    Assert-True ($badCtrl -eq 2) '含控制字符的 key 和含空白的 url 均应被拒绝'
+
+    # ---- 17. risk_level 等级文本与密钥经 stdin (-K -) 传递 ----
+    Write-Output 'case 17: 文本等级解析与密钥不进命令行'
+    $script:CheckConfig = ConvertTo-CheckConfig ([pscustomobject]@{
+        disabled = @()
+        allowOptionalFailures = $false
+        logging = $false
+        ipReputation = [pscustomobject]@{ url = 'https://stub-ok-keytest.example/ip'; key = 'header-secret-99'; threshold = 25; cacheDays = 7 }
+    })
+    $script:lastCurlArgs = @()
+    $script:lastCurlStdin = ''
+    $actual = @(& $repCheck) -join "`n"
+    Assert-Match $actual '(?m)^IP纯净度=ok:风险分 5 · low$' '应保留风险等级文本 low'
+    Assert-True (($script:lastCurlArgs -join ' ') -notmatch 'header-secret-99') '密钥不应出现在 curl 命令行参数中'
+    Assert-True ($script:lastCurlArgs -contains '-K') '带密钥请求应使用 curl -K -'
+    Assert-Match $script:lastCurlStdin 'header = "X-API-Key: header-secret-99"' '密钥应经 stdin 传递给 curl -K -'
 } finally {
     $env:USERPROFILE = $origProfile
     try { Remove-Item -LiteralPath $isolated -Recurse -Force -ErrorAction SilentlyContinue } catch {}

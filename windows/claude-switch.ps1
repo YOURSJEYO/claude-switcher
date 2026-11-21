@@ -119,11 +119,14 @@ function ConvertTo-CheckConfig($Value) {
         # 信誉接口必须是 HTTPS:明文响应可以被中间人改写 ——
         # 把「分数改成 0、代理标记改成 false」是完全可行的,
         # 那样的返回值会把一个脏出口显示成干净。配置时就拒绝,不要等到运行时静默忽略。
-        if ($ipUrl -and $ipUrl -notmatch '^https://') { throw 'ipReputation.url 必须是 https 地址' }
+        if ($ipUrl -and ($ipUrl -notmatch '^https://' -or $ipUrl -match '[\s\x00-\x1f\x7f]')) { throw 'ipReputation.url 必须是 https 地址' }
         $ipKey = ''
+        $hasKey = $false
         if ($raw.PSObject.Properties.Name -contains 'key') {
             if ($raw.key -isnot [string]) { throw 'ipReputation.key 必须是字符串' }
+            if ($raw.key -match '[\r\n\x00-\x1f\x7f]') { throw 'ipReputation.key 包含非法控制字符' }
             $ipKey = $raw.key
+            $hasKey = $true
         }
         $ipThreshold = 0
         if ($raw.PSObject.Properties.Name -contains 'threshold') {
@@ -139,7 +142,7 @@ function ConvertTo-CheckConfig($Value) {
             $ipCacheDays = [int]$d
             if ($ipCacheDays -lt 1 -or $ipCacheDays -gt 90) { throw 'ipReputation.cacheDays 必须在 1-90 之间' }
         }
-        $ipReputation = @{ url = $ipUrl; key = $ipKey; threshold = $ipThreshold; cacheDays = $ipCacheDays }
+        $ipReputation = @{ url = $ipUrl; key = $ipKey; hasKey = $hasKey; threshold = $ipThreshold; cacheDays = $ipCacheDays }
     }
     return @{ disabled = @($optional | Where-Object { $disabled -contains $_ }); allowOptionalFailures = $allow; logging = $logging; ipReputation = $ipReputation }
 }
@@ -160,9 +163,20 @@ function Set-CheckConfigFromJson([string]$Json) {
     # 也避免把「没配」写成空对象再被下一轮读成「配了但没填」。
     $payload = [ordered]@{ disabled = @($config.disabled); allowOptionalFailures = [bool]$config.allowOptionalFailures; logging = [bool]$config.logging }
     if ($null -ne $config.ipReputation) {
+        $effectiveKey = [string]$config.ipReputation.key
+        # 界面通过 get-check-config 读取时不会拿到 key，保存时省略 key 字段。
+        # URL 未变且未显式传入 key 时保留既有密钥；显式传 "" 才清空，换 URL 不带走旧密钥。
+        if (-not $config.ipReputation.hasKey) {
+            try {
+                $existing = Get-CheckConfig
+                if ($existing -and $null -ne $existing.ipReputation -and ([string]$existing.ipReputation.url -eq [string]$config.ipReputation.url)) {
+                    $effectiveKey = [string]$existing.ipReputation.key
+                }
+            } catch {}
+        }
         $payload['ipReputation'] = [ordered]@{
             url = [string]$config.ipReputation.url
-            key = [string]$config.ipReputation.key
+            key = $effectiveKey
             threshold = [double]$config.ipReputation.threshold
             cacheDays = [int]$config.ipReputation.cacheDays
         }
@@ -441,10 +455,18 @@ function Invoke-ProbeText {
     $body = ''
     for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
         # 固定 UA:部分出口查询服务(如 api.ip.sb)会拒绝 curl 的默认 UA。
+        # 敏感请求头(如 X-API-Key)经 curl -K - 从 stdin 传递,不进命令行参数与进程列表。
         $curlArgs = @('-s', '-A', 'claude-switcher/1.0', '--max-time', [string]$TimeoutSec)
-        foreach ($h in $Headers) { $curlArgs += @('-H', $h) }
+        $curlCfg = @()
+        if ($Headers.Count -gt 0) {
+            $curlArgs += @('-K', '-')
+            foreach ($h in $Headers) {
+                $escaped = ([string]$h).Replace('\', '\\').Replace('"', '\"')
+                $curlCfg += ('header = "' + $escaped + '"')
+            }
+        }
         $curlArgs += $Url
-        $body = (& curl.exe @curlArgs 2>$null) -join "`n"
+        $body = ($curlCfg | & curl.exe @curlArgs 2>$null) -join "`n"
         if ((& $Valid $body)) { return $body }
         if ($attempt -lt $Attempts) { Start-Sleep -Milliseconds (400 * $attempt) }
     }
@@ -1430,7 +1452,7 @@ function ConvertFrom-IpReputationPayload($Payload) {
     $out = @{}
     if ($null -eq $Payload) { return $out }
     $props = $Payload.PSObject.Properties
-    function Field([string[]]$Names) {
+    function Field([string[]]$Names, [string]$Kind = 'bool') {
         # 两轮取名:先精确同名,再通配。顺序不能反 ——
         # 'proxy' 也会匹配到 'residential_proxy'、'is_proxy',
         # 先做通配会把「只有住宅代理标记」的返回误读成普通代理命中。
@@ -1441,6 +1463,24 @@ function ConvertFrom-IpReputationPayload($Payload) {
                     if (-not $hit) { continue }
                     $v = $p.Value
                     if ($null -eq $v) { continue }
+                    if ($Kind -eq 'text') {
+                        if ($v -is [string]) {
+                            $t = ($v -replace '[\r\n\x00-\x1f\x7f]', ' ').Trim()
+                            if ($t.Length -gt 40) { $t = $t.Substring(0, 40) }
+                            if ($t) { return $t }
+                        }
+                        continue
+                    }
+                    if ($Kind -eq 'number') {
+                        if (Test-IpReputationNumber $v) { return [double]$v }
+                        if ($v -is [string]) {
+                            $parsed = 0.0
+                            if ([double]::TryParse($v.Trim(), [System.Globalization.NumberStyles]::Float, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$parsed)) {
+                                return $parsed
+                            }
+                        }
+                        continue
+                    }
                     if ($v -is [bool]) { return [bool]$v }
                     if ($v -is [string]) {
                         $s = $v.Trim().ToLowerInvariant()
@@ -1448,26 +1488,24 @@ function ConvertFrom-IpReputationPayload($Payload) {
                         if ($s -eq 'false' -or $s -eq 'no' -or $s -eq '0') { return $false }
                         continue
                     }
-                    if ($v -is [int] -or $v -is [double] -or $v -is [long]) { return [double]$v }
-                    return $v
                 }
             }
         }
         return $null
     }
-    $score = Field @('fraud_score','fraudscore','risk_score','riskscore','score','threat_score','threatscore')
+    $score = Field @('fraud_score','fraudscore','risk_score','riskscore','score','threat_score','threatscore') 'number'
     if ($null -ne $score) { $out['score'] = [double]$score }
-    $level = Field @('risk_level','risklevel','level','verdict','ai_verdict')
-    if ($null -ne $level -and $level -isnot [bool]) { $out['level'] = [string]$level }
-    $proxy = Field @('is_proxy','proxy','is_residential_proxy','residential_proxy','residential_proxy_access')
+    $level = Field @('risk_level','risklevel','level','verdict','ai_verdict') 'text'
+    if ($null -ne $level) { $out['level'] = [string]$level }
+    $proxy = Field @('is_proxy','proxy','is_residential_proxy','residential_proxy','residential_proxy_access') 'bool'
     if ($null -ne $proxy) { $out['proxy'] = [bool]$proxy }
-    $vpn = Field @('is_vpn','vpn','is_anonymous_vpn','anonymous_vpn','privacy')
+    $vpn = Field @('is_vpn','vpn','is_anonymous_vpn','anonymous_vpn','privacy') 'bool'
     if ($null -ne $vpn) { $out['vpn'] = [bool]$vpn }
-    $tor = Field @('is_tor','tor','is_tor_exit','tor_exit')
+    $tor = Field @('is_tor','tor','is_tor_exit','tor_exit') 'bool'
     if ($null -ne $tor) { $out['tor'] = [bool]$tor }
-    $hosting = Field @('is_datacenter','datacenter','is_hosting','hosting','is_cloud','cloud','is_server','server')
+    $hosting = Field @('is_datacenter','datacenter','is_hosting','hosting','is_cloud','cloud','is_server','server') 'bool'
     if ($null -ne $hosting) { $out['hosting'] = [bool]$hosting }
-    $bl = Field @('blacklist','blacklists','blacklist_count','dnsbl','abuse_score','abuse_confidence_score')
+    $bl = Field @('blacklist','blacklists','blacklist_count','dnsbl','abuse_score','abuse_confidence_score') 'number'
     if ($null -ne $bl) { $out['blacklist'] = [double]$bl }
     return $out
 }
@@ -1663,7 +1701,13 @@ function Invoke-CheckDetail {
     #   数据源没提供某一项 -> 该项显示「数据源未提供」,不当成「没有风险」。
     #   缺字段 ≠ 「否」,这是这类接口最容易骗人的地方。
     $ipRepCfg = Get-IpReputationConfig
-    if ($null -eq $ipRepCfg) {
+    if ((Test-CheckDisabled 'IP纯净度') -and (Test-CheckDisabled 'IP代理标记') -and (Test-CheckDisabled 'IP机房属性') -and (Test-CheckDisabled 'IP黑名单')) {
+        # 四项全部禁用时绝不向第三方发送出口 IP，也不写缓存。
+        Format-OptionalResult 'IP纯净度' 'ok'
+        Format-OptionalResult 'IP代理标记' 'ok'
+        Format-OptionalResult 'IP机房属性' 'ok'
+        Format-OptionalResult 'IP黑名单' 'ok'
+    } elseif ($null -eq $ipRepCfg) {
         Format-OptionalResult 'IP纯净度' 'warn' '未配置信誉数据源'
         Format-OptionalResult 'IP代理标记' 'warn' '未配置信誉数据源'
         Format-OptionalResult 'IP机房属性' 'warn' '未配置信誉数据源'

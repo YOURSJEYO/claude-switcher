@@ -792,13 +792,12 @@ function Show-CheckSettings {
     $settingsWin.FindName('BtnDefaults').Add_Click({ foreach ($item in $map) { $settingsWin.FindName($item.Control).IsChecked = $true }; $settingsWin.FindName('CheckAllow').IsChecked = $false; $settingsWin.FindName('CheckLogging').IsChecked = $true; $settingsWin.FindName('SettingsMessage').Text = '已恢复默认选项，点击保存后生效' })
     $settingsWin.FindName('BtnSaveSettings').Add_Click({
         $newDisabled = @(); foreach ($item in $map) { if ($settingsWin.FindName($item.Control).IsChecked -ne $true) { $newDisabled += $item.Name } }
-        # 信誉接口配置不在这个界面里编辑,但保存时必须原样带回 —— 否则用户在
-        # 界面上改一次勾选,配好的信誉接口就被清空了。密钥原样回传,不经界面回显。
+        # 信誉接口配置不在这个界面里编辑,但保存时必须带回 url/threshold/cacheDays ——
+        # 省略 key 字段,由核心脚本在 url 未变时保留既有密钥(get-check-config 不会回显密钥)。
         $newConfig = [pscustomobject]@{ disabled = @($newDisabled); allowOptionalFailures = [bool]$settingsWin.FindName('CheckAllow').IsChecked; logging = [bool]$settingsWin.FindName('CheckLogging').IsChecked }
         if ($null -ne $config.ipReputation) {
             $newConfig | Add-Member -NotePropertyName ipReputation -NotePropertyValue ([pscustomobject]@{
                 url = [string]$config.ipReputation.url
-                key = [string]$config.ipReputation.key
                 threshold = [double]$config.ipReputation.threshold
                 cacheDays = [int]$config.ipReputation.cacheDays
             })

@@ -184,6 +184,29 @@ class WindowsIpReputationStaticTests(unittest.TestCase):
         self.assertIn("$rep.ContainsKey('score')", self.text,
                       "判定代码按 hashtable 取字段,缓存读回的对象形状必须对得上")
 
+    def test_all_disabled_skips_probe_before_lookup(self):
+        detail = self.text[self.text.index("function Invoke-CheckDetail"):]
+        rep_start = detail.index("$ipRepCfg = Get-IpReputationConfig")
+        lookup_pos = detail.index("Get-IpReputation ([string]$e.ip)", rep_start)
+        guard_segment = detail[rep_start:lookup_pos]
+        for name in REPUTATION_CHECKS:
+            self.assertIn(f"Test-CheckDisabled '{name}'", guard_segment,
+                          f"调用信誉接口前必须先检查 {name} 是否已禁用")
+
+    def test_ui_save_omits_key_and_core_preserves_existing_key(self):
+        self.assertNotIn("key = [string]$config.ipReputation.key", self.ui,
+                         "UI 不应把 get-check-config 缺失的 key 写成空串覆盖保存")
+        save_start = self.text.index("function Set-CheckConfigFromJson")
+        save_body = self.text[save_start:self.text.index("\n}", save_start)]
+        self.assertIn("hasKey", save_body, "省略 key 时应由核心按同 URL 保留既有密钥")
+
+    def test_headers_use_curl_stdin_not_command_line(self):
+        start = self.text.index("function Invoke-ProbeText")
+        body = self.text[start:self.text.index("\n}", start)]
+        self.assertIn("'-K', '-'", body, "带密钥请求头应通过 curl -K - 经 stdin 传递")
+        self.assertNotIn("'-H', $h", body, "敏感请求头不应直接放进 curl 命令行参数")
+        self.assertIn("ipReputation.key 包含非法控制字符", self.config_body)
+
 
 if __name__ == "__main__":
     unittest.main()
