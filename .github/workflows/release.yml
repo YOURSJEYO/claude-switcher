@@ -39,7 +39,8 @@ jobs:
       - name: Package macOS app and installer kit
         run: |
           bash -n scripts/package-macos.sh
-          bash scripts/package-macos.sh "$VERSION"
+          bash scripts/package-macos.sh "$VERSION" arm64
+          SKIP_KIT=1 bash scripts/package-macos.sh "$VERSION" x86_64
 
       - name: Verify Info.plist version
         run: |
@@ -79,6 +80,8 @@ jobs:
           shasum -a 256 \
             "ClaudeSwitcher-${VERSION}-macos-arm64-app-only.zip" \
             "ClaudeSwitcher-${VERSION}-macos-arm64-app-only.dmg" \
+            "ClaudeSwitcher-${VERSION}-macos-x86_64-app-only.zip" \
+            "ClaudeSwitcher-${VERSION}-macos-x86_64-app-only.dmg" \
             "ClaudeSwitcher-${VERSION}-installer-kit.zip" \
             "ClaudeSwitcher-${VERSION}-windows.zip" \
             "ClaudeSwitcher-${VERSION}-linux.tar.gz" \
@@ -92,6 +95,8 @@ jobs:
           ASSETS=(
             "build/ClaudeSwitcher-${VERSION}-macos-arm64-app-only.zip"
             "build/ClaudeSwitcher-${VERSION}-macos-arm64-app-only.dmg"
+            "build/ClaudeSwitcher-${VERSION}-macos-x86_64-app-only.zip"
+            "build/ClaudeSwitcher-${VERSION}-macos-x86_64-app-only.dmg"
             "build/ClaudeSwitcher-${VERSION}-installer-kit.zip"
             "build/ClaudeSwitcher-${VERSION}-windows.zip"
             "build/ClaudeSwitcher-${VERSION}-linux.tar.gz"

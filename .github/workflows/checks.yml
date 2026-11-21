@@ -53,6 +53,11 @@ jobs:
             -target "$(uname -m)-apple-macos13.0" \
             app/main.swift -o /tmp/ClaudeSwitcher \
             -framework SwiftUI -framework AppKit
+          swiftc -O -parse-as-library -warnings-as-errors \
+            -target x86_64-apple-macos13.0 \
+            app/main.swift -o /tmp/ClaudeSwitcher-x86_64 \
+            -framework SwiftUI -framework AppKit
+          test "$(lipo -archs /tmp/ClaudeSwitcher-x86_64)" = "x86_64"
           swiftc -O -parse-as-library -warnings-as-errors -D CLAUDE_SWITCHER_TESTS \
             -target "$(uname -m)-apple-macos13.0" \
             app/main.swift tests/MenuBarFixture.swift -o /tmp/MenuBarFixture \

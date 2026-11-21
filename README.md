@@ -119,8 +119,8 @@ AI 服务平台的风控已经从"看 IP"进化到**全维度环境画像**：�
 
 到 [Releases](https://github.com/YOURSJEYO/claude-switcher/releases/latest) 下载最新版本，按用途选择：
 
-- `ClaudeSwitcher-<版本>-installer-kit.zip`：**首次安装推荐**。解压后双击 `installer/安装.command`，安装核心脚本、守护进程，并将 App 安装到 `/Applications/Claude切换器.app`。
-- `ClaudeSwitcher-<版本>-macos-arm64-app-only.dmg` / `.zip`：**仅包含界面 App**（不含核心脚本）；已安装核心脚本时可用于替换旧版界面。首次安装请用上面的 installer-kit。
+- `ClaudeSwitcher-<版本>-installer-kit.zip`：**首次安装推荐**（Apple Silicon 与 Intel x86_64 通用，现场按本机架构编译）。解压后双击 `installer/安装.command`，安装核心脚本、守护进程，并将 App 安装到 `/Applications/Claude切换器.app`。
+- `ClaudeSwitcher-<版本>-macos-<arm64|x86_64>-app-only.dmg` / `.zip`：**仅包含界面 App**（不含核心脚本；`x86_64` 包自下次发版起同步提供，在 Apple Silicon CI 交叉编译，尚未在 Intel 真机验收）；已安装核心脚本时可用于替换旧版界面。首次安装请用上面的 installer-kit。
 - `ClaudeSwitcher-<版本>-windows.zip` / `ClaudeSwitcher-<版本>-linux.tar.gz`：Windows / Linux 脚本包（Beta），说明见各自目录的 README。
 
 > macOS 产物为 ad-hoc 签名、未公证。首次打开若被 Gatekeeper 拦截，请右键打开，或在「系统设置 → 隐私与安全性」中放行。每个 Release 附带 `SHA256SUMS-release.txt`，可用 `shasum -a 256 -c` 校验下载文件。
@@ -175,10 +175,10 @@ git clone https://github.com/YOURSJEYO/claude-switcher.git
 
 启动后，顶部菜单栏会显示盾牌图标，Dock 不显示应用图标。首次启动自动打开主窗口；关闭窗口或切换账号成功后只隐藏窗口，仍可从盾牌菜单重新打开。
 
-- 菜单显示当前账号和「最近检查」结果（通过 / 通过（含跳过）/ 有警告 / 失败 / 检查中），提供「打开主窗口」「检查设置」「导出诊断日志」「重新检查」「退出 Claude 切换器」。A–D 切换仍在主窗口完成。
-- 启动时检查一次；隐藏期间不轮询网络，展开菜单只读取本地账号状态。每次切换账号前会重新完成全部环境检查，检查失败、超时或输出不完整时不会执行切换；警告沿用现有放行规则。
-- 检查、修复、切换和指纹体检期间不会重复执行操作；修复或账号切换期间暂时不能退出。操作结束后可从菜单明确退出。
-- 退出切换器不会卸载或停止独立的保镖、时区看门狗和自动更新服务。应用本身不会因此新增登录自启动。
+- 菜单显示当前账号和「最近检查」结果（通过 / 通过（含跳过）/ 有警告 / 失败 / 检查中），提供「打开主窗口」「检查设置」「导出诊断日志」「重新检查」「退出并关闭 Claude…」「退出 Claude 切换器」。A–D 切换仍在主窗口完成。
+- 启动时检查一次；隐藏期间不轮询网络，展开菜单只读取本地账号状态。每次切换账号前会重新完成全部环境检查，检查失败、超时或输出不完整时不会执行切换；警告沿用现有放行规则（主窗口右上角胶囊同步区分「环境安全 / 有警告 / 通过（含跳过）」）。
+- 检查、修复、切换和指纹体检期间不会重复执行操作；修复、账号切换或联动关闭期间暂时不能退出。操作结束后可从菜单明确退出。
+- 默认 `Cmd + Q` /「退出 Claude 切换器」不会关闭正在运行的 Claude，也不会卸载或停止独立的保镖、时区看门狗和自动更新服务。如需收工或断代理前一键温和退出 Claude 桌面版、当前用户的 Claude Code CLI 与切换器，请显式选择菜单中的「退出并关闭 Claude…」（或运行 `claude-switch.sh quit-claude`）。应用本身不会新增登录自启动。
 
 已安装的旧版 GUI 需要重新编译（或重新运行安装器）才会获得菜单栏功能；现有 `update` 命令仅更新核心脚本，不会替换 GUI。
 

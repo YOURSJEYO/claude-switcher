@@ -1,9 +1,9 @@
 #!/bin/bash
 # Claude 切换器 - macOS 打包脚本（本地与 CI 共用）
-# 用法: bash scripts/package-macos.sh [版本号]
-# 产物: build/ClaudeSwitcher-<版本>-macos-<架构>.zip
-#       build/ClaudeSwitcher-<版本>-macos-<架构>.dmg
-#       build/ClaudeSwitcher-<版本>-installer-kit.zip
+# 用法: bash scripts/package-macos.sh [版本号] [arm64|x86_64]
+# 产物: build/ClaudeSwitcher-<版本>-macos-<架构>-app-only.zip
+#       build/ClaudeSwitcher-<版本>-macos-<架构>-app-only.dmg
+#       build/ClaudeSwitcher-<版本>-installer-kit.zip (SKIP_KIT=1 时跳过)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -20,12 +20,16 @@ esac
 APP_NAME="Claude切换器"
 BUILD="$ROOT/build"
 APP="$BUILD/$APP_NAME.app"
-ARCH="$(uname -m)"
+ARCH="${2:-$(uname -m)}"
 case "$ARCH" in
     arm64)  ARCH_LABEL="arm64" ;;
     x86_64) ARCH_LABEL="x86_64" ;;
-    *)      ARCH_LABEL="$ARCH" ;;
+    *)
+        echo "✗ 不支持的 macOS 目标架构: $ARCH (仅支持 arm64 或 x86_64)" >&2
+        exit 1
+        ;;
 esac
+SKIP_KIT="${SKIP_KIT:-0}"
 ZIP="$BUILD/ClaudeSwitcher-$VERSION-macos-$ARCH_LABEL-app-only.zip"
 DMG="$BUILD/ClaudeSwitcher-$VERSION-macos-$ARCH_LABEL-app-only.dmg"
 KIT_NAME="ClaudeSwitcher-$VERSION"
@@ -36,7 +40,8 @@ cleanup() { rm -rf "$WORK"; }
 trap cleanup EXIT
 
 mkdir -p "$BUILD"
-rm -rf "$APP" "$ZIP" "$DMG" "$KIT_ZIP"
+rm -rf "$APP" "$ZIP" "$DMG"
+[ "$SKIP_KIT" = "1" ] || rm -rf "$KIT_ZIP"
 
 echo "==> 编译 $APP_NAME $VERSION ($ARCH_LABEL)"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
@@ -45,6 +50,11 @@ swiftc -O -parse-as-library -warnings-as-errors \
     "$ROOT/app/main.swift" \
     -o "$APP/Contents/MacOS/ClaudeSwitcher" \
     -framework SwiftUI -framework AppKit
+ACTUAL_ARCH="$(lipo -archs "$APP/Contents/MacOS/ClaudeSwitcher")"
+if [ "$ACTUAL_ARCH" != "$ARCH_LABEL" ]; then
+    echo "✗ 编译产物架构不符: 期望 $ARCH_LABEL, 实际 $ACTUAL_ARCH" >&2
+    exit 1
+fi
 
 echo "==> 生成图标"
 ICONSET="$WORK/AppIcon.iconset"
@@ -111,33 +121,37 @@ ln -s /Applications "$DMG_STAGE/Applications"
 hdiutil create -quiet -volname "$APP_NAME" -srcfolder "$DMG_STAGE" \
     -ov -format UDZO "$DMG" >/dev/null
 
-echo "==> 生成 installer kit"
-KIT_ROOT="$WORK/$KIT_NAME"
-mkdir -p "$KIT_ROOT"
-for FILE in README.md README.en.md AGENTS.md SECURITY.md LICENSE; do
-    cp "$ROOT/$FILE" "$KIT_ROOT/"
-done
-for DIR in core daemons installer app; do
-    ditto "$ROOT/$DIR" "$KIT_ROOT/$DIR"
-done
-mkdir -p "$KIT_ROOT/assets" "$KIT_ROOT/docs"
-cp "$ROOT/assets/icon-2048.png" "$KIT_ROOT/assets/"
-cp "$ROOT/docs/screenshot.png" "$KIT_ROOT/docs/"
-chmod +x "$KIT_ROOT/installer/安装.command" "$KIT_ROOT/installer/卸载.command"
-for ITEM in \
-    README.md README.en.md AGENTS.md SECURITY.md LICENSE \
-    core/claude-switch.sh daemons/claude-bodyguard.sh installer/安装.command \
-    app/main.swift assets/icon-2048.png docs/screenshot.png; do
-    if [ ! -e "$KIT_ROOT/$ITEM" ]; then
-        echo "✗ installer kit 缺少 $ITEM" >&2
-        exit 1
-    fi
-done
-ditto -c -k --keepParent --norsrc --noextattr "$KIT_ROOT" "$KIT_ZIP"
+EXPECTED_FILES=("$ZIP" "$DMG")
+if [ "$SKIP_KIT" != "1" ]; then
+    echo "==> 生成 installer kit"
+    KIT_ROOT="$WORK/$KIT_NAME"
+    mkdir -p "$KIT_ROOT"
+    for FILE in README.md README.en.md AGENTS.md SECURITY.md LICENSE; do
+        cp "$ROOT/$FILE" "$KIT_ROOT/"
+    done
+    for DIR in core daemons installer app; do
+        ditto "$ROOT/$DIR" "$KIT_ROOT/$DIR"
+    done
+    mkdir -p "$KIT_ROOT/assets" "$KIT_ROOT/docs"
+    cp "$ROOT/assets/icon-2048.png" "$KIT_ROOT/assets/"
+    cp "$ROOT/docs/screenshot.png" "$KIT_ROOT/docs/"
+    chmod +x "$KIT_ROOT/installer/安装.command" "$KIT_ROOT/installer/卸载.command"
+    for ITEM in \
+        README.md README.en.md AGENTS.md SECURITY.md LICENSE \
+        core/claude-switch.sh daemons/claude-bodyguard.sh installer/安装.command \
+        app/main.swift assets/icon-2048.png docs/screenshot.png; do
+        if [ ! -e "$KIT_ROOT/$ITEM" ]; then
+            echo "✗ installer kit 缺少 $ITEM" >&2
+            exit 1
+        fi
+    done
+    ditto -c -k --keepParent --norsrc --noextattr "$KIT_ROOT" "$KIT_ZIP"
+    EXPECTED_FILES+=("$KIT_ZIP")
+fi
 
 echo ""
 echo "✓ 打包完成:"
-for FILE in "$ZIP" "$DMG" "$KIT_ZIP"; do
+for FILE in "${EXPECTED_FILES[@]}"; do
     [ -f "$FILE" ] || { echo "✗ 缺少产物 $FILE" >&2; exit 1; }
     printf '  %-58s %8s\n' "$(basename "$FILE")" "$(du -h "$FILE" | cut -f1)"
 done
