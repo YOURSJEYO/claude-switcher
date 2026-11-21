@@ -57,6 +57,7 @@ private final class Fixture {
           switch) delay switch; cat "$root/switch-output"; result switch ;;
           fix) delay fix; echo 'FIX:演示修复完成'; result fix ;;
           fingerprint) delay fingerprint; echo 'GPU=ok:演示设备' ;;
+          quit-claude) delay quit-claude; if [ -f "$root/quit-claude-output" ]; then cat "$root/quit-claude-output"; else echo 'OK:已退出 Claude 桌面版与 Claude Code CLI'; fi; result quit-claude ;;
           *) exit 2 ;;
         esac
         """)
@@ -401,6 +402,45 @@ struct MenuBarModelTests {
                 try expect(delegate.applicationShouldTerminate(app) == .terminateCancel, "系统退出也必须保护修复操作")
                 try f.idle(vm)
                 try expect(delegate.applicationShouldTerminate(app) == .terminateNow, "修复结束应该解除退出保护")
+            case "status_badge_states":
+                let vm = f.vm()
+                vm.start(); try f.idle(vm)
+                try expect(vm.statusBadge.title == "环境安全" && vm.statusBadge.kind == .safe, "全部通过时应显示环境安全")
+                try f.audit(["ASN属性": "warn:未获取(ipinfo:HTTP 429)"])
+                vm.refresh(); try f.idle(vm)
+                try expect(vm.phase == .ready && vm.statusBadge.title == "有警告" && vm.statusBadge.kind == .warning, "存在警告项时总评不应显示环境安全")
+                try f.audit(["DNS": "skip:用户已禁用"])
+                vm.refresh(); try f.idle(vm)
+                try expect(vm.phase == .ready && vm.statusBadge.title == "通过（含跳过）" && vm.statusBadge.kind == .skipped, "存在跳过项时总评应标明含跳过")
+                try f.audit(["出口IP": "fail:CN"])
+                vm.refresh(); try f.idle(vm)
+                try expect(vm.phase == .failed && vm.statusBadge.title == "检查未过" && vm.statusBadge.kind == .failed, "硬性失败应显示检查未过")
+            case "quit_with_claude_success":
+                try f.write("quit-claude-delay", "0.15")
+                let vm = f.vm()
+                var terminated = false
+                var failedMessage = ""
+                vm.quitWithClaude(onTerminated: { terminated = true }, onFailure: { failedMessage = $0 })
+                try expect(!vm.canQuit && vm.isQuittingWithClaude, "联动关闭期间不可重复退出")
+                try spin { terminated }
+                try expect(failedMessage.isEmpty && f.calls == ["quit-claude"], "成功后应调用 quit-claude 并退出")
+                try expect(vm.canQuit && !vm.isQuittingWithClaude, "结束后应恢复状态")
+            case "quit_with_claude_failure":
+                try f.write("quit-claude-exit", "1")
+                try f.write("quit-claude-output", "FAIL:Claude Code CLI 未能退出，请手动退出后重试\n")
+                let vm = f.vm()
+                var terminated = false
+                var failedMessage = ""
+                vm.quitWithClaude(onTerminated: { terminated = true }, onFailure: { failedMessage = $0 })
+                try spin { !failedMessage.isEmpty }
+                try expect(!terminated && failedMessage.contains("FAIL:"), "关闭失败时绝不能静默退出")
+                try expect(vm.canQuit && !vm.isBusy, "失败后应恢复可操作状态")
+                try f.write("quit-claude-exit", "2")
+                try f.write("quit-claude-output", "用法: claude-switch.sh check|status\n")
+                failedMessage = ""
+                vm.quitWithClaude(onTerminated: { terminated = true }, onFailure: { failedMessage = $0 })
+                try spin { !failedMessage.isEmpty }
+                try expect(!terminated && failedMessage.contains("不支持联动关闭"), "旧版核心应明确提示不支持")
             default:
                 throw TestFailure(description: "未知测试场景：\(name)")
             }

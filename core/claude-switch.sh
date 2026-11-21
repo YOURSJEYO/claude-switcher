@@ -1198,6 +1198,102 @@ locale_for() {
     esac
 }
 
+# 从单个 ASN 查询 JSON 响应中提取规范化的 "ASxxxx Org" / "Org"(不含控制字符或 IP)
+_asn_extract_org() {
+    local src="$1" body="$2"
+    printf '%s' "$body" | "${CLAUDE_SWITCHER_PYTHON:-python3}" -c '
+import json, re, sys
+src = sys.argv[1]
+raw = sys.stdin.read()
+try:
+    data = json.loads(raw)
+except Exception:
+    raise SystemExit(1)
+if not isinstance(data, dict):
+    raise SystemExit(1)
+def clean(v):
+    if v is None or isinstance(v, (bool, dict, list)):
+        return ""
+    return re.sub(r"[\r\n\x00-\x1f\x7f]+", " ", str(v)).strip()
+def fmt(asn, org):
+    asn = clean(asn)
+    org = clean(org)
+    if asn:
+        m = re.fullmatch(r"(?:AS)?(\d+)", asn, re.I)
+        asn = ("AS" + m.group(1)) if m else ""
+    if asn and org:
+        if org.upper().startswith(asn.upper()):
+            return org
+        return asn + " " + org
+    return org or asn
+res = ""
+if src == "ipinfo":
+    res = clean(data.get("org"))
+elif src == "ipapi":
+    if not data.get("error"):
+        res = fmt(data.get("asn"), data.get("org"))
+elif src == "ip.sb":
+    res = fmt(data.get("asn"), data.get("asn_organization") or data.get("organization") or data.get("isp"))
+elif src == "ipwho.is":
+    if data.get("success", True) is not False:
+        conn = data.get("connection")
+        if isinstance(conn, dict):
+            res = fmt(conn.get("asn"), conn.get("org") or conn.get("isp"))
+if not res:
+    raise SystemExit(1)
+print(res)
+' "$src" 2>/dev/null
+}
+
+# 多源 ASN 查询:ipinfo → ipapi → ip.sb → ipwho.is,首个成功即停;
+# 代理路径未就绪时不发外部探测;结果写入 ASN_ORG,脱敏原因写入 ASN_REASON(不含 IP/正文)
+asn_lookup() {
+    local spec src url out rc code body parsed
+    ASN_ORG=""
+    ASN_REASON=""
+    if ! proxy_alive || ! tun_up; then
+        ASN_REASON="代理路径未就绪"
+        return 1
+    fi
+    for spec in \
+        "ipinfo|https://ipinfo.io/json" \
+        "ipapi|https://ipapi.co/json/" \
+        "ip.sb|https://api.ip.sb/geoip" \
+        "ipwho.is|https://ipwho.is/"; do
+        src="${spec%%|*}"
+        url="${spec#*|}"
+        out=$(curl -s -A 'claude-switcher/1.0' --max-time 6 -w '\n%{http_code}' "$url" 2>/dev/null); rc=$?
+        if [ "$rc" -ne 0 ]; then
+            ASN_REASON="${ASN_REASON:+$ASN_REASON; }${src}:超时/不可达"
+            continue
+        fi
+        if [ -z "$out" ]; then
+            ASN_REASON="${ASN_REASON:+$ASN_REASON; }${src}:空响应"
+            continue
+        fi
+        code=$(printf '%s\n' "$out" | tail -n 1)
+        case "$code" in
+            200)
+                body=$(printf '%s\n' "$out" | sed '$d') ;;
+            000)
+                ASN_REASON="${ASN_REASON:+$ASN_REASON; }${src}:超时/不可达"
+                continue ;;
+            [0-9][0-9][0-9])
+                ASN_REASON="${ASN_REASON:+$ASN_REASON; }${src}:HTTP ${code}"
+                continue ;;
+            *)
+                body="$out" ;;
+        esac
+        parsed=$(_asn_extract_org "$src" "$body")
+        if [ -n "$parsed" ]; then
+            ASN_ORG="$parsed"
+            return 0
+        fi
+        ASN_REASON="${ASN_REASON:+$ASN_REASON; }${src}:无ASN字段"
+    done
+    return 1
+}
+
 # IP 审查:记录出口IP并统计最近48h内不同IP个数(账号画像风险指标)
 iphist_count() {
     [ -z "$1" ] && { echo 0; return; }
@@ -1473,13 +1569,14 @@ checkdetail() {
             optional_result "客户端语言" fail "跟随系统(中文)"
         fi
     fi
-    # 13. ASN 网络属性(住宅宽带 vs 机房,按目标地区收录主流运营商)
+    # 13. ASN 网络属性(住宅宽带 vs 机房,多源兜底并附脱敏失败原因)
     if check_disabled "ASN属性"; then
         optional_result "ASN属性" ok
     else
-        org=$(curl -s --max-time 6 https://ipinfo.io/json 2>/dev/null | grep '"org"' | cut -d'"' -f4)
+        asn_lookup
+        org="$ASN_ORG"
         case "$org" in
-            '') optional_result "ASN属性" warn "未获取" ;;
+            '') optional_result "ASN属性" warn "未获取${ASN_REASON:+($ASN_REASON)}" ;;
             *Comcast*|*AT\&T*|*Verizon*|*Spectrum*|*Charter*|*Cox*|*T-Mobile*|*Cable*|*esidential*|\
             *NTT*|*KDDI*|*SoftBank*|*IIJ*|*OCN*|*So-net*|\
             *HiNet*|*Chunghwa*|*CHT*|*kbro*|*Taiwan*|*FarEasTone*|*Data\ Communication*|\
@@ -2248,6 +2345,15 @@ quit_cli() {
     return 1
 }
 
+quit_all_claude() {
+    cli_lock_acquire || return 1
+    quit_claude || { echo "FAIL:Claude 桌面版未能退出，请手动退出后重试"; return 1; }
+    quit_cli || { echo "FAIL:Claude Code CLI 未能退出，请手动退出后重试"; return 1; }
+    log "已温和退出 Claude 桌面版与 Claude Code CLI"
+    echo "OK:已退出 Claude 桌面版与 Claude Code CLI"
+    return 0
+}
+
 cli_lock_acquire() {
     [ "${CLI_LOCK_HELD:-0}" -eq 1 ] && return 0
     if mkdir "$BASE/cli-operation.lock" 2>/dev/null; then
@@ -2582,6 +2688,7 @@ case "$operation" in
     cli-info) cli_info ;;
     cli) run_cli "${@:2}" ;;
     cli-current) cli_current ;;
+    quit-claude) quit_all_claude ;;
     snapshot-export) snapshot_export "${2:-}" "${3:-}" "${4:-}" ;;
     snapshot-import) snapshot_import "${2:-}" "${3:-}" "${4:-}" ;;
     export-diagnostics) "$0" _support export-diagnostics "${2:-}" ;;
@@ -2589,7 +2696,7 @@ case "$operation" in
     set-check-config) "$0" _support config-set "${2:-}" ;;
     write-merge-rules) write_merge_rules ;;  # 隐藏入口:供安装器调用,保证两处合并逻辑一致
     fingerprint) fingerprint ;;
-    *) echo "用法: claude-switch.sh check|checkdetail|fix|status|switch A|B|C|D|set-region|set-client <mode>|update [--check|--auto]|update-check|fingerprint|snapshot-export <A|B|C|D> <file>|snapshot-import <file> <A|B|C|D>|open-safe <url>|cli-info|cli [args...]|cli-current|export-diagnostics <file>|get-check-config|set-check-config <json>|diagnose-proxy [--proxy URL|--config FILE]"; exit 2 ;;
+    *) echo "用法: claude-switch.sh check|checkdetail|fix|status|switch A|B|C|D|set-region|set-client <mode>|update [--check|--auto]|update-check|fingerprint|snapshot-export <A|B|C|D> <file>|snapshot-import <file> <A|B|C|D>|open-safe <url>|cli-info|cli [args...]|cli-current|quit-claude|export-diagnostics <file>|get-check-config|set-check-config <json>|diagnose-proxy [--proxy URL|--config FILE]"; exit 2 ;;
 esac
 # checkdetail 分支内部已保存返回码;其他分支取 case 的最终状态。
 # 判断本身会改变 $?，所以必须先捕获 dispatch_rc，再按操作类型落 rc。
